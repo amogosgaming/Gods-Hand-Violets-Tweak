@@ -33,6 +33,8 @@
 
 #include "chart.hpp"
 #include "chart_stream.hpp"
+
+#include "chart_binary.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
 
@@ -992,6 +994,46 @@ private:
 
 }  // namespace
 
+StreamedNotesBuilder::StreamedNotesBuilder(StreamedNotes& out) : out_(out), lastT_(64, -1e300) {}
+
+std::string StreamedNotesBuilder::beginArray() {
+    out_.rangeStart.push_back(uint32_t(out_.notes.size()));
+    std::fill(lastT_.begin(), lastT_.end(), -1e300);
+    return "[{\"__gh_stream\":" + std::to_string(arrays_++) + "}]";
+}
+
+// The reader's addStreamed, step for step (a note the reader would not take
+// as a note, with a noteData outside 0..63, is left out).
+void StreamedNotesBuilder::add(double time, int noteData, double length, const std::string& type) {
+    if (!std::isfinite(time) || noteData < 0 || noteData >= 64 || out_.rangeStart.empty()) return;
+    StreamedNote n;
+    n.time = time;
+    n.length = std::isfinite(length) && length > 0 ? float(length) : 0.0f;
+    const int data = noteData;
+    n.data = uint8_t(data);
+    if (!type.empty()) n.type = out_.typeIndex(type);
+    out_.maxData = std::max(out_.maxData, data);
+    ++out_.dataCount[size_t(data)];
+    ++out_.rawCount;
+    double& last = lastT_[size_t(data)];
+    if (std::fabs(n.time - last) < 1.0 && !out_.notes.empty()) {
+        for (size_t i = out_.notes.size(); i-- > out_.rangeStart.back();) {
+            StreamedNote& k = out_.notes[i];
+            if (k.noteData() == data && std::fabs(k.time - n.time) < 1.0 && k.stack < 255) {
+                k.length = std::max(k.length, n.length);
+                if (n.type && !k.type) k.type = n.type;
+                ++k.stack;
+                return;
+            }
+            if (out_.notes.size() - i > 64) break;
+        }
+    }
+    last = n.time;
+    out_.notes.push_back(n);
+}
+
+void StreamedNotesBuilder::finish() { out_.rangeStart.push_back(uint32_t(out_.notes.size())); }
+
 uint16_t StreamedNotes::typeIndex(const std::string& name) {
     for (size_t i = 0; i < types.size(); ++i)
         if (types[i] == name) return uint16_t(i + 1);
@@ -1206,6 +1248,12 @@ bool loadChartFile(const std::string& path, const std::string& difficulty, Chart
         out.difficulty = difficulty;
         return true;
     }
+    if (isBinaryChart(path)) {  // God's Hand's own binary chart (.ghc)
+        std::string skeleton;
+        StreamedNotes sn;
+        if (!readBinaryChart(path, skeleton, sn, err)) return false;
+        return parseChartStreamed(skeleton, sn, difficulty, out, err, extraKeys);
+    }
     const uint64_t size = fileSize(path);
     if (size == 0 && !fileExistsAt(path)) { err = "cannot read " + path; return false; }
     // A pipe has no size (gh_tests --chart /dev/stdin, fed by a decompressor):
@@ -1269,13 +1317,23 @@ std::string findStringField(std::string_view text, std::string_view key) {
 
 ChartPeek peekChart(const std::string& path) {
     ChartPeek pk;
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return pk;
     constexpr size_t kWin = 96 * 1024;
-    std::string head(kWin, '\0'), tail;
-    head.resize(std::fread(head.data(), 1, kWin, f));
-    const uint64_t size = fileSize(path);
-    if (size > kWin) {
+    std::string head, tail;
+    if (isBinaryChart(path)) {  // its JSON part holds the song's fields
+        if (!readBinarySkeleton(path, head)) return pk;
+        if (head.size() > 2 * kWin) {
+            tail = head.substr(head.size() - kWin);
+            head.resize(kWin);
+        }
+    }
+    FILE* f = head.empty() ? std::fopen(path.c_str(), "rb") : nullptr;
+    if (head.empty() && !f) return pk;
+    if (f) {
+        head.assign(kWin, '\0');
+        head.resize(std::fread(head.data(), 1, kWin, f));
+    }
+    const uint64_t size = f ? fileSize(path) : 0;
+    if (f && size > kWin) {
 #if defined(_WIN32)
         _fseeki64(f, (long long)(size - std::min<uint64_t>(size - kWin, kWin)), SEEK_SET);
 #else
@@ -1284,7 +1342,7 @@ ChartPeek peekChart(const std::string& path) {
         tail.resize(kWin);
         tail.resize(std::fread(tail.data(), 1, kWin, f));
     }
-    std::fclose(f);
+    if (f) std::fclose(f);
     // Top-level fields come either before or after the (huge) notes array.
     // A section's "notes" never contain a "song" string, so the first match
     // in the head or the last in the tail is the song's own.

@@ -161,6 +161,8 @@ private:
     double volumeShownAt_ = -10;
     double perfSince_ = 0;
     double renderClock_ = 0, clockShift_ = 0, renderStartReal_ = 0, lastSwap_ = 0;
+    double renderT0_ = -1;  // the game clock when the recording started (-1: none yet)
+    bool renderTried_ = false;
     FramePacer pacer_;           // Options > GRAPHICS > Low latency
     double frameStart_ = 0;      // when this frame started (real time)
     int pacerMonitor_ = -1;      // the monitor the pacer measured
@@ -217,6 +219,8 @@ std::unique_ptr<State> makeEditorMenu();
 std::unique_ptr<State> makeCharacterEditor();
 std::unique_ptr<State> makeStageEditor();
 std::unique_ptr<State> makeEventEditor();
+std::unique_ptr<State> makeScriptEditor();
+std::unique_ptr<State> makeChartConverter();
 
 // Waits (bounded) for detached preview/compose jobs before shutdown.
 void waitForBackgroundJobs();

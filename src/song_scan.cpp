@@ -12,6 +12,7 @@
 #include <system_error>
 
 #include "chart.hpp"
+#include "chart_binary.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
@@ -166,9 +167,13 @@ bool chartContent(const fs::path& f) {
     return found;
 }
 
-bool hasChartJson(const fs::path& dir) {
-    for (const fs::path& f : listDir(dir, false))
-        if (chartName(toLower(pathStr(f.filename()))) && chartContent(f)) return true;
+// A chart: Psych JSON, or a binary .ghc (which may be the only one there:
+// a chart of a billion notes kept without its JSON).
+bool hasChartFile(const fs::path& dir) {
+    for (const fs::path& f : listDir(dir, false)) {
+        const std::string n = toLower(pathStr(f.filename()));
+        if (endsWithI(n, kBinaryChartExt) ? isBinaryChart(pathStr(f)) : chartName(n) && chartContent(f)) return true;
+    }
     return false;
 }
 
@@ -184,10 +189,10 @@ bool isContentRoot(const fs::path& d) {
     const fs::path data = childDirI(d, "data");
     for (const fs::path& s : listDir(data, true)) {
         const std::string n = pathStr(s.filename());
-        if (equalsI(n, "songs") || (!notSongFolder(n) && hasChartJson(s))) return true;
+        if (equalsI(n, "songs") || (!notSongFolder(n) && hasChartFile(s))) return true;
     }
     for (const fs::path& s : listDir(childDirI(d, "songs"), true))
-        if (hasAudio(s) || hasChartJson(s)) return true;
+        if (hasAudio(s) || hasChartFile(s)) return true;
     return false;
 }
 
@@ -451,12 +456,27 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
     fs::path meta, vsliceChart;
     for (const fs::path& f : listDir(dir, false)) {
         const std::string n = toLower(pathStr(f.filename()));
+        if (endsWithI(n, kBinaryChartExt)) {  // God's Hand's binary chart (.ghc)
+            if (isBinaryChart(pathStr(f))) charts.push_back(f);
+            continue;
+        }
         if (!endsWithI(n, ".json")) continue;
         if (n.find("-metadata") != std::string::npos) { meta = f; continue; }
         if (!chartName(n) || !chartContent(f)) continue;  // dialogue.json and the like
         if (endsWithI(n, "-chart.json")) vsliceChart = f;
         charts.push_back(f);
     }
+    // The same chart as .ghc and as .json: the binary one (it loads faster).
+    std::vector<std::string> binaryStems;
+    for (const fs::path& c : charts)
+        if (endsWithI(pathStr(c.filename()), kBinaryChartExt)) binaryStems.push_back(toLower(pathStr(c.stem())));
+    charts.erase(std::remove_if(charts.begin(), charts.end(),
+                                [&](const fs::path& c) {
+                                    return endsWithI(pathStr(c.filename()), ".json") &&
+                                           std::find(binaryStems.begin(), binaryStems.end(), toLower(pathStr(c.stem()))) !=
+                                               binaryStems.end();
+                                }),
+                 charts.end());
     SongEntry e;
     e.title = prettyName(folder);
     e.subtitle = source;
@@ -741,7 +761,7 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 const size_t n0 = songs.size();
                 scanSongFolder(songs, pathStr(s), pathStr(audio), source, pathStr(root) + "/");
                 // Charts kept in songs/<song>/ too: offered as extra difficulties.
-                if (!audio.empty() && hasChartJson(audio) && songs.size() > n0 && songs.back().songKey == name) {
+                if (!audio.empty() && hasChartFile(audio) && songs.size() > n0 && songs.back().songKey == name) {
                     SongEntry& e = songs.back();
                     for (const fs::path& f : listDir(audio, false)) {
                         ChartPeek pk;
@@ -766,18 +786,18 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                     continue;
                 }
                 if (notSongFolder(name)) continue;
-                if (hasChartJson(s)) {
+                if (hasChartFile(s)) {
                     songFolder(s);
                     continue;
                 }
                 // A folder of song folders: data/charts/<song>/.
                 for (const fs::path& s2 : listDir(s, true))
-                    if (!notSongFolder(pathStr(s2.filename())) && hasChartJson(s2)) songFolder(s2);
+                    if (!notSongFolder(pathStr(s2.filename())) && hasChartFile(s2)) songFolder(s2);
             }
             for (const fs::path& s : listDir(songsDir, true)) {
                 const std::string name = pathStr(s.filename());
                 if (done.count(fuzzyKey(name))) continue;
-                if (hasChartJson(s)) {
+                if (hasChartFile(s)) {
                     scanSongFolder(songs, pathStr(s), pathStr(s), source, pathStr(root) + "/");
                     done.insert(fuzzyKey(name));
                 } else if (hasAudio(s)) {

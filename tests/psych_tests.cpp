@@ -36,13 +36,14 @@ static bool pnear(double a, double b, double eps = 1e-4) { return std::fabs(a - 
 namespace {
 
 struct StubGame : ScriptGame {
-    double pos = 0, health = 1, score = 0;
+    double pos = 0, health = 1, score = 0, iconY = 0;  // iconY: a HUD object the game keeps (iconP1)
     std::vector<std::string> events, prints;
     int countdownStarts = 0;
     double songPosition() const override { return pos; }
     bool getGameProp(std::string_view p, scene::Value& out) override {
         if (p == "health") { out = health; return true; }
         if (p == "songScore") { out = score; return true; }
+        if (p == "iconP1.y") { out = iconY; return true; }
         if (p == "class:ClientPrefs.downScroll") { out = false; return true; }
         if (p == "notes.length" || p == "unspawnNotes.length" || p == "eventNotes.length") { out = 0.0; return true; }
         return false;
@@ -50,6 +51,7 @@ struct StubGame : ScriptGame {
     bool setGameProp(std::string_view p, const scene::Value& v) override {
         if (p == "health") { health = scene::toNum(v); return true; }
         if (p == "songScore") { score = scene::toNum(v); return true; }
+        if (p == "iconP1.y") { iconY = scene::toNum(v); return true; }
         return false;
     }
     void triggerEvent(const std::string& n, const std::string& a, const std::string& b) override {
@@ -428,12 +430,169 @@ std::string modRootOf(const fs::path& file) {
 
 }  // namespace
 
+// Issue #22: extra character scripts (ItsCapp's) make a sprite and only call
+// setObjectOrder, which in Psych inserts it; doTweenY reaches HUD objects the
+// game keeps (iconP1) as setProperty does; a Sparrow atlas keeps the first
+// frame of a repeated name, as Flixel does.
+void testIssue22Scripts() {
+    scene::Scene sc;
+    sc.keys = 4;
+    sc.strums.resize(8);
+    sc.bf = std::make_shared<scene::Character>();
+    sc.bf->kind = scene::Kind::Character;
+    sc.bf->name = "bf";
+    sc.gfMarker = std::make_shared<scene::Sprite>();
+    sc.gfMarker->kind = scene::Kind::Marker;
+    sc.order = {sc.gfMarker, sc.bf};
+    StubGame game;
+    {
+        ScriptHost host(sc, game);
+        host.loadBudget = 0.5;
+        host.callBudget = 0.5;
+        PCHECK(host.loadString("extra.lua", R"LUA(
+            function onCreate()
+                makeLuaSprite('extra', '', 10, 20)
+                makeGraphic('extra', 50, 50, 'FFFFFF')
+                setPropertyLuaSprite('extra', 'alpha', not true)
+                setObjectOrder('extra', 21, false)
+                doTweenY('up', 'iconP1', 500, 1, 'linear')
+                doTweenAlpha('fade', 'iconP1', 0.5, 1, 'linear')
+            end
+        )LUA"));
+        PCHECK(host.errors.empty());
+        if (!host.errors.empty()) std::printf("  %s\n", host.errors[0].c_str());
+        PCHECK(sc.indexOf("extra") == int(sc.order.size()) - 1 && sc.objects["extra"]->inScene);
+        PCHECK(pnear(sc.objects["extra"]->alpha, 0));
+        for (int i = 0; i < 11; ++i) {
+            sc.update(0.1, 100, false);
+            host.dispatchCompletions();
+        }
+        PCHECK(pnear(game.iconY, 500));
+        // Moving it again keeps one copy.
+        PCHECK(host.loadString("order.lua", "function onCreate() setObjectOrder('extra', 0) end"));
+        PCHECK(sc.indexOf("extra") == 0 && std::count(sc.order.begin(), sc.order.end(), sc.objects["extra"]) == 1);
+    }
+    PCHECK(!sc.gameGet && !sc.gameSet);  // gone with the script host
+
+    // Shader layers: several shaders on one sprite, in order.
+    for (const char* n : {"a", "b", "c"}) sc.shaderSources[n] = scene::ShaderSource{"void main(){}", ""};
+    {
+        ScriptHost host(sc, game);
+        host.loadBudget = 0.5;
+        PCHECK(host.loadString("layers.lua", R"LUA(
+            function onCreate()
+                makeLuaSprite('s', '', 0, 0)
+                makeGraphic('s', 10, 10, 'FFFFFF')
+                addLuaSprite('s')
+                setSpriteShader('s', 'a')
+                posB = addSpriteShader('s', 'b')
+                posC = addSpriteShader('s', 'c', 1)
+                order1 = table.concat(getSpriteShaders('s'), ',')
+                moveSpriteShader('s', 1, 3)
+                order2 = table.concat(getSpriteShaders('s'), ',')
+                setSpriteShaderOrder('s', {'b'})
+                order3 = table.concat(getSpriteShaders('s'), ',')
+                setShaderFloat('s', 'k', 2)
+                setShaderFloat('s', 'k', 5, 'c')
+                setShaderFloat('s', 'k', 7, 2)
+                kFirst = getShaderFloat('s', 'k')
+                kC = getShaderFloat('s', 'k', 'c')
+                kA = getShaderFloat('s', 'k', 2)
+                removeSpriteShader('s', 'b')
+                order4 = table.concat(getSpriteShaders('s'), ',')
+                removeSpriteShader('s')
+                n5 = #getSpriteShaders('s')
+                for _, k in ipairs({'posB', 'posC', 'order1', 'order2', 'order3', 'kFirst', 'kC', 'kA', 'order4', 'n5'}) do
+                    setVar(k, _G[k])
+                end
+            end
+        )LUA"));
+        PCHECK(host.errors.empty());
+        if (!host.errors.empty()) std::printf("  %s\n", host.errors[0].c_str());
+        auto g = [&](const char* name) {
+            scene::Value v;
+            sc.getProp(name, v);
+            return scene::toStr(v);
+        };
+        PCHECK(g("posB") == "2" && g("posC") == "1");
+        PCHECK(g("order1") == "c,a,b" && g("order2") == "a,b,c" && g("order3") == "b,a,c");
+        PCHECK(g("kFirst") == "2" && g("kC") == "5" && g("kA") == "7");  // layer 2 is a after the reorder
+        PCHECK(g("order4") == "a,c" && g("n5") == "0");
+    }
+
+    psych::Atlas a;
+    PCHECK(a.parseSparrow(R"XML(<TextureAtlas imagePath="x.png">
+        <SubTexture name="idle0000" x="0" y="0" width="10" height="10"/>
+        <SubTexture name="idle0001" x="10" y="0" width="10" height="10"/>
+        <SubTexture name="idle0000" x="20" y="0" width="10" height="10"/>
+        </TextureAtlas>)XML"));
+    PCHECK(a.frames.size() == 2 && a.byPrefix("idle").size() == 2 && pnear(a.frames[0].x, 0));
+}
+
+// Issue #22: runHaxeCode as Psych mods write it: one-line functions,
+// comprehensions, FlxEase, groups, game.members with insert, Type, Date,
+// Sys, velocity and the characters' arrays.
+void testIssue22Haxe() {
+    scene::Scene sc;
+    sc.keys = 4;
+    sc.strums.resize(8);
+    for (int i = 0; i < 3; ++i) {
+        auto c = std::make_shared<scene::Character>();
+        c->kind = scene::Kind::Character;
+        c->name = i == 0 ? "bf" : i == 1 ? "dad" : "gf";
+        (i == 0 ? sc.bf : i == 1 ? sc.dad : sc.gf) = c;
+    }
+    sc.gfMarker = std::make_shared<scene::Sprite>();
+    sc.gfMarker->kind = scene::Kind::Marker;
+    sc.order = {sc.gfMarker, sc.gf, sc.dad, sc.bf};
+    StubGame game;
+    ScriptHost host(sc, game);
+    host.callBudget = 0.5;
+    host.loadBudget = 0.5;
+    const char* checks[] = {
+        "var arr = [1, 2, 3]; arr.map(function(x) return x * 2)[2] == 6 && arr.filter(function(x) return x > 1).length == 2;",
+        "function add(a, ?b = 3) return a + b; add(1) == 4 && add(1, 1) == 2;",
+        "var sq = [for (i in 0...4) i * i]; sq.length == 4 && sq[3] == 9;",
+        "var odd = [for (x in [1, 2, 3, 4, 5]) if (x % 2 == 1) x]; odd.join(',') == '1,3,5';",
+        "var m = [for (i in 0...3) 'k' + i => i * 10]; m.get('k2') == 20;",
+        "var pairs = [for (a in 0...2) for (b in 0...2) a * 2 + b]; pairs.join('') == '0123';",
+        "FlxEase.circOut(0.5) > 0.5 && FlxEase.linear(0.25) == 0.25;",
+        "var g = new FlxTypedGroup(); g.add(new FlxSprite()); g.add(new FlxSprite()); var n = 0; g.forEach(function(s) n++); g.length == 2 && n == 2 && g.members.length == 2;",
+        "var sg = new FlxSpriteGroup(); var a = new FlxSprite(10, 0); sg.add(a); sg.x = 100; a.x == 110 && sg.x == 100;",
+        "var spr = new FlxSprite(); game.insert(game.members.indexOf(game.dadGroup), spr); game.members.indexOf(spr) == game.members.indexOf(game.dadGroup) - 1;",
+        "var grp = new FlxTypedGroup(); var x1 = new FlxSprite(); grp.add(x1); game.add(grp); var x2 = new FlxSprite(); grp.add(x2); game.members.indexOf(x2) > game.members.indexOf(x1) && game.members.indexOf(x1) >= 0;",
+        "Type.resolveClass('flixel.FlxG') != null && Type.getClassName(Type.resolveClass('flixel.text.FlxText')) == 'FlxText';",
+        "Date.now().getTime() > 1e12 && Sys.time() > 1e9 && Date.now().getFullYear() >= 2024;",
+        "game.dad.cameraPosition[0] = 40; game.dad.cameraPosition[0] == 40 && game.dad.positionArray.length == 2;",
+        "game.dadGroup.members.length == 1;",
+        "var mover = new FlxSprite(0, 0); game.add(mover); mover.velocity.x = 100; setVar('mover', mover); true;",
+    };
+    for (const char* code : checks) {
+        hx::Interp ip(sc, game, &host, host.hxShared);
+        hx::Value r;
+        std::string err;
+        const bool ok = ip.run(code, "issue22", r, err) && r.truthy();
+        if (!ok) std::printf("  HScript: %s | %s\n", code, err.c_str());
+        PCHECK(ok);
+    }
+    PCHECK(pnear(sc.dad->camX, 40));
+    // velocity moves the sprite as the scene runs (Flixel updateMotion).
+    scene::Sprite* mover = nullptr;
+    for (auto& kv : sc.objects)
+        if (std::abs(kv.second->velX - 100) < 1e-3) mover = kv.second.get();
+    PCHECK(mover != nullptr);
+    for (int i = 0; i < 5; ++i) sc.update(0.1, 100, false);
+    PCHECK(mover && pnear(mover->x, 50));
+}
+
 void runPsychTests() {
     testAtlas();
     testCharacterAndStage();
     testEventsAndMeta();
     testSceneModel();
     testLua();
+    testIssue22Scripts();
+    testIssue22Haxe();
 }
 
 // Loads every atlas, character, stage and Lua script under dir.
@@ -561,6 +720,7 @@ int runPsychCorpus(const char* dir) {
 
 // ------------------------------------------------- AutoChart, replays, zips --
 #include "autochart.hpp"
+#include "chart_binary.hpp"
 #include "chart_stream.hpp"
 #include "effects.hpp"
 #include "shader_glsl.hpp"
@@ -776,6 +936,137 @@ void testChartStreaming() {
             PCHECK(sameAsOneThread(longer, "comments longer than the read buffer") == tricky1 + 1);
         }
         std::filesystem::remove(tpath);
+    }
+
+    // Binary charts (.ghc, issue #22): the same chart, notes, events and song
+    // data as the JSON, in a fraction of the size; peeks read their song
+    // fields; a damaged file is an error, not a crash.
+    {
+        namespace fs = std::filesystem;
+        const std::string ghc = (fs::temp_directory_path() / "gh_binary_chart.ghc").string();
+        ConvertStats st;
+        std::string e;
+        PCHECK(convertChartToBinary(path, ghc, e, &st));
+        if (!e.empty()) std::printf("  binary chart: %s\n", e.c_str());
+        PCHECK(isBinaryChart(ghc) && !isBinaryChart(path));
+        PCHECK(st.outBytes > 0 && st.outBytes * 5 < st.inBytes);
+        std::printf("  binary chart: %llu notes, %llu bytes of JSON -> %llu (%.1fx smaller)\n", (unsigned long long)st.notes,
+                    (unsigned long long)st.inBytes, (unsigned long long)st.outBytes, double(st.inBytes) / double(std::max<uint64_t>(1, st.outBytes)));
+        Chart fromJson, fromBin;
+        PCHECK(loadChartFile(path, "Hard", fromJson, e, {}, 1));
+        PCHECK(loadChartFile(ghc, "Hard", fromBin, e));
+        bool same = fromJson.notes.size() == fromBin.notes.size() && fromJson.notes.size() > 1000;
+        for (size_t i = 0; same && i < fromJson.notes.size(); ++i) {
+            const Note& a = fromJson.notes[i];
+            const Note& b = fromBin.notes[i];
+            same = std::fabs(a.time - b.time) < 1e-5 && std::fabs(a.length - b.length) < 1e-2 && a.lane == b.lane && a.side == b.side &&
+                   a.kind == b.kind && a.flags == b.flags && a.stack == b.stack && a.type == b.type;
+        }
+        PCHECK(same);
+        PCHECK(fromBin.title == fromJson.title && fromBin.stage == fromJson.stage && fromBin.opponent == fromJson.opponent &&
+               fromBin.events.size() == fromJson.events.size() && fromBin.keys == fromJson.keys &&
+               fromBin.noteTypes == fromJson.noteTypes && std::fabs(fromBin.speed - fromJson.speed) < 1e-9);
+        const ChartPeek pb = peekChart(ghc);
+        PCHECK(pb.song == "Blocked" && pb.player2 == "bambi" && pb.isChart);
+
+        // The chart editor's .ghc without a JSON (StreamedNotesBuilder): the
+        // notes it builds are exactly what reading the same chart's JSON
+        // gives - stacks past 255, notes under 1 ms apart, exactly 1 ms
+        // apart, types joining an untyped stack, times with many decimals.
+        {
+            struct N { double t; int d; double l; const char* type; int copies; };
+            const std::vector<std::vector<N>> secs = {
+                {{0, 0, 0, "", 1}, {150.25, 1, 120.5, "", 1}, {500, 2, 0, "", 300}, {600, 3, 0, "", 1}, {600.4, 3, 30, "", 1}},
+                {{700, 0, 0, "", 1}, {701, 0, 0, "", 1}, {800, 5, 0, "Hurt Note", 1}, {900, 6, 0, "", 1}, {900.2, 6, 0, "Alt Note", 1},
+                 {1234.56789012, 7, 0.0000004, "", 1}},
+                {},
+                {{3000, 4, 999.9999996, "Hurt Note", 2}, {3000, 1, 0, "", 600}},
+            };
+            auto fmt = [](double v) {  // as the editor writes numbers
+                char b[40];
+                if (v == std::floor(v) && std::fabs(v) < 1e15) std::snprintf(b, sizeof b, "%.1f", v);
+                else std::snprintf(b, sizeof b, "%.6f", v);
+                std::string o = b;
+                while (o.size() > 1 && o.back() == '0' && o[o.size() - 2] != '.') o.pop_back();
+                return o;
+            };
+            std::string json = "{\"song\": {\"song\": \"Built\", \"bpm\": 150, \"speed\": 2.5, \"player1\": \"bf\", \"player2\": \"dad\", "
+                               "\"events\": [[100, [[\"Hey!\", \"BF\", \"0.6\"]]]], \"notes\": [";
+            std::string skeleton = json;
+            StreamedNotes built;
+            StreamedNotesBuilder b(built);
+            for (size_t k = 0; k < secs.size(); ++k) {
+                const std::string head = std::string(k ? "," : "") + "{\"sectionBeats\": 4, \"mustHitSection\": " + (k % 2 ? "false" : "true") +
+                                         ", \"sectionNotes\": ";
+                json += head + "[";
+                skeleton += head + b.beginArray();
+                bool first = true;
+                for (const N& n : secs[k])
+                    for (int c = 0; c < n.copies; ++c) {
+                        json += std::string(first ? "" : ", ") + "[" + fmt(n.t) + ", " + std::to_string(n.d) + ", " + fmt(n.l) +
+                                (*n.type ? std::string(", \"") + n.type + "\"" : std::string()) + "]";
+                        first = false;
+                        b.add(std::round(n.t * 1e6) / 1e6, n.d, std::round(n.l * 1e6) / 1e6, n.type);
+                    }
+                json += "]}";
+                skeleton += "}";
+            }
+            json += "]}}";
+            skeleton += "]}}";
+            b.finish();
+            const std::string jpath = (fs::temp_directory_path() / "gh_builder_chart.json").string();
+            std::ofstream(jpath, std::ios::binary | std::ios::trunc) << json;
+            for (int threads : {0, 3}) {
+                std::string skel, err2;
+                StreamedNotes read;
+                PCHECK(streamChartSkeleton(jpath, skel, read, err2, threads, threads ? 64 : 0));
+                bool same = read.notes.size() == built.notes.size() && read.rangeStart == built.rangeStart &&
+                            read.types == built.types && read.dataCount == built.dataCount && read.rawCount == built.rawCount &&
+                            read.maxData == built.maxData;
+                for (size_t i = 0; same && i < read.notes.size(); ++i) {
+                    const StreamedNote& x = read.notes[i];
+                    const StreamedNote& y = built.notes[i];
+                    same = x.time == y.time && x.length == y.length && x.data == y.data && x.stack == y.stack && x.type == y.type;
+                }
+                if (!same) std::printf("  builder notes differ from the JSON's (%d threads)\n", threads);
+                PCHECK(same);
+            }
+            PCHECK(built.rawCount == 304 + 6 + 602 && built.types.size() == 2);
+            // Its .ghc loads as the same chart as the JSON.
+            const std::string bpath = (fs::temp_directory_path() / "gh_builder_chart.ghc").string();
+            std::string err2;
+            PCHECK(writeBinaryChart(bpath, skeleton, built, 3, err2));
+            Chart cj, cb;
+            PCHECK(loadChartFile(jpath, "Normal", cj, err2, {}, 1) && loadChartFile(bpath, "Normal", cb, err2));
+            bool same = cj.notes.size() == cb.notes.size() && cj.events.size() == cb.events.size() && cj.title == cb.title &&
+                        cj.noteTypes == cb.noteTypes && cj.notes.size() > 5;
+            for (size_t i = 0; same && i < cj.notes.size(); ++i) {
+                const Note& x = cj.notes[i];
+                const Note& y = cb.notes[i];
+                same = std::fabs(x.time - y.time) < 1e-5 && std::fabs(x.length - y.length) < 1e-2 && x.lane == y.lane && x.side == y.side &&
+                       x.stack == y.stack && x.type == y.type && x.flags == y.flags;
+            }
+            PCHECK(same);
+            fs::remove(jpath);
+            fs::remove(bpath);
+        }
+        // Damaged: cut short, or a byte changed in the notes.
+        std::string bytes;
+        {
+            std::ifstream in(ghc, std::ios::binary);
+            bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        const std::string bad = ghc + ".bad";
+        std::ofstream(bad, std::ios::binary) << bytes.substr(0, bytes.size() / 2);
+        Chart broken;
+        PCHECK(!loadChartFile(bad, "Hard", broken, e) && !e.empty());
+        std::string flipped = bytes;
+        flipped[flipped.size() - 10] = char(flipped[flipped.size() - 10] ^ 0x55);
+        std::ofstream(bad, std::ios::binary | std::ios::trunc) << flipped;
+        e.clear();
+        PCHECK(!loadChartFile(bad, "Hard", broken, e));
+        fs::remove(bad);
+        fs::remove(ghc);
     }
 
     // The chart cache: the first load keeps the notes, the second reads them

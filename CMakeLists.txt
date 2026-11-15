@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.8.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,6 +87,7 @@ add_library(gh_core STATIC
   src/json.cpp
   src/chart.cpp
   src/chart_stream.cpp
+  src/chart_binary.cpp
   src/basegame.cpp
   src/shader_glsl.cpp
   src/effects.cpp
@@ -343,7 +344,14 @@ endif()
 
 # Streamed song audio is tested with raylib's decoders when raylib is built.
 if(GH_BUILD_TESTS AND TARGET raylib)
-  target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio_decode.cpp src/render_mode.cpp src/process.cpp)
+  target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio.cpp src/audio_decode.cpp src/platform.cpp src/folder_picker.cpp
+                 src/render_mode.cpp src/process.cpp)
   target_link_libraries(gh_tests PRIVATE raylib)
+  if(WIN32)
+    target_link_libraries(gh_tests PRIVATE shell32 ole32)  # platform.cpp's folder dialog
+  endif()
+  if(APPLE)
+    target_link_libraries(gh_tests PRIVATE "-framework Cocoa")
+  endif()
   target_compile_definitions(gh_tests PRIVATE GH_AUDIO_TESTS=1)
 endif()

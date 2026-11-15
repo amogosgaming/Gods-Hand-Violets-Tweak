@@ -14,6 +14,7 @@
 // the mouse. Event editor: custom events (custom_events/<name>.txt and .lua)
 // from a template. Files keep the fields the editors do not know.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -21,9 +22,14 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <thread>
+#include <mutex>
+#include <cstring>
 
 #include "app.hpp"
 #include "basegame.hpp"
+#include "chart_binary.hpp"
+#include "chart_stream.hpp"
 #include "common.hpp"
 #include "editor_ui.hpp"
 #include "gfx.hpp"
@@ -428,13 +434,15 @@ bool overPanel(const Ui& ui) { return ui.mouse.x >= kPanelX - 8 || !ui.dropId.em
 
 // Scripts in the editors: a stage's Lua builds its sprites; nothing else happens.
 struct EditorGame : ScriptGame {
-    double songPosition() const override { return 0; }
+    double clockMs = 0;     // the stage editor runs a clock so scripts and shaders move
+    bool shaders = false;   // the stage editor shows shaders (as the Shaders option says)
+    double songPosition() const override { return clockMs; }
     bool getGameProp(std::string_view, scene::Value&) override { return false; }
     bool setGameProp(std::string_view, const scene::Value&) override { return false; }
     void triggerEvent(const std::string&, const std::string&, const std::string&) override {}
     void debugPrint(const std::string&, uint32_t) override {}
     void debugNotice(const std::string&, bool, bool) override {}
-    bool shadersEnabled() override { return false; }
+    bool shadersEnabled() override { return shaders; }
 };
 
 // A line of news at the bottom of an editor.
@@ -456,6 +464,538 @@ struct Status {
     }
 };
 
+// ======================================================= chart converter ==
+// Issue #22: a mod's charts to God's Hand's binary format (.ghc), each one
+// next to its JSON (kept: Psych and the other engines read that). When both
+// are there the game loads the .ghc: a fraction of the size, read faster.
+
+class ChartConverterState : public State {
+public:
+    void enter() override {
+        mod_ = currentMod();
+        rows();
+    }
+    ~ChartConverterState() override {
+        stop_ = true;
+        if (worker_.joinable()) worker_.join();
+    }
+    void update(double) override {
+        App& a = app();
+        Input& in = a.input;
+        if (running_.load()) {
+            if (in.back()) stop_ = true;  // stops after the chart being converted
+            return;
+        }
+        if (worker_.joinable()) {  // finished: the song list sees the new files
+            worker_.join();
+            a.library.scan(a.base);
+            rows();
+        }
+        if (in.back()) {
+            sfxPlay(Sfx::Cancel);
+            a.change(makeEditorMenu());
+            return;
+        }
+        const int n = int(rows_.size());
+        if (n == 0) return;
+        if (in.up()) sel_ = (sel_ + n - 1) % n;
+        if (in.down()) sel_ = (sel_ + 1) % n;
+        if (in.accept()) start({size_t(sel_)});
+        if (in.pressed(KEY_A)) {
+            std::vector<size_t> all;
+            for (size_t i = 0; i < rows_.size(); ++i) all.push_back(i);
+            start(all);
+        }
+    }
+    void draw() override {
+        App& a = app();
+        gfx::beginCanvas();
+        drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
+        DrawRectangleRec({40, 30, gfx::W - 80, gfx::H - 90}, fade(BLACK, 0.6f));
+        gfx::text(FontId::Ui, "Binary charts (.ghc)   mod: " + modLabel(mod_), 60, 44, 26, kGold);
+        gfx::text(FontId::Ui, "Each chart gets a .ghc beside its JSON (the JSON stays, for Psych). The game loads the .ghc.", 60, 78,
+                  17, fade(kIvory, 0.75f));
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (rows_.empty()) gfx::text(FontId::Ui, "No charts in this mod.", 60, 130, 22, kIvory);
+        const int visible = 17, first = std::clamp(sel_ - visible / 2, 0, std::max(0, int(rows_.size()) - visible));
+        for (int i = first; i < std::min(int(rows_.size()), first + visible); ++i) {
+            const Row& r = rows_[size_t(i)];
+            const float y = 116.0f + float(i - first) * 30.0f;
+            if (i == sel_) DrawRectangleRec({52, y - 3, gfx::W - 104, 28}, fade(kGold, 0.18f));
+            gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y, 19, i == sel_ ? kGold : kIvory);
+            gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y, 19, fade(kIvory, 0.8f), Align::Right);
+            gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y, 19, fade(kIvory, 0.8f), Align::Right);
+            gfx::text(FontId::Ui, r.note, 870, y, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
+        }
+        gfx::text(FontId::Ui, "JSON", 700, 98, 15, fade(kIvory, 0.5f), Align::Right);
+        gfx::text(FontId::Ui, ".ghc", 840, 98, 15, fade(kIvory, 0.5f), Align::Right);
+        hints(running_.load() ? "Converting...   ESC stop" : "UP/DOWN choose   ENTER convert this one   A convert all   ESC back");
+        gfx::endCanvas();
+    }
+    TouchLayout touchLayout() const override { return {}; }
+
+private:
+    struct Row {
+        std::string song, diff, json, ghc, note;
+        uint64_t jsonBytes = 0, ghcBytes = 0;
+        bool bad = false;
+    };
+
+    static std::string megabytes(uint64_t b) {
+        return b >= 1000000 ? TextFormat("%.1f MB", double(b) / 1e6) : TextFormat("%.1f KB", double(b) / 1e3);
+    }
+
+    // The mod's charts that are JSON or .ghc files (not FL Studio projects or
+    // the V-Slice ones, which hold several difficulties).
+    void rows() {
+        std::lock_guard<std::mutex> lk(mtx_);
+        rows_.clear();
+        std::set<std::string> seen;
+        for (const SongEntry& e : app().library.songs()) {
+            if (e.builtin || e.autoChart || !e.metaPath.empty()) continue;
+            if (!mod_.name.empty() && e.pack != mod_.name) continue;
+            for (size_t i = 0; i < e.diffs.size() && i < e.chartPaths.size(); ++i) {
+                const std::string& p = e.chartPaths[i];
+                std::string base;
+                if (endsWithI(p, ".json")) base = p.substr(0, p.size() - 5);
+                else if (endsWithI(p, kBinaryChartExt)) base = p.substr(0, p.size() - std::string(kBinaryChartExt).size());
+                else continue;
+                if (!seen.insert(base).second) continue;
+                Row r;
+                r.song = e.title;
+                r.diff = e.diffs[i];
+                std::error_code ec;
+                if (fs::exists(toPath(base + ".json"), ec)) {
+                    r.json = base + ".json";
+                    r.jsonBytes = fileSize(r.json);
+                }
+                if (fs::exists(toPath(base + kBinaryChartExt), ec)) {
+                    r.ghc = base + kBinaryChartExt;
+                    r.ghcBytes = fileSize(r.ghc);
+                }
+                if (r.json.empty()) r.note = "only the .ghc";
+                rows_.push_back(std::move(r));
+            }
+        }
+        sel_ = std::clamp(sel_, 0, std::max(0, int(rows_.size()) - 1));
+    }
+
+    void start(std::vector<size_t> which) {
+        if (running_.load() || which.empty()) return;
+        stop_ = false;
+        running_ = true;
+        worker_ = std::thread([this, which] {
+            for (size_t i : which) {
+                if (stop_.load()) break;
+                std::string json;
+                {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    if (i >= rows_.size() || rows_[i].json.empty()) continue;
+                    json = rows_[i].json;
+                    rows_[i].note = "converting...";
+                    rows_[i].bad = false;
+                }
+                const std::string ghc = json.substr(0, json.size() - 5) + kBinaryChartExt;
+                ConvertStats st;
+                std::string err;
+                const bool ok = convertChartToBinary(json, ghc, err, &st);
+                std::lock_guard<std::mutex> lk(mtx_);
+                Row& r = rows_[i];
+                r.bad = !ok;
+                if (ok) {
+                    r.ghc = ghc;
+                    r.ghcBytes = st.outBytes;
+                    r.note = TextFormat("%.1fx smaller, %.2f s", double(st.inBytes) / double(std::max<uint64_t>(1, st.outBytes)), st.seconds);
+                } else {
+                    r.note = err;
+                }
+            }
+            running_ = false;
+        });
+    }
+
+    ModChoice mod_;
+    std::vector<Row> rows_;
+    int sel_ = 0;
+    std::mutex mtx_;
+    std::thread worker_;
+    std::atomic<bool> running_{false}, stop_{false};
+};
+
+// ========================================================= script editor ==
+// Issue #22: the mod's scripts (Lua, HScript) and shaders, edited in the
+// game: a file list, line numbers, colours for keywords, strings and
+// comments, undo, and saving with a .bak of the file as it was.
+
+class ScriptEditorState : public State {
+public:
+    void enter() override {
+        mod_ = currentMod();
+        listFiles();
+        if (!files_.empty()) open(0);
+    }
+    bool keyReserved(int) const override { return true; }  // every key types
+
+    void update(double dt) override {
+        App& a = app();
+        Input& in = a.input;
+        const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
+        if (in.pressed(KEY_ESCAPE)) {
+            if (dirty_ && !leaveArmed_) {
+                status_ = "Unsaved changes: ESC again to leave without saving (CTRL+S saves)";
+                leaveArmed_ = true;
+            } else {
+                a.change(makeEditorMenu());
+            }
+            return;
+        }
+        if (ctrl && in.pressed(KEY_S)) save();
+        if (ctrl && in.pressed(KEY_Z)) undo();
+        if (ctrl && in.pressed(KEY_N)) newFile();
+        if (ctrl && (in.pressed(KEY_PAGE_UP) || in.pressed(KEY_PAGE_DOWN)) && !files_.empty()) {
+            const int n = int(files_.size());
+            open(size_t(((cur_ + (in.pressed(KEY_PAGE_UP) ? -1 : 1)) % n + n) % n));
+            return;
+        }
+        mouse(in);
+        if (lines_.empty()) lines_.push_back("");
+        if (!ctrl)
+            for (char32_t c : in.typed())
+                if (c >= 32 && c != 127) insert(utf8(c));
+        auto hit = [&](int key) { return repeat(in, key, dt); };
+        if (hit(KEY_ENTER) || hit(KEY_KP_ENTER)) newline();
+        if (hit(KEY_TAB)) insert("    ");
+        if (hit(KEY_BACKSPACE)) backspace();
+        if (hit(KEY_DELETE)) del();
+        if (hit(KEY_LEFT)) left();
+        if (hit(KEY_RIGHT)) right();
+        if (hit(KEY_UP)) moveLine(-1);
+        if (hit(KEY_DOWN)) moveLine(1);
+        if (hit(KEY_PAGE_UP) && !ctrl) moveLine(-kRows);
+        if (hit(KEY_PAGE_DOWN) && !ctrl) moveLine(kRows);
+        if (in.pressed(KEY_HOME)) cx_ = 0;
+        if (in.pressed(KEY_END)) cx_ = int(lines_[size_t(cy_)].size());
+        if (cy_ < top_) top_ = cy_;
+        if (cy_ >= top_ + kRows) top_ = cy_ - kRows + 1;
+    }
+
+    void draw() override {
+        gfx::beginCanvas();
+        ClearBackground(Color{14, 10, 22, 255});
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{14, 10, 22, 255});
+        // Files
+        DrawRectangleRec({0, 0, kListW, gfx::H}, Color{10, 7, 16, 255});
+        gfx::text(FontId::Ui, "Scripts: " + modLabel(mod_), 12, 10, 18, kGold);
+        for (size_t i = 0; i < files_.size() && i < 40; ++i) {
+            const float y = 40.0f + float(i) * 17.0f;
+            if (int(i) == cur_) DrawRectangleRec({4, y - 1, kListW - 8, 17}, fade(kGold, 0.2f));
+            gfx::text(FontId::Ui, files_[i].label, 10, y, 14, int(i) == cur_ ? kGold : fade(kIvory, 0.75f));
+        }
+        // Text
+        const float x0 = kListW + 56, y0 = 40;
+        gfx::text(FontId::Ui, (cur_ >= 0 ? files_[size_t(cur_)].label : std::string("(no file)")) + (dirty_ ? "  *" : ""), kListW + 12,
+                  10, 18, kIvory);
+        for (int k = 0; k < kRows && top_ + k < int(lines_.size()); ++k) {
+            const int ln = top_ + k;
+            const float y = y0 + float(k) * kLineH;
+            if (ln == cy_) DrawRectangleRec({kListW, y - 1, gfx::W - kListW, kLineH}, Color{30, 22, 46, 255});
+            gfx::text(FontId::Ui, std::to_string(ln + 1), x0 - 10, y, 15, fade(kIvory, 0.35f), Align::Right);
+            drawLine(lines_[size_t(ln)], x0, y);
+        }
+        if (cy_ >= top_ && cy_ < top_ + kRows && std::fmod(GetTime(), 1.0) < 0.6) {
+            const std::string& l = lines_[size_t(cy_)];
+            const float cx = x0 + gfx::measure(FontId::Ui, l.substr(0, size_t(std::min<int>(cx_, int(l.size())))), 16).x;
+            DrawRectangleRec({cx, y0 + float(cy_ - top_) * kLineH, 2, kLineH - 2}, kGold);
+        }
+        if (!status_.empty()) gfx::text(FontId::Ui, status_, kListW + 12, gfx::H - 52, 16, kGold);
+        hints("Type to edit   CTRL+S save   CTRL+Z undo   CTRL+N new script   CTRL+PGUP/PGDN file   click a file   ESC back");
+        gfx::endCanvas();
+    }
+    TouchLayout touchLayout() const override { return {}; }
+
+private:
+    static constexpr float kListW = 300, kLineH = 19;
+    static constexpr int kRows = 33;
+    struct File {
+        std::string path, label;
+    };
+
+    void listFiles() {
+        files_.clear();
+        static const char* exts[] = {".lua", ".hx", ".hxs", ".hscript", ".frag", ".vert"};
+        for (const std::string& root : mod_.roots) {
+            std::error_code ec;
+            for (fs::recursive_directory_iterator it(toPath(root), ec), end; !ec && it != end && files_.size() < 2000; it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                const std::string p = pathStr(it->path());
+                for (const char* e : exts)
+                    if (endsWithI(p, e)) {
+                        std::string label = pathStr(fs::relative(it->path(), toPath(root), ec));
+                        files_.push_back({p, label});
+                        break;
+                    }
+            }
+        }
+        std::sort(files_.begin(), files_.end(), [](const File& a, const File& b) { return a.label < b.label; });
+    }
+
+    void open(size_t i) {
+        if (i >= files_.size()) return;
+        if (dirty_) save();
+        cur_ = int(i);
+        lines_.clear();
+        std::string text;
+        if (std::FILE* f = std::fopen(files_[i].path.c_str(), "rb")) {
+            char buf[65536];
+            size_t n;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+            std::fclose(f);
+        }
+        std::string line;
+        for (char c : text) {
+            if (c == '\r') continue;
+            if (c == '\n') {
+                lines_.push_back(line);
+                line.clear();
+            } else {
+                line += c;
+            }
+        }
+        lines_.push_back(line);
+        cy_ = cx_ = top_ = 0;
+        undo_.clear();
+        dirty_ = leaveArmed_ = false;
+        backedUp_ = false;
+        status_.clear();
+    }
+
+    void save() {
+        if (cur_ < 0) return;
+        const std::string& p = files_[size_t(cur_)].path;
+        std::error_code ec;
+        if (!backedUp_ && fs::exists(toPath(p), ec) && !fs::exists(toPath(p + ".bak"), ec)) fs::copy_file(toPath(p), toPath(p + ".bak"), ec);
+        backedUp_ = true;
+        std::string text;
+        for (size_t i = 0; i < lines_.size(); ++i) text += lines_[i] + (i + 1 < lines_.size() ? "\n" : "");
+        std::FILE* f = std::fopen(p.c_str(), "wb");
+        const bool ok = f && std::fwrite(text.data(), 1, text.size(), f) == text.size();
+        if (f) std::fclose(f);
+        status_ = ok ? "Saved " + files_[size_t(cur_)].label : "Could not save " + p;
+        if (ok) dirty_ = false;
+    }
+
+    void newFile() {
+        if (mod_.roots.empty()) return;
+        if (dirty_) save();
+        const fs::path dir = toPath(mod_.roots[0]) / "scripts";
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        fs::path p;
+        for (int k = 1; k < 1000; ++k) {
+            p = dir / ("new_script" + (k > 1 ? std::to_string(k) : std::string()) + ".lua");
+            if (!fs::exists(p, ec)) break;
+        }
+        std::FILE* f = std::fopen(pathStr(p).c_str(), "wb");
+        if (!f) {
+            status_ = "Could not make " + pathStr(p);
+            return;
+        }
+        const char* tmpl = "function onCreate()\n    -- runs when the song starts\nend\n\nfunction onUpdate(elapsed)\nend\n";
+        std::fwrite(tmpl, 1, std::strlen(tmpl), f);
+        std::fclose(f);
+        listFiles();
+        for (size_t i = 0; i < files_.size(); ++i)
+            if (files_[i].path == pathStr(p)) open(i);
+        status_ = "New script: " + pathStr(p.filename()) + " (scripts/ runs in every song of the mod)";
+    }
+
+    // A key held repeats (as in any text editor).
+    bool repeat(const Input& in, int key, double dt) {
+        if (in.pressed(key)) {
+            held_[key] = 0;
+            return true;
+        }
+        if (!in.isDown(key)) {
+            held_.erase(key);
+            return false;
+        }
+        double& t = held_[key];
+        const double before = t;
+        t += dt;
+        return t > 0.4 && std::floor((t - 0.4) / 0.035) != std::floor((before - 0.4) / 0.035);
+    }
+
+    void mouse(const Input& in) {
+        const Vector2 m = gfx::toCanvas(GetMousePosition());
+        if (in.wheel() != 0 && m.x > kListW) {
+            top_ = std::clamp(top_ - int(in.wheel() * 3), 0, std::max(0, int(lines_.size()) - 1));
+        }
+        if (!in.mousePressed(MOUSE_BUTTON_LEFT)) return;
+        if (m.x < kListW) {
+            const int i = int((m.y - 40) / 17);
+            if (i >= 0 && i < int(files_.size())) open(size_t(i));
+            return;
+        }
+        const int ln = top_ + int((m.y - 40) / kLineH);
+        if (ln < 0 || ln >= int(lines_.size())) return;
+        cy_ = ln;
+        const std::string& l = lines_[size_t(ln)];
+        const float x0 = kListW + 56;
+        cx_ = int(l.size());
+        for (size_t k = 0; k <= l.size(); ++k)
+            if (x0 + gfx::measure(FontId::Ui, l.substr(0, k), 16).x > m.x) {
+                cx_ = int(k == 0 ? 0 : k - 1);
+                break;
+            }
+    }
+
+    void remember() {
+        undo_.push_back({lines_, {cy_, cx_}});
+        if (undo_.size() > 200) undo_.erase(undo_.begin());
+        dirty_ = true;
+        leaveArmed_ = false;
+    }
+    void undo() {
+        if (undo_.empty()) return;
+        lines_ = std::move(undo_.back().first);
+        cy_ = undo_.back().second.first;
+        cx_ = undo_.back().second.second;
+        undo_.pop_back();
+        dirty_ = true;
+    }
+    std::string& line() { return lines_[size_t(cy_)]; }
+    void clampCx() { cx_ = std::clamp(cx_, 0, int(line().size())); }
+    void insert(const std::string& s) {
+        clampCx();
+        // One undo step per word typed, not per letter.
+        if (undo_.empty() || s == " " || s.size() > 1) remember();
+        line().insert(size_t(cx_), s);
+        cx_ += int(s.size());
+        dirty_ = true;
+    }
+    void newline() {
+        remember();
+        clampCx();
+        std::string rest = line().substr(size_t(cx_));
+        line().erase(size_t(cx_));
+        size_t indent = 0;  // the new line starts where this one does
+        while (indent < line().size() && (line()[indent] == ' ' || line()[indent] == '\t')) ++indent;
+        const std::string pad = line().substr(0, indent);
+        lines_.insert(lines_.begin() + cy_ + 1, pad + rest);
+        ++cy_;
+        cx_ = int(pad.size());
+    }
+    void backspace() {
+        clampCx();
+        if (cx_ > 0) {
+            remember();
+            int k = cx_ - 1;
+            while (k > 0 && (static_cast<unsigned char>(line()[size_t(k)]) & 0xC0) == 0x80) --k;  // a whole UTF-8 letter
+            line().erase(size_t(k), size_t(cx_ - k));
+            cx_ = k;
+        } else if (cy_ > 0) {
+            remember();
+            cx_ = int(lines_[size_t(cy_ - 1)].size());
+            lines_[size_t(cy_ - 1)] += line();
+            lines_.erase(lines_.begin() + cy_);
+            --cy_;
+        }
+    }
+    void del() {
+        clampCx();
+        if (cx_ < int(line().size())) {
+            remember();
+            int k = cx_ + 1;
+            while (k < int(line().size()) && (static_cast<unsigned char>(line()[size_t(k)]) & 0xC0) == 0x80) ++k;
+            line().erase(size_t(cx_), size_t(k - cx_));
+        } else if (cy_ + 1 < int(lines_.size())) {
+            remember();
+            line() += lines_[size_t(cy_ + 1)];
+            lines_.erase(lines_.begin() + cy_ + 1);
+        }
+    }
+    void left() {
+        clampCx();
+        if (cx_ > 0) {
+            --cx_;
+            while (cx_ > 0 && (static_cast<unsigned char>(line()[size_t(cx_)]) & 0xC0) == 0x80) --cx_;
+        } else if (cy_ > 0) {
+            --cy_;
+            cx_ = int(line().size());
+        }
+    }
+    void right() {
+        clampCx();
+        if (cx_ < int(line().size())) {
+            ++cx_;
+            while (cx_ < int(line().size()) && (static_cast<unsigned char>(line()[size_t(cx_)]) & 0xC0) == 0x80) ++cx_;
+        } else if (cy_ + 1 < int(lines_.size())) {
+            ++cy_;
+            cx_ = 0;
+        }
+    }
+    void moveLine(int d) { cy_ = std::clamp(cy_ + d, 0, int(lines_.size()) - 1); }
+
+    // Keywords, strings, numbers and comments in their colours.
+    void drawLine(const std::string& l, float x, float y) const {
+        static const std::set<std::string> kw = {
+            "function", "end", "if", "then", "else", "elseif", "local", "return", "for", "in", "do", "while", "repeat",
+            "until", "and", "or", "not", "nil", "true", "false", "var", "final", "new", "import", "class", "public",
+            "private", "static", "override", "null", "switch", "case", "default", "break", "continue", "try", "catch",
+            "uniform", "void", "float", "vec2", "vec3", "vec4", "int", "bool", "sampler2D", "this", "extends"};
+        const bool luaFile = cur_ >= 0 && endsWithI(files_[size_t(cur_)].path, ".lua");
+        size_t i = 0;
+        float cx = x;
+        auto put = [&](const std::string& s, Color c) {
+            gfx::text(FontId::Ui, s, cx, y, 16, c);
+            cx += gfx::measure(FontId::Ui, s, 16).x;
+        };
+        while (i < l.size() && cx < gfx::W) {
+            const char c = l[i];
+            const bool comment = luaFile ? l.compare(i, 2, "--") == 0 : l.compare(i, 2, "//") == 0;
+            if (comment) {
+                put(l.substr(i), Color{120, 130, 150, 255});
+                break;
+            }
+            if (c == '"' || c == '\'') {
+                size_t j = i + 1;
+                while (j < l.size() && l[j] != c) j += l[j] == '\\' ? 2 : 1;
+                j = std::min(j + 1, l.size());
+                put(l.substr(i, j - i), Color{150, 220, 140, 255});
+                i = j;
+            } else if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+                size_t j = i;
+                while (j < l.size() && (std::isalnum(static_cast<unsigned char>(l[j])) || l[j] == '_')) ++j;
+                const std::string w = l.substr(i, j - i);
+                put(w, kw.count(w) ? Color{255, 170, 110, 255} : kInk);
+                i = j;
+            } else if (std::isdigit(static_cast<unsigned char>(c))) {
+                size_t j = i;
+                while (j < l.size() && (std::isalnum(static_cast<unsigned char>(l[j])) || l[j] == '.')) ++j;
+                put(l.substr(i, j - i), Color{130, 190, 255, 255});
+                i = j;
+            } else {
+                size_t j = i + 1;
+                while (j < l.size() && !std::isalnum(static_cast<unsigned char>(l[j])) && l[j] != '_' && l[j] != '"' && l[j] != '\'' &&
+                       l.compare(j, 2, luaFile ? "--" : "//") != 0)
+                    ++j;
+                put(l.substr(i, j - i), fade(kInk, 0.85f));
+                i = j;
+            }
+        }
+    }
+
+    ModChoice mod_;
+    std::vector<File> files_;
+    int cur_ = -1;
+    std::vector<std::string> lines_;
+    int cy_ = 0, cx_ = 0, top_ = 0;
+    std::vector<std::pair<std::vector<std::string>, std::pair<int, int>>> undo_;
+    std::map<int, double> held_;
+    bool dirty_ = false, leaveArmed_ = false, backedUp_ = false;
+    std::string status_;
+};
+
 // ============================================================ editor menu ==
 
 class EditorMenuState : public State {
@@ -464,8 +1004,8 @@ public:
         App& a = app();
         Input& in = a.input;
         const int mods = int(modChoices().size());
-        if (in.up()) { sel_ = (sel_ + 3) % 4; sfxPlay(Sfx::Scroll); }
-        if (in.down()) { sel_ = (sel_ + 1) % 4; sfxPlay(Sfx::Scroll); }
+        if (in.up()) { sel_ = (sel_ + kItems - 1) % kItems; sfxPlay(Sfx::Scroll); }
+        if (in.down()) { sel_ = (sel_ + 1) % kItems; sfxPlay(Sfx::Scroll); }
         if ((in.left() || in.right()) && mods > 1) {
             int& m = modIndex();
             m = ((m + (in.left() ? -1 : 1)) % mods + mods) % mods;
@@ -482,7 +1022,9 @@ public:
             case 0: openChartEditor(); break;
             case 1: a.change(makeCharacterEditor()); break;
             case 2: a.change(makeStageEditor()); break;
-            default: a.change(makeEventEditor()); break;
+            case 3: a.change(makeEventEditor()); break;
+            case 4: a.change(makeScriptEditor()); break;
+            default: a.change(makeChartConverter()); break;
         }
     }
     void draw() override {
@@ -490,16 +1032,19 @@ public:
         gfx::beginCanvas();
         drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
         gfx::text(FontId::Title, "EDITORS", gfx::W / 2, 60, 64, kGold, Align::Center, 2.0f);
-        static const char* items[4] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor"};
-        static const char* about[4] = {"A song of this mod (the one chosen in Freeplay if it is here)",
-                                       "Animations, offsets, image, icon and colours of a character",
-                                       "Zoom, where the characters stand and what the camera sees",
-                                       "New events for charts: a description and a Lua script"};
-        for (int i = 0; i < 4; ++i) {
+        static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",
+                                            "Chart Converter"};
+        static const char* about[kItems] = {"A song of this mod (the one chosen in Freeplay if it is here)",
+                                            "Animations, offsets, image, icon and colours of a character",
+                                            "Zoom, where the characters stand and what the camera sees",
+                                            "New events for charts: a description and a Lua script",
+                                            "The mod's Lua and HScript scripts and its shaders",
+                                            "The mod's charts to binary .ghc files: much smaller, loaded faster"};
+        for (int i = 0; i < kItems; ++i) {
             const bool on = i == sel_;
-            const float y = 190.0f + i * 92.0f;
-            gfx::text(FontId::Title, items[i], gfx::W / 2, y, on ? 54.0f : 44.0f, on ? kGold : fade(kIvory, 0.55f), Align::Center, 2.0f);
-            if (on) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 58, 20, fade(kIvory, 0.85f), Align::Center, 1.5f);
+            const float y = 140.0f + i * 74.0f;
+            gfx::text(FontId::Title, items[i], gfx::W / 2, y, on ? 50.0f : 40.0f, on ? kGold : fade(kIvory, 0.55f), Align::Center, 2.0f);
+            if (on) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 50, 18, fade(kIvory, 0.85f), Align::Center, 1.5f);
         }
         const ModChoice m = currentMod();
         gfx::text(FontId::Ui, "<  Mod: " + modLabel(m) + "  >", gfx::W / 2, gfx::H - 112, 26, kIvory, Align::Center, 1.5f);
@@ -510,6 +1055,7 @@ public:
     TouchLayout touchLayout() const override { return {}; }
 
 private:
+    static constexpr int kItems = 6;
     int sel_ = 0;
 
     void openChartEditor() {
@@ -1041,13 +1587,10 @@ public:
         App& a = app();
         Input& in = a.input;
         feedUi(ui_);
-        if (sc_) {
-            for (auto& kv : sc_->objects) kv.second->updateAnim(dt);
-            for (const scene::CharacterPtr& c : chars_)
-                if (c) c->updateAnim(dt);
-        }
+        if (sc_) runStage(dt);
         view_.handle(in, ui_, overPanel(ui_));
-        dragCharacters(in);
+        if (tab_ == 4) dragObjects(in);
+        else dragCharacters(in);
         if (!ui_.focus.empty()) return;
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
         if (in.pressed(KEY_ESCAPE)) {
@@ -1065,11 +1608,35 @@ public:
     }
 
     void draw() override {
+        if (sc_) rend_.prepareShaderLayers(*sc_);
         gfx::beginCanvas();
         drawGrid(view_);
         if (sc_) {
             view_.apply(sc_->camGame);
-            rend_.drawCamera(*sc_, scene::Cam::Game, nullptr, nullptr);
+            if (sc_->camGame.filters.empty()) {
+                rend_.drawCamera(*sc_, scene::Cam::Game, nullptr, nullptr);
+            } else {
+                // The stage's camera shaders, as in a song: the camera to a
+                // texture, then through them.
+                gfx::endCanvas();
+                const float cs = gfx::canvasScale();
+                const Vector2 origin = gfx::canvasOrigin();
+                const int rw = std::max(1, int(gfx::W * cs)), rh = std::max(1, int(gfx::H * cs));
+                if (!camRt_.id || camRt_.texture.width != rw || camRt_.texture.height != rh) {
+                    if (camRt_.id) UnloadRenderTexture(camRt_);
+                    camRt_ = LoadRenderTexture(rw, rh);
+                }
+                gfx::beginTexture(camRt_);
+                ClearBackground(BLANK);
+                gfx::setRenderTargetSize(rw, rh);
+                gfx::beginCanvas();
+                rend_.drawCamera(*sc_, scene::Cam::Game, nullptr, nullptr);
+                gfx::endCanvas();
+                gfx::setRenderTargetSize(0, 0);
+                gfx::endTexture();
+                rend_.drawFiltered(*sc_, sc_->camGame.filters, camRt_, Rectangle{origin.x, origin.y, float(rw), float(rh)});
+                gfx::beginCanvas();
+            }
             static const Color cols[3] = {Color{120, 200, 255, 255}, Color{255, 140, 200, 255}, Color{200, 140, 255, 255}};
             for (int i = 0; i < 3; ++i) {
                 if (i == 1 && def_.hideGf) continue;
@@ -1092,11 +1659,48 @@ public:
         gfx::endCanvas();
     }
 
+    ~StageEditorState() override {
+        if (camRt_.id && IsWindowReady()) UnloadRenderTexture(camRt_);
+    }
+
 private:
+    // The stage runs as in a song (at 100 BPM): tweens, timers, animations,
+    // shaders, and its script's onUpdate, onStepHit and onBeatHit; the
+    // characters dance on the beat.
+    void runStage(double dt) {
+        scene::Scene& sc = *sc_;
+        const double stepMs = 60000.0 / kPreviewBpm / 4.0;
+        const int stepBefore = int(std::floor(game_.clockMs / stepMs));
+        game_.clockMs += dt * 1000.0;
+        const float sx = sc.camGame.scrollX, sy = sc.camGame.scrollY, z = sc.camGame.zoom;
+        sc.update(dt, stepMs, false);
+        sc.camGame.scrollX = sx;  // the view is the editor's
+        sc.camGame.scrollY = sy;
+        sc.camGame.zoom = z;
+        if (!host_) return;
+        host_->setGlobal("songPosition", game_.clockMs);
+        host_->call("onUpdate", {scene::Value(dt)});
+        const int stepNow = int(std::floor(game_.clockMs / stepMs));
+        for (int st = stepBefore + 1; st <= stepNow && st <= stepBefore + 4; ++st) {
+            host_->setGlobal("curStep", double(st));
+            host_->setGlobal("curBeat", double(st / 4));
+            host_->call("onStepHit");
+            if (st % 4 == 0) {
+                for (const scene::CharacterPtr& c : chars_)
+                    if (c) c->dance();
+                host_->call("onBeatHit");
+            }
+        }
+        host_->call("onUpdatePost", {scene::Value(dt)});
+        host_->dispatchCompletions();
+    }
+
+    static constexpr double kPreviewBpm = 100;
     static constexpr const char* kWho[3] = {"Boyfriend", "Girlfriend", "Opponent"};
     std::unique_ptr<scene::Scene> sc_;
     std::unique_ptr<ScriptHost> host_;
     EditorGame game_;
+    RenderTexture2D camRt_{};
     SceneRenderer rend_;
     Ui ui_;
     View view_;
@@ -1108,6 +1712,9 @@ private:
     std::string loadedText_, saveName_;
     std::string who_[3] = {"bf", "gf", "dad"};
     scene::CharacterPtr chars_[3];
+    std::vector<scene::SpritePtr> objSprites_;  // per stage object (null for the characters' places)
+    int objSel_ = 0;
+    bool objDrag_ = false;
     bool dirty_ = false, leaveArmed_ = false, showCam_ = true;
     int drag_ = -1;
     Vector2 dragLast_{};
@@ -1146,7 +1753,9 @@ private:
         sc.gfMarker->tag = "gfGroup";
         for (int i = 0; i < 3; ++i) makeChar(i);
         bool placed = false;
+        objSprites_.clear();
         for (const psych::StageObject& o : def_.objects) {
+            objSprites_.push_back(nullptr);
             const std::string t = toLower(o.type);
             if (t == "gf" || t == "gfgroup") {
                 sc.order.push_back(sc.gfMarker);
@@ -1195,6 +1804,7 @@ private:
             s->inScene = true;
             if (!o.name.empty()) sc.objects[o.name] = s;
             sc.order.push_back(s);
+            objSprites_.back() = s;
         }
         if (!placed) {
             sc.order.push_back(sc.gfMarker);
@@ -1204,6 +1814,8 @@ private:
         }
         // The stage's script builds its sprites (Psych 0.6 / 0.7 stages are Lua).
         const std::string lua = sc.files.find("stages/" + name + ".lua");
+        game_.shaders = app().settings.shaders;
+        game_.clockMs = 0;
         if (!lua.empty()) {
             host_ = std::make_unique<ScriptHost>(sc, game_);
             host_->load(lua);
@@ -1214,12 +1826,15 @@ private:
 
     void makeChar(int i) {
         chars_[i].reset();
-        if (i == 1 && def_.hideGf) return;
         scene::Scene& sc = *sc_;
+        // Scripts reach them as boyfriend, gf and dad; the scene animates them.
+        (i == 0 ? sc.bf : i == 1 ? sc.gf : sc.dad) = nullptr;
+        if (i == 1 && def_.hideGf) return;
         psych::CharacterDef cd;
         std::string path, text, err;
         if (loadCharacterDef(sc, who_[i], cd, path, text, err)) chars_[i] = buildCharacter(sc, cd, i == 0, err);
         if (!chars_[i]) return;
+        (i == 0 ? sc.bf : i == 1 ? sc.gf : sc.dad) = chars_[i];
         chars_[i]->scrollX = chars_[i]->scrollY = i == 1 ? 0.95f : 1.0f;
         place(i);
     }
@@ -1297,11 +1912,12 @@ private:
         panelBox(8, gfx::H - 40);
         float y = 16;
         const float x = kPanelX, w = kPanelW, rh = 30;
-        static const char* tabs[4] = {"Stage", "BF", "GF", "Dad"};
-        for (int i = 0; i < 4; ++i)
-            if (ui_.button({x + i * (w / 4), y, w / 4 - 4, rh}, tabs[i], tab_ == i)) tab_ = i;
+        static const char* tabs[5] = {"Stage", "BF", "GF", "Dad", "Objects"};
+        for (int i = 0; i < 5; ++i)
+            if (ui_.button({x + i * (w / 5), y, w / 5 - 4, rh}, tabs[i], tab_ == i)) tab_ = i;
         y += rh + 12;
         if (tab_ == 0) drawStageTab(x, y, w, rh);
+        else if (tab_ == 4) drawObjectsTab(x, y, w, rh);
         else drawCharTab(tab_ - 1, x, y, w, rh);
         ui_.overlays();
     }
@@ -1333,6 +1949,214 @@ private:
         y += 26;
         if (ui_.button({x, y, w * 0.5f - 4, rh + 4}, "Save")) save();
         if (ui_.button({x + w * 0.5f + 4, y, w * 0.5f - 4, rh + 4}, "Reload")) load(saveName_);
+    }
+
+    // Issue #22: the stage's own objects (Psych 0.7.3 "objects"): pick one
+    // (here or by clicking it), drag it, change what it is and how it shows,
+    // its layer, add sprites and remove them. Saved with the stage's JSON.
+    void drawObjectsTab(float x, float y, float w, float rh) {
+        std::vector<std::string> names;
+        for (size_t i = 0; i < def_.objects.size(); ++i) names.push_back(objLabel(i));
+        if (!names.empty()) {
+            objSel_ = std::clamp(objSel_, 0, int(names.size()) - 1);
+            ui_.dropdown("obj", {x, y, w, rh}, "Object", names, objSel_);
+            y += rh + 8;
+        } else {
+            gfx::text(FontId::Ui, "No objects in the stage's JSON yet.", x, y, 16, kDim);
+            y += 26;
+        }
+        auto changed = [&] {
+            dirty_ = true;
+            leaveArmed_ = false;
+            applyObject(size_t(objSel_));
+        };
+        if (!names.empty()) {
+            psych::StageObject& o = def_.objects[size_t(objSel_)];
+            const std::string t = toLower(o.type);
+            if (t == "gf" || t == "gfgroup" || t == "dad" || t == "dadgroup" || t == "boyfriend" || t == "boyfriendgroup") {
+                gfx::text(FontId::Ui, "Where this character is drawn (its layer).", x, y, 16, kDim);
+                y += 26;
+            } else {
+                ui_.text("objname", {x, y, w, rh}, "Name", o.name);
+                y += rh + 6;
+                std::string img = o.image;
+                if (ui_.text("objimg", {x, y, w - 92, rh}, "Image", img)) o.image = img;
+                if (ui_.button({x + w - 86, y, 86, rh}, "Load")) {
+                    dirty_ = true;
+                    buildScene(saveName_);
+                }
+                y += rh + 6;
+                auto step = [&](const char* label, float& f, double inc, double lo, double hi, const char* fmt) {
+                    double d = f;
+                    if (ui_.stepper({x, y, w, rh}, label, d, inc, lo, hi, fmt)) {
+                        f = float(d);
+                        changed();
+                    }
+                    y += rh + 6;
+                };
+                step("X", o.x, 10, -100000, 100000, "%.0f");
+                step("Y", o.y, 10, -100000, 100000, "%.0f");
+                step("Scale X", o.scaleX, 0.05, -50, 50, "%.2f");
+                step("Scale Y", o.scaleY, 0.05, -50, 50, "%.2f");
+                step("Scroll X", o.scrollX, 0.05, -10, 10, "%.2f");
+                step("Scroll Y", o.scrollY, 0.05, -10, 10, "%.2f");
+                step("Alpha", o.alpha, 0.05, 0, 1, "%.2f");
+                step("Angle", o.angle, 1, -3600, 3600, "%.0f");
+                if (ui_.check({x, y, w / 3, rh}, "Flip X", o.flipX)) changed();
+                if (ui_.check({x + w / 3, y, w / 3, rh}, "Flip Y", o.flipY)) changed();
+                if (ui_.check({x + 2 * w / 3, y, w / 3, rh}, "Smooth", o.antialiasing)) changed();
+                y += rh + 8;
+            }
+            const float bw = (w - 12) / 4;
+            if (ui_.button({x, y, bw, rh}, "Back") && objSel_ > 0) moveObject(objSel_, objSel_ - 1);
+            if (ui_.button({x + bw + 4, y, bw, rh}, "Front") && objSel_ + 1 < int(def_.objects.size())) moveObject(objSel_, objSel_ + 1);
+            if (ui_.button({x + 2 * (bw + 4), y, bw, rh}, "Copy")) {
+                psych::StageObject c = def_.objects[size_t(objSel_)];
+                c.name += "_copy";
+                c.x += 40;
+                c.y += 40;
+                def_.objects.insert(def_.objects.begin() + objSel_ + 1, c);
+                ++objSel_;
+                dirty_ = true;
+                buildScene(saveName_);
+            }
+            if (ui_.button({x + 3 * (bw + 4), y, bw, rh}, "Delete")) {
+                def_.objects.erase(def_.objects.begin() + objSel_);
+                objSel_ = std::max(0, objSel_ - 1);
+                dirty_ = true;
+                buildScene(saveName_);
+            }
+            y += rh + 8;
+        }
+        if (ui_.button({x, y, w, rh}, "Add a sprite (an image of the mod)")) {
+            psych::StageObject o;
+            o.type = "sprite";
+            o.name = "sprite" + std::to_string(def_.objects.size() + 1);
+            o.image = def_.objects.empty() ? "stageback" : def_.objects[size_t(objSel_)].image;
+            if (sc_) {  // where the view is looking
+                const Vector2 c = view_.toWorld({gfx::W * 0.4f, gfx::H * 0.5f});
+                o.x = std::round(c.x);
+                o.y = std::round(c.y);
+            }
+            if (def_.objects.empty()) {  // the characters keep their places among the objects
+                for (const char* who : {"gf", "dad", "boyfriend"}) {
+                    psych::StageObject m;
+                    m.type = who;
+                    def_.objects.push_back(m);
+                }
+                def_.objects.insert(def_.objects.begin(), o);
+                objSel_ = 0;
+            } else {
+                def_.objects.insert(def_.objects.begin() + objSel_ + 1, o);
+                ++objSel_;
+            }
+            dirty_ = true;
+            buildScene(saveName_);
+        }
+        y += rh + 6;
+        gfx::text(FontId::Ui, "Click an object in the view to pick it; drag to move it.", x, y, 15, kDim);
+    }
+
+    std::string objLabel(size_t i) const {
+        const psych::StageObject& o = def_.objects[i];
+        const std::string t = toLower(o.type);
+        if (t == "gf" || t == "gfgroup") return std::to_string(i) + ": (girlfriend)";
+        if (t == "dad" || t == "dadgroup") return std::to_string(i) + ": (opponent)";
+        if (t == "boyfriend" || t == "boyfriendgroup") return std::to_string(i) + ": (boyfriend)";
+        return std::to_string(i) + ": " + (o.name.empty() ? o.image : o.name);
+    }
+
+    // The sprite on screen follows the object's numbers.
+    void applyObject(size_t i) {
+        if (i >= objSprites_.size() || !objSprites_[i]) return;
+        const psych::StageObject& o = def_.objects[i];
+        scene::Sprite& s = *objSprites_[i];
+        s.x = o.x;
+        s.y = o.y;
+        s.scaleX = o.scaleX;
+        s.scaleY = o.scaleY;
+        if (toLower(o.type) == "square") s.setGraphicSize(o.scaleX, o.scaleY);
+        s.updateHitbox();
+        s.scrollX = o.scrollX;
+        s.scrollY = o.scrollY;
+        s.alpha = o.alpha;
+        s.angle = o.angle;
+        s.flipX = o.flipX;
+        s.flipY = o.flipY;
+        s.antialiasing = o.antialiasing;
+    }
+    void moveObject(int from, int to) {
+        std::swap(def_.objects[size_t(from)], def_.objects[size_t(to)]);
+        objSel_ = to;
+        dirty_ = true;
+        buildScene(saveName_);
+    }
+
+    // Objects: a click picks the front one under the mouse; a drag moves it.
+    void dragObjects(const Input& in) {
+        if (!sc_ || tab_ != 4) return;
+        const Vector2 w = view_.toWorld(ui_.mouse);
+        if (in.mousePressed(MOUSE_BUTTON_LEFT) && !overPanel(ui_) && ui_.focus.empty()) {
+            for (int i = int(objSprites_.size()) - 1; i >= 0; --i) {
+                const scene::SpritePtr& s = objSprites_[size_t(i)];
+                if (!s) continue;
+                const float sx = s->x - s->offsetX, sy = s->y - s->offsetY;
+                if (w.x >= sx && w.x <= sx + s->width && w.y >= sy && w.y <= sy + s->height) {
+                    objSel_ = i;
+                    objDrag_ = true;
+                    dragLast_ = w;
+                    break;
+                }
+            }
+        }
+        if (!objDrag_) return;
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+            objDrag_ = false;
+            return;
+        }
+        const float dx = std::round(w.x - dragLast_.x), dy = std::round(w.y - dragLast_.y);
+        if ((dx != 0 || dy != 0) && objSel_ >= 0 && objSel_ < int(def_.objects.size())) {
+            def_.objects[size_t(objSel_)].x += dx;
+            def_.objects[size_t(objSel_)].y += dy;
+            dragLast_.x += dx;
+            dragLast_.y += dy;
+            applyObject(size_t(objSel_));
+            dirty_ = true;
+            leaveArmed_ = false;
+        }
+    }
+
+    // The objects as Psych 0.7.3 writes them.
+    std::string objectsJson() const {
+        std::string o = "[";
+        for (size_t i = 0; i < def_.objects.size(); ++i) {
+            const psych::StageObject& b = def_.objects[i];
+            o += i ? ",\n\t\t{" : "\n\t\t{";
+            o += "\"type\": " + jsonStr(b.type.empty() ? std::string("sprite") : b.type);
+            const std::string t = toLower(b.type);
+            if (t != "gf" && t != "gfgroup" && t != "dad" && t != "dadgroup" && t != "boyfriend" && t != "boyfriendgroup") {
+                o += ", \"name\": " + jsonStr(b.name) + ", \"image\": " + jsonStr(b.image) + ", \"x\": " + jnum(b.x) +
+                     ", \"y\": " + jnum(b.y) + ", \"scale\": " + pair(b.scaleX, b.scaleY) + ", \"scroll\": " + pair(b.scrollX, b.scrollY) +
+                     ", \"alpha\": " + jnum(b.alpha) + ", \"angle\": " + jnum(b.angle) + ", \"color\": " +
+                     jsonStr(TextFormat("#%06X", unsigned(b.color & 0xFFFFFF))) + ", \"flipX\": " + (b.flipX ? "true" : "false") +
+                     ", \"flipY\": " + (b.flipY ? "true" : "false") + ", \"antialiasing\": " + (b.antialiasing ? "true" : "false");
+                if (!b.anims.empty()) {
+                    o += ", \"animations\": [";
+                    for (size_t k = 0; k < b.anims.size(); ++k) {
+                        const psych::AnimDef& a = b.anims[k];
+                        std::string ind;
+                        for (size_t q = 0; q < a.indices.size(); ++q) ind += (q ? ", " : "") + std::to_string(a.indices[q]);
+                        o += std::string(k ? ", " : "") + "{\"anim\": " + jsonStr(a.anim) + ", \"name\": " + jsonStr(a.prefix) +
+                             ", \"fps\": " + jnum(a.fps) + ", \"loop\": " + (a.loop ? "true" : "false") + ", \"indices\": [" + ind +
+                             "], \"offsets\": " + pair(a.offX, a.offY) + "}";
+                    }
+                    o += "]";
+                }
+                if (!b.firstAnim.empty()) o += ", \"firstAnimation\": " + jsonStr(b.firstAnim);
+            }
+            o += "}";
+        }
+        return o + (def_.objects.empty() ? "]" : "\n\t]");
     }
 
     void drawCharTab(int i, float x, float y, float w, float rh) {
@@ -1383,9 +2207,11 @@ private:
             {"camera_girlfriend", pair(def_.camGf[0], def_.camGf[1])},
             {"camera_speed", jnum(def_.camSpeed)},
         };
+        std::vector<std::pair<std::string, std::string>> all = fields;
+        if (!def_.objects.empty()) all.push_back({"objects", objectsJson()});
         const std::string path = mod_.roots[0] + "stages/" + name + ".json";
         std::string err;
-        if (!saveText(path, writeObject(fields, loadedText_), err)) {
+        if (!saveText(path, writeObject(all, loadedText_), err)) {
             status_.set(err, true);
             return;
         }
@@ -1605,6 +2431,8 @@ private:
 
 }  // namespace
 
+std::unique_ptr<State> makeScriptEditor() { return std::make_unique<ScriptEditorState>(); }
+std::unique_ptr<State> makeChartConverter() { return std::make_unique<ChartConverterState>(); }
 std::unique_ptr<State> makeEditorMenu() { return std::make_unique<EditorMenuState>(); }
 std::unique_ptr<State> makeCharacterEditor() { return std::make_unique<CharacterEditorState>(); }
 std::unique_ptr<State> makeStageEditor() { return std::make_unique<StageEditorState>(); }
