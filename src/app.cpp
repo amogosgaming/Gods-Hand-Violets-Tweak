@@ -2,6 +2,8 @@
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "app.hpp"
+#include "check_scripts.hpp"
+#include "performance.hpp"
 #include "scene_draw.hpp"
 #include "psych_ui.hpp"
 
@@ -159,6 +161,7 @@ void App::applyPsychUi() {
     PsychUi& ui = psychUi();
     ui.unload();
     ui.setNoteSkin(settings.noteSkin);       // Psych's Note Skins option
+    ui.setSkinRoots(library.allAssetRoots());  // skins of every installed mod too
     ui.setPalette(settings.noteColors);      // and its Note Colors
     ui.setSmooth(settings.antialiasing);
     psychReport.clear();
@@ -240,11 +243,14 @@ int App::run(int argc, char** argv) {
         } else if (!std::strcmp(a, "--editor-export")) autoRun.editorExport = next();
         else if (!std::strcmp(a, "--list-songs")) listSongs = true;
         else if (!std::strcmp(a, "--check-charts")) checkCharts = true;
+        else if (!std::strcmp(a, "--check-scripts")) checkScriptsDir = next();
         else if (!std::strcmp(a, "--touch")) touchMode = true;
         else if (!std::strcmp(a, "--perf")) perf = true;  // frame times on stdout every second
         else if (!std::strcmp(a, "--render")) renderCli = true;  // record the --autoplay song to renders/
+        else if (!std::strcmp(a, "--autochart")) autoChartCli = true;  // the --autoplay song with an AutoChart
         else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
+    if (!checkScriptsDir.empty()) return checkScripts(checkScriptsDir);  // --check-scripts <folder>
     if (listSongs) {
         // Prints what the song library finds (no window): --list-songs [--base dir]
         // [--check-charts: load every chart and print its keys and notes, or why it fails]
@@ -304,6 +310,15 @@ int App::run(int argc, char** argv) {
     }
     settings.load(userDir + "settings.cfg");
     scores.load(userDir + "scores.cfg");
+    if (!autoRun.enabled) {  // Freeplay's modifiers and the song last picked, as they were left
+        mods.rate = settings.modRate;
+        mods.botplay = settings.modBotplay;
+        mods.practice = settings.modPractice;
+        mods.mirror = settings.modMirror;
+        mods.scrollType = settings.modScrollType;
+        mods.scrollValue = settings.modScrollValue;
+        freeplayDiff = settings.freeplayDiff;
+    }
     // Big charts read once load from here afterwards (chart_stream.hpp).
     setChartCacheDir(userDir + "cache/charts/");
 
@@ -311,11 +326,13 @@ int App::run(int argc, char** argv) {
     if (settings.vsync) flags |= FLAG_VSYNC_HINT;
     SetConfigFlags(flags);
     SetTraceLogLevel(LOG_WARNING);
+    device::beforeWindow();  // a laptop's fast graphics card, before the OpenGL context exists
     // Android: the whole screen, whatever its size.
     InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
                "God's Hand of Principality and Demise");
     platform::afterWindowInit();
     platform::setVsync(settings.vsync);  // explicit both ways: some drivers default to on
+    device::startGame(frameBudget());    // the system told a game runs (game scheduling, GameMode, performance hints)
     SetExitKey(KEY_NULL);
     if (!platform::kAndroid) {
         SetWindowMinSize(640, 360);
@@ -358,11 +375,16 @@ int App::run(int argc, char** argv) {
         PlayRequest r;
         r.songId = autoRun.song.find(':') == std::string::npos ? "builtin:" + autoRun.song : autoRun.song;
         r.diff = autoRun.diff;
+        r.autoChart = autoChartCli;
         mods.botplay = autoRun.botplay;
         state_ = makePlay(r);
     } else if (!autoRun.editorSong.empty()) state_ = makeChartEditor(autoRun.editorSong, autoRun.diff);
     else if (autoRun.state == "menu") state_ = makeMainMenu();
     else if (autoRun.state == "freeplay") state_ = makeFreeplay();
+    else if (autoRun.state == "render-list" || autoRun.state == "autochart-list") {
+        songListMode = autoRun.state == "render-list" ? SongListMode::Render : SongListMode::AutoChart;
+        state_ = makeFreeplay();
+    }
     else if (autoRun.state == "story") state_ = makeStory();
     else if (autoRun.state == "options") state_ = makeOptions();
     else if (autoRun.state == "credits") state_ = makeCredits();
@@ -373,6 +395,7 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "converter") state_ = makeChartConverter();
     else if (autoRun.state == "note-colors") state_ = makeNoteColors();
+    else if (autoRun.state == "key-bindings") state_ = makeKeyBindings();
     else if (autoRun.state == "character-editor") state_ = makeCharacterEditor();
     else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "event-editor") state_ = makeEventEditor();
@@ -438,6 +461,7 @@ int App::run(int argc, char** argv) {
         frame();
     }
 
+    device::stopGame();
     stopRender();  // closing the game mid-song keeps what was recorded
     VideoRenderer::waitIdle(120);
     state_.reset();
@@ -451,6 +475,15 @@ int App::run(int argc, char** argv) {
     CloseAudioDevice();
     CloseWindow();
     return 0;
+}
+
+// How long a frame may take: the frame limit's, or the screen's refresh with V-sync.
+double App::frameBudget() const {
+    if (settings.vsync || settings.fpsCap <= 0) {
+        const int hz = platform::kAndroid ? 60 : GetMonitorRefreshRate(GetCurrentMonitor());
+        return 1.0 / double(hz >= 30 ? hz : 60);
+    }
+    return 1.0 / double(settings.fpsCap);
 }
 
 void App::frame() {
@@ -569,6 +602,7 @@ void App::frame() {
         const bool pace = settings.vsync && settings.lowLatency && !rendering && pacerMonitor_ >= 0;
         if (pace) platform::gpuFinish();
         const double work = nowSec() - frameStart_;
+        if (platform::kAndroid) device::frameWork(work, frameBudget());  // Android's performance hints
         SwapScreenBuffer();
         if (pace) {
             platform::gpuFinish();
@@ -665,10 +699,11 @@ void App::drawFpsPanel() {
         if (!hw.gpu.empty()) lines.push_back({hw.gpu, dim});
         if (!hw.gl.empty()) lines.push_back({"OpenGL " + hw.gl, dim});
         if (!hw.os.empty()) lines.push_back({hw.os, dim});
+        if (!device::status().empty()) lines.push_back({"Game mode: " + device::status(), dim});
     }
-    // Small and narrow, so that it fits in a corner of a song's HUD: the FPS
-    // in 18 pixels, the rest in 14, lines cut at 330 pixels.
-    const float size = 14, lineH = 16, firstSize = 18, firstH = 21, maxW = 330;
+    // Small and narrow, so that it stays in its corner of a song's HUD: the
+    // FPS in 18 pixels, the rest in 14, lines cut at 240 pixels.
+    const float size = 14, lineH = 16, firstSize = 18, firstH = 21, maxW = 240;
     const bool fpsFirst = s.showFps;
     for (size_t i = 0; i < lines.size(); ++i) {
         std::string& t = lines[i].first;
@@ -690,49 +725,18 @@ void App::drawFpsPanel() {
     if (graphH > 0) w = std::max(w, graphW);
     const bool panel = lines.size() > 1 || graphH > 0;
     const float pw = w + 12, ph = textH + graphH + 6;
-    // Where: the top left corner, unless the screen has something there (a
-    // song's arrows, health bar, score, time bar, the touch buttons): then the
-    // first corner that is clear, or the one least in the way. Checked twice a
-    // second, and it only moves when where it is gets covered.
-    std::vector<Rectangle> busy;
-    if (state_) state_->busyRects(busy);
+    // Always the top left corner. Narrow enough to stay clear of a song's
+    // health bar and score (they start 260 pixels in); below the touch
+    // buttons when they sit in that corner.
+    float px = 2, py = 2;
     if (touchMode) {
         std::vector<Rectangle> keys;
         touch.buttonRects(keys);
         for (const Rectangle& r : keys) {
             const Vector2 a = gfx::toCanvas({r.x, r.y}), b = gfx::toCanvas({r.x + r.width, r.y + r.height});
-            busy.push_back({a.x, a.y, b.x - a.x, b.y - a.y});
+            if (a.x < px + pw && b.x > px && a.y < py + ph && b.y > py) py = std::max(py, b.y + 4);
         }
     }
-    const float W = float(gfx::W), H = float(gfx::H);
-    const Vector2 spots[6] = {{2, 2}, {2, H - ph - 28}, {W - pw - 2, 2}, {W - pw - 2, H - ph - 2}, {2, (H - ph) * 0.5f},
-                              {W - pw - 2, (H - ph) * 0.5f}};
-    auto covered = [&](int k) {
-        const Rectangle r{spots[k].x, spots[k].y, pw, ph};
-        float area = 0;
-        for (const Rectangle& b : busy) {
-            const float ix = std::min(r.x + r.width, b.x + b.width) - std::max(r.x, b.x);
-            const float iy = std::min(r.y + r.height, b.y + b.height) - std::max(r.y, b.y);
-            if (ix > 0 && iy > 0) area += ix * iy;
-        }
-        return area;
-    };
-    if (busy.empty()) {
-        fpsSpot_ = 0;
-    } else if (now - fpsSpotAt_ >= 0.5) {
-        fpsSpotAt_ = now;
-        const float here = covered(fpsSpot_);
-        if (here > 0) {
-            int best = 0;
-            float bestArea = covered(0);
-            for (int k = 1; k < 6 && bestArea > 0; ++k) {
-                const float a = covered(k);
-                if (a < bestArea) { best = k; bestArea = a; }
-            }
-            if (bestArea < here) fpsSpot_ = best;
-        }
-    }
-    const float px = spots[fpsSpot_].x, py = spots[fpsSpot_].y;
     if (panel) DrawRectangleRec({px, py, pw, ph}, gfx::fade(BLACK, 0.55f));
     float y = py + 3;
     for (size_t i = 0; i < lines.size(); ++i) {
@@ -760,7 +764,7 @@ void App::drawFpsPanel() {
 
 // -------------------------------------------------------- rendering mode --
 
-bool App::wantsRender() const { return settings.renderMode || renderCli; }
+bool App::wantsRender() const { return renderCli; }  // Render Mode itself is PlayRequest::render
 
 bool App::startRender(const std::string& title, const std::string& diff) {
     if (renderer.active()) return true;
@@ -826,12 +830,14 @@ void App::drawRenderBadge() {
     const int vs = int(video);
     std::string s = TextFormat("REC  %d:%02d", vs / 60, vs % 60);
     if (!renderLabel.empty()) s += "  |  song " + renderLabel;
-    s += TextFormat("  |  %.2fx real time  |  ESC stops", video / real);
+    s += TextFormat("  |  %.2fx real time  |  %s", video / real, touchMode ? "STOP ends it" : "ESC stops");
+    // At the top, in the middle: the FPS counter keeps its corner.
     const Vector2 sz = gfx::measure(gfx::FontId::Ui, s, 18);
-    DrawRectangleRec({8, 8, sz.x + 40, 28}, gfx::fade(BLACK, 0.7f));
+    const float w = sz.x + 40, x = (gfx::W - w) * 0.5f;
+    DrawRectangleRec({x, 8, w, 28}, gfx::fade(BLACK, 0.7f));
     const float blink = std::fmod(float(real), 1.0f) < 0.5f ? 1.0f : 0.35f;
-    DrawCircleV({24, 22}, 7, gfx::fade(Color{230, 40, 50, 255}, blink));
-    gfx::text(gfx::FontId::Ui, s, 38, 12, 18, WHITE, gfx::Align::Left, 1.0f);
+    DrawCircleV({x + 16, 22}, 7, gfx::fade(Color{230, 40, 50, 255}, blink));
+    gfx::text(gfx::FontId::Ui, s, x + 30, 12, 18, WHITE, gfx::Align::Left, 1.0f);
 }
 
 // ------------------------------------------------------- shared visuals --
@@ -842,26 +848,75 @@ float menuPulse() {
     return float(std::exp(-frac * 6.0));
 }
 
+namespace {
+
+constexpr Color rgb3(int r, int g, int b) { return Color{(unsigned char)r, (unsigned char)g, (unsigned char)b, 255}; }
+
+}  // namespace
+
+// The menus' backdrop, retro: a night sky of twinkling stars over a striped
+// sun, a grid floor running at you on the beat, and glassy cubes turning in
+// the air, mirrored in the floor. tintHex colours the whole scene.
 void drawMenuBackground(double now, unsigned tintHex, float pulse) {
     const Color tint = gfx::rgb(tintHex);
-    gfx::gradientRect({-20, -20, gfx::W + 40, gfx::H + 40}, gfx::mix(Color{14, 10, 34, 255}, tint, 0.18f),
-                      gfx::mix(Color{40, 20, 60, 255}, tint, 0.35f));
     const float t = float(now);
-    BeginBlendMode(BLEND_ADDITIVE);
-    for (int i = 0; i < 12; ++i) {
-        const float a = t * 0.04f + i * 6.2831853f / 12.0f;
-        const Vector2 c{640, 820};
-        gfx::tri(c, {c.x + std::cos(a - 0.06f) * 1400, c.y + std::sin(a - 0.06f) * 1400},
-                 {c.x + std::cos(a + 0.06f) * 1400, c.y + std::sin(a + 0.06f) * 1400}, gfx::fade(tint, 0.05f));
-    }
-    EndBlendMode();
-    gfx::glow({640, 760}, 520 + 40 * pulse, gfx::fade(tint, 0.35f + 0.15f * pulse));
+    constexpr float kHorizon = 468.0f;
+    const Color skyTop = gfx::mix(rgb3(6, 4, 22), tint, 0.10f), skyLow = gfx::mix(rgb3(70, 18, 86), tint, 0.40f);
+    gfx::gradientRect({-20, -20, gfx::W + 40, kHorizon + 22}, skyTop, skyLow);
+
+    // Stars: a round centre and a ray along each axis, twinkling.
     Rng rng(77);
-    for (int i = 0; i < 90; ++i) {
-        const float x = float(rng.uniform() * gfx::W);
-        const float sp = float(10 + rng.uniform() * 30);
-        const float y = std::fmod(float(rng.uniform() * gfx::H) - t * sp + gfx::H * 4, gfx::H + 40) - 20;
-        DrawCircleV({x, y}, float(1 + rng.uniform() * 2), gfx::fade(WHITE, float(0.2 + 0.5 * rng.uniform())));
+    for (int i = 0; i < 44; ++i) {
+        const float x = float(rng.uniform() * gfx::W), y = float(rng.uniform() * (kHorizon - 70));
+        const float u = float(rng.uniform());
+        const float r = 1.6f + u * u * 7.5f;
+        const float phase = float(rng.uniform() * 6.2831853), speed = float(0.8 + rng.uniform() * 2.4);
+        const float tw = 0.5f + 0.5f * std::sin(t * speed + phase);
+        const Color c = i % 5 == 0 ? gfx::mix(WHITE, tint, 0.45f) : WHITE;
+        gfx::star({x, y}, r * (0.7f + 0.3f * tw + 0.25f * pulse), gfx::fade(c, 0.3f + 0.7f * tw));
+    }
+
+    // The sun on the horizon, cut by stripes near its base.
+    const Vector2 sun{640, kHorizon - 34};
+    const float sunR = 150 + 6 * pulse;
+    gfx::glow(sun, sunR * 1.9f, gfx::fade(gfx::mix(Color{255, 120, 170, 255}, tint, 0.3f), 0.35f));
+    DrawCircleGradient(int(sun.x), int(sun.y), sunR, gfx::fade(Color{255, 226, 90, 255}, 0.85f),
+                       gfx::fade(gfx::mix(Color{255, 70, 150, 255}, tint, 0.25f), 0.85f));
+    for (int k = 0; k < 6; ++k) {
+        const float y = sun.y + 18 + k * 22 + std::fmod(t * 8.0f, 22.0f);
+        const float h = 3 + k * 2.2f;
+        DrawRectangleRec({sun.x - sunR - 4, y, sunR * 2 + 8, h}, gfx::mix(skyTop, skyLow, saturate(y / kHorizon)));
+    }
+
+    // The floor: a grid running toward you, a little faster on the beat.
+    gfx::gradientRect({-20, kHorizon, gfx::W + 40, gfx::H - kHorizon + 20}, gfx::mix(rgb3(24, 6, 36), tint, 0.22f),
+                      rgb3(4, 2, 12));
+    const Color line = gfx::mix(Color{255, 80, 200, 255}, tint, 0.35f);
+    BeginBlendMode(BLEND_ADDITIVE);
+    const float run = std::fmod(t * 0.55f, 1.0f);
+    for (int i = 0; i < 16; ++i) {
+        const float z = float(i) + 1.0f - run;  // depth: the lines come closer and spread apart
+        const float y = kHorizon + 260.0f / z - 6.0f;
+        if (y < kHorizon || y > gfx::H + 4) continue;
+        DrawLineEx({-20, y}, {gfx::W + 20, y}, 1.5f + 1.5f / z, gfx::fade(line, std::min(0.75f, 0.12f + 0.9f / z) * (0.8f + 0.4f * pulse)));
+    }
+    for (int i = -16; i <= 16; ++i)
+        DrawLineEx({640.0f + i * 34.0f, kHorizon}, {640.0f + i * 300.0f, gfx::H + 20.0f}, 1.6f, gfx::fade(line, 0.32f + 0.2f * pulse));
+    DrawLineEx({-20, kHorizon}, {gfx::W + 20, kHorizon}, 2.5f, gfx::fade(line, 0.9f));
+    EndBlendMode();
+
+    // Cubes turning in the air, each with its reflection in the floor.
+    static const Color kCubeColors[5] = {{255, 79, 163, 255}, {40, 220, 255, 255}, {130, 255, 90, 255}, {170, 100, 255, 255},
+                                         {255, 222, 64, 255}};
+    for (int i = 0; i < 6; ++i) {
+        const float fi = float(i);
+        const float x = std::fmod(90.0f + fi * 223.0f + t * (9.0f + fi * 2.0f), gfx::W + 200.0f) - 100.0f;
+        const float y = 150.0f + std::fmod(fi * 97.0f, 230.0f) + std::sin(t * 0.7f + fi * 1.7f) * 14.0f;
+        const float size = (46.0f + std::fmod(fi * 37.0f, 60.0f)) * (1.0f + 0.06f * pulse);
+        const float ax = t * (0.35f + 0.08f * fi) + fi, ay = t * (0.5f - 0.05f * fi) + fi * 2.0f;
+        const Color c = gfx::mix(kCubeColors[i % 5], tint, 0.25f);
+        gfx::cube({x, y}, size, ax, ay, c, 0.22f, true, kHorizon + 8.0f);
+        gfx::cube({x, y}, size, ax, ay, c, 0.85f, false, kHorizon);
     }
 }
 

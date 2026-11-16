@@ -2,6 +2,8 @@
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "settings.hpp"
+
+#include <algorithm>
 #include "keys.hpp"
 
 #include <cstdio>
@@ -33,6 +35,20 @@ bool Settings::load(const std::string& path) {
         if (k.rfind("key", 0) == 0 && k.size() == 5) {
             const int lane = k[3] - '0', slot = k[4] - '0';
             if (lane >= 0 && lane < 4 && slot >= 0 && slot < 2) keys4[lane][slot] = int(d);
+        } else if (k.rfind("lanes", 0) == 0 && k.size() > 5) {  // lanes9=65,83,...
+            const int count = std::atoi(k.c_str() + 5);
+            if (count >= 1 && count <= ek::kTableKeys && count != 4) {
+                std::vector<int> codes;
+                size_t p = 0;
+                while (p <= v.size() && int(codes.size()) < count) {
+                    const size_t c = v.find(',', p);
+                    codes.push_back(std::atoi(v.substr(p, c == std::string::npos ? std::string::npos : c - p).c_str()));
+                    if (c == std::string::npos) break;
+                    p = c + 1;
+                }
+                codes.resize(size_t(count), 0);
+                laneBinds[count] = codes;
+            }
         } else if (k == "downscroll") downscroll = b;
         else if (k == "middlescroll") middlescroll = b;
         else if (k == "ghostTapping") ghostTapping = b;
@@ -55,7 +71,7 @@ bool Settings::load(const std::string& path) {
         else if (k == "renderMode") renderMode = b;
         else if (k == "renderSize") renderSize = clampv(int(d), 0, 3);
         else if (k == "renderFps") renderFps = clampv(int(d), 1, 1000);
-        else if (k == "renderEncoder") renderEncoder = clampv(int(d), 0, 6);
+        else if (k == "renderEncoder") renderEncoder = clampv(int(d), 0, 7);
         else if (k == "renderBitrate") renderBitrate = clampv(int(d), 1, 500);
         else if (k == "renderAudio") renderAudio = b;
         else if (k == "extraKeys") extraKeys = b;
@@ -104,6 +120,14 @@ bool Settings::load(const std::string& path) {
         else if (k == "sfxVol") sfxVol = clampv(float(d), 0.0f, 1.0f);
         else if (k == "hitsoundVol") hitsoundVol = clampv(float(d), 0.0f, 1.0f);
         else if (k == "muted") muted = b;
+        else if (k == "modRate") modRate = clampv(float(d), 0.5f, 2.0f);
+        else if (k == "modBotplay") modBotplay = b;
+        else if (k == "modPractice") modPractice = b;
+        else if (k == "modMirror") modMirror = b;
+        else if (k == "modScrollType") modScrollType = clampv(int(d), 0, 2);
+        else if (k == "modScrollValue") modScrollValue = clampv(float(d), 0.25f, 10.0f);
+        else if (k == "freeplaySong") freeplaySong = v;
+        else if (k == "freeplayDiff") freeplayDiff = std::max(0, int(d));
     }
     return true;
 }
@@ -123,6 +147,12 @@ bool Settings::save(const std::string& path) const {
     if (!f) return false;
     for (int i = 0; i < 4; ++i)
         for (int j = 0; j < 2; ++j) f << "key" << i << j << "=" << keys4[i][j] << "\n";
+    for (const auto& [count, codes] : laneBinds) {
+        if (std::all_of(codes.begin(), codes.end(), [](int c) { return c == 0; })) continue;
+        f << "lanes" << count << "=";
+        for (size_t i = 0; i < codes.size(); ++i) f << (i ? "," : "") << codes[i];
+        f << "\n";
+    }
     f << "downscroll=" << downscroll << "\nmiddlescroll=" << middlescroll << "\nghostTapping=" << ghostTapping
       << "\nnoteSplashes=" << noteSplashes << "\nflashing=" << flashing << "\ncamZoom=" << camZoom
       << "\nshowFps=" << showFps << "\nfpsMemory=" << fpsMemory << "\nfpsFrameTimes=" << fpsFrameTimes << "\nfpsUsage=" << fpsUsage
@@ -140,13 +170,23 @@ bool Settings::save(const std::string& path) const {
       << "\nfullscreen=" << fullscreen << "\nshowTimings=" << showTimings << "\nopponentStrums=" << opponentStrums << "\ntouchControls=" << touchControls
       << "\nfpsCap=" << fpsCap << "\noffsetMs=" << offsetMs << "\nscrollSpeed=" << scrollSpeed
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
-      << "\nhitsoundVol=" << hitsoundVol << "\nmuted=" << muted << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
+      << "\nhitsoundVol=" << hitsoundVol << "\nmuted=" << muted << "\nmodRate=" << modRate << "\nmodBotplay=" << modBotplay << "\nmodPractice=" << modPractice
+      << "\nmodMirror=" << modMirror << "\nmodScrollType=" << modScrollType << "\nmodScrollValue=" << modScrollValue
+      << "\nfreeplaySong=" << freeplaySong << "\nfreeplayDiff=" << freeplayDiff << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
     return bool(f);
 }
 
 std::vector<std::vector<int>> Settings::laneKeys(int keys) const {
+    if (keys != 4) {
+        std::vector<std::vector<int>> r = defaultLaneKeys(keys);
+        auto it = laneBinds.find(keys);
+        if (it != laneBinds.end())
+            for (size_t l = 0; l < r.size() && l < it->second.size(); ++l)
+                if (it->second[l] > 0) r[l] = {it->second[l]};
+        return r;
+    }
     std::vector<std::vector<int>> r;
-    if (keys == 4) {
+    {
         for (int i = 0; i < 4; ++i) r.push_back({keys4[i][0], keys4[i][1]});
         // Gamepad: d-pad and face buttons.
         r[0].push_back(kPadBase + GAMEPAD_BUTTON_LEFT_FACE_LEFT);
@@ -157,6 +197,14 @@ std::vector<std::vector<int>> Settings::laneKeys(int keys) const {
         r[2].push_back(kPadBase + GAMEPAD_BUTTON_RIGHT_FACE_UP);
         r[3].push_back(kPadBase + GAMEPAD_BUTTON_LEFT_FACE_RIGHT);
         r[3].push_back(kPadBase + GAMEPAD_BUTTON_RIGHT_FACE_RIGHT);
+        return r;
+    }
+}
+
+std::vector<std::vector<int>> Settings::defaultLaneKeys(int keys) {
+    std::vector<std::vector<int>> r;
+    if (keys == 4) {
+        for (int k : {KEY_D, KEY_F, KEY_J, KEY_K}) r.push_back({k});
         return r;
     }
     static const std::vector<std::vector<int>> presets = {
@@ -170,8 +218,14 @@ std::vector<std::vector<int>> Settings::laneKeys(int keys) const {
         {KEY_A, KEY_S, KEY_D, KEY_F, KEY_H, KEY_J, KEY_K, KEY_L},
         {KEY_A, KEY_S, KEY_D, KEY_F, KEY_SPACE, KEY_H, KEY_J, KEY_K, KEY_L},
     };
+    if (keys > ek::kTableKeys) {  // the keyboard's rows; lanes past them have no key
+        for (int l = 0; l < std::min(keys, kMaxKeys); ++l)
+            r.push_back(l < int(sizeof(ek::kManyControls)) - 1 ? std::vector<int>{int((unsigned char)ek::kManyControls[l])}
+                                                                : std::vector<int>{});
+        return r;
+    }
     if (keys > 9) {  // the extra keys scripts' keys: two rows of the keyboard
-        for (const char* k = ek::kControls[clampv(keys, 10, kMaxKeys) - 10]; *k; ++k) r.push_back({int((unsigned char)*k)});
+        for (const char* k = ek::kControls[clampv(keys, 10, ek::kTableKeys) - 10]; *k; ++k) r.push_back({int((unsigned char)*k)});
         return r;
     }
     const auto& p = presets[size_t(clampv(keys, 1, 9) - 1)];

@@ -22,8 +22,8 @@ using gfx::FontId;
 using gfx::fade;
 
 namespace {
-const Color kGold{255, 214, 120, 255};
-const Color kIvory{246, 236, 214, 255};
+const Color kGold{255, 222, 64, 255};   // the accent: a bright, cartoon yellow
+const Color kIvory{242, 244, 255, 255};  // text: a cool white
 
 struct Row {
     enum Kind { Header, Bool, Number, Choice, Action, Key } kind;
@@ -54,10 +54,10 @@ public:
             {Row::Bool, "Disable reset button", "OFF: R during a song makes you lose at once, as in Psych.", &s.noReset},
             {Row::Number, "Rating offset", "How late or early you hit for a Sick!. Higher: you have to hit later (Psych's Rating Offset).",
              nullptr, &s.ratingOffset, -30, 30, 1},
-            {Row::Number, "Sick! hit window", "The time you have for the best rating (DIVINE), either side of the note.", nullptr,
+            {Row::Number, "Sick! hit window", "The time you have for the best rating (SICK!), either side of the note.", nullptr,
              &s.sickWindow, 15, 45, 1},
-            {Row::Number, "Good hit window", "The time you have for a Good (GRACE).", nullptr, &s.goodWindow, 15, 90, 1},
-            {Row::Number, "Bad hit window", "The time you have for a Bad (MORTAL).", nullptr, &s.badWindow, 15, 135, 1},
+            {Row::Number, "Good hit window", "The time you have for a GOOD.", nullptr, &s.goodWindow, 15, 90, 1},
+            {Row::Number, "Bad hit window", "The time you have for a BAD.", nullptr, &s.badWindow, 15, 135, 1},
             {Row::Number, "Safe frames", "How many frames (of 1/60 s) early or late a note can still be hit (Psych's Safe Frames).",
              nullptr, &s.safeFrames, 2, 10, 0.1f},
             {Row::Number, "Scroll speed", "0 = use each chart's own speed.", nullptr, &s.scrollSpeed, 0, 6, 0.1f},
@@ -70,7 +70,7 @@ public:
             {Row::Bool, "Show timing (ms)", "Shows how early or late each hit was.", &s.showTimings},
             {Row::Bool, "Opponent notes", "OFF hides the opponent's receptors and notes, as Psych's Opponent Notes.", &s.opponentNotes},
             {Row::Bool, "Opponent strums", "Light up the opponent's receptors when they sing.", &s.opponentStrums},
-            {Row::Bool, "Note splashes", "Bursts of light on DIVINE hits.", &s.noteSplashes},
+            {Row::Bool, "Note splashes", "Bursts of light on SICK! hits.", &s.noteSplashes},
             {Row::Bool, "Touch controls", "Tap the lanes on a touchscreen (a mouse click counts as a tap).", &s.touchControls},
             {Row::Bool, "Extra keys", "Charts made for 1 to 18 keys keep them, as in Psych Extra Keys. OFF: every chart has 4 keys, like Psych and JS Engine.",
              &s.extraKeys},
@@ -80,6 +80,8 @@ public:
             {Row::Key, "Up lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
             {Row::Key, "Right lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
             {Row::Action, "Reset controls", "Restore D F J K and the arrow keys."},
+            {Row::Action, "Key bindings (1 to 18 keys)...", "The key of every lane for charts of 1 to 18 keys, as their arrows show "
+             "in a song. Works with a Bluetooth keyboard on Android too."},
             {Row::Header, "GRAPHICS", ""},
             {Row::Bool, "Fullscreen", "Borderless fullscreen (F11 works anywhere).", &s.fullscreen},
             {Row::Bool, "VSync", "Waits for the screen's refresh. OFF: the frame limit below decides (most precise input).", &s.vsync},
@@ -115,13 +117,12 @@ public:
              nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
             {Row::Bool, "Psych Engine interface", "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds, from your own copy.",
              &s.psychUi},
-            {Row::Action, "Psych Engine folder...", ""},  // BACKSPACE: back to the copy found automatically
             {Row::Bool, "Hit popups", "Rating pictures and combo numbers that pop up on each hit.", &s.hitPopups},
             {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
             {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
             {Row::Bool, "Hide HUD", "Hides the health bar, the icons, the score line and the ratings, as Psych's Hide HUD.", &s.hideHud},
-            {Row::Bool, "Watermark", "\"God's Hand\" and its version in the bottom-left corner of songs, as JS Engine shows its own.",
+            {Row::Bool, "Watermark", "\"God's Hand Engine v.(version) (system) Edition\" in the bottom-left corner of songs, as JS Engine shows its own.",
              &s.watermark},
             {Row::Bool, "Audio visualizer",
              "Bars in the top-right corner of songs that move with the music. Their colour follows the chart: whose turn it "
@@ -132,7 +133,7 @@ public:
             {Row::Bool, "Combo stacking", "Ratings and combo numbers pile up. OFF: only the latest one, easier to read.",
              &s.comboStacking},
             {Row::Number, "Note splash opacity", "How see-through the bursts on your best hits are.", nullptr, &s.splashAlpha, 0, 1, 0.1f},
-            {Row::Choice, "Note skin", "The Psych interface's note skin: Psych's noteSkins/ pictures in your copy.", nullptr, nullptr, 0, 0, 0,
+            {Row::Choice, "Note skin", "The Psych interface's note skin: the noteSkins/ pictures of your Psych copy and of every installed mod.", nullptr, nullptr, 0, 0, 0,
              &noteSkinIdx_},
             {Row::Action, "Note colors...", "The Psych interface's note colours, as in Psych's Note Colors menu."},
             {Row::Number, "Rating position X", "Where the ratings pop up (Psych's Adjust Combo).", nullptr, &s.comboOffset[0], -600, 600, 1},
@@ -141,16 +142,17 @@ public:
             {Row::Number, "Combo position Y", "", nullptr, &s.comboOffset[3], -400, 400, 1},
             {Row::Choice, "Pause screen song", "The pause menu's music with the Psych Engine interface.", nullptr, nullptr, 0, 0, 0,
              &s.pauseMusic, {0, 1, 2}, {"None", "Breakfast", "Tea Time"}},
-            {Row::Header, "RENDERING", ""},
-            {Row::Bool, "Rendering mode", "Songs play by themselves and are recorded to a video in renders/, frame by frame, as in JS Engine and "
-             "H-Slice: smooth even if the device cannot keep up. On a computer it needs ffmpeg (next to the game or installed); "
-             "on Android the phone's own encoder makes it and it goes to Movies/GodsHand. ESC stops.", &s.renderMode},
-            {Row::Choice, "Video size", "", nullptr, nullptr, 0, 0, 0, &s.renderSize, {0, 1, 2, 3},
+            {Row::Header, "RENDER MODE VIDEOS", ""},
+            {Row::Choice, "Video size", "For RENDER MODE on the main menu: the song plays by itself and is recorded to a video in "
+             "renders/, frame by frame, smooth even if the device cannot keep up. On a computer it needs ffmpeg (next to the game "
+             "or installed); on Android the phone's own encoder makes it and it goes to Movies/GodsHand.", nullptr, nullptr, 0, 0, 0,
+             &s.renderSize, {0, 1, 2, 3},
              {"1280x720", "1920x1080", "2560x1440", "3840x2160"}},
             {Row::Choice, "Video frame rate", "", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
-            {Row::Choice, "Video encoder", "x264 and x265 use the processor; the NVIDIA, AMD and Intel ones use the graphics card "
-             "(much faster, when the card has one).", nullptr, nullptr, 0, 0, 0, &s.renderEncoder, {0, 1, 2, 3, 4, 5, 6},
-             {"H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
+            {Row::Choice, "Video encoder", "Auto: the graphics card's own encoder when this computer has one that works (much faster), "
+             "else x264. x264 and x265 use the processor; the NVIDIA, AMD and Intel ones the graphics card.", nullptr, nullptr, 0, 0, 0,
+             &s.renderEncoder, {7, 0, 1, 2, 3, 4, 5, 6},
+             {"Auto", "H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
             {Row::Choice, "Video bitrate", "Higher is sharper and bigger. Spam charts move a lot: 20 Mbps or more.", nullptr, nullptr, 0,
              0, 0, &s.renderBitrate, {5, 10, 20, 40, 80}, {"5 Mbps", "10 Mbps", "20 Mbps", "40 Mbps", "80 Mbps"}},
             {Row::Bool, "Video audio", "The song (instrumental and voices) in the video.", &s.renderAudio},
@@ -179,11 +181,12 @@ public:
                 r.fmt = [](float v) { return std::string(TextFormat("%+d", int(std::lround(v)))); };
             else if (r.kind == Row::Number) r.fmt = pct;
             if (r.label == "Calibrate offset...") r.action = [] { app().change(makeCalibration()); };
-            if (r.label == "Psych Engine folder...") r.action = [this] { chooseFolder(); };
             if (r.label == "Note colors...") r.action = [] { app().change(makeNoteColors()); };
+            if (r.label == "Key bindings (1 to 18 keys)...") r.action = [] { app().change(makeKeyBindings()); };
             if (r.label == "Note skin") {
-                // Default (NOTE_assets) and the skins in the copy's noteSkins/.
-                skins_ = psychNoteSkins(app().psychFolderInUse);
+                // Default (NOTE_assets) and the skins in noteSkins/ of the Psych
+                // copy in use and of every installed mod.
+                skins_ = psychNoteSkins(app().psychFolderInUse, app().library.allAssetRoots());
                 r.names = {"Default"};
                 r.choices = {0};
                 for (size_t k = 0; k < skins_.size(); ++k) {
@@ -204,13 +207,12 @@ public:
         for (Row& r : rows_)
             if (r.kind == Row::Key) r.lane = lane++;
         if (platform::kAndroid) {
-            // No keyboard and no window: the lanes are the screen itself.
-            bool controls = false;
+            // No window to resize, the lanes are the screen itself, and Render
+            // Mode uses the phone's own H.264 encoder: no encoder to pick. The
+            // key bindings stay, for a Bluetooth keyboard.
             std::vector<Row> kept;
             for (Row& r : rows_) {
-                if (r.kind == Row::Header) controls = r.label.rfind("CONTROLS", 0) == 0;
-                // Rendering mode uses the phone's own H.264 encoder: no encoder to pick.
-                if (controls || r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "Video encoder") continue;
+                if (r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "Video encoder") continue;
                 kept.push_back(std::move(r));
             }
             rows_ = std::move(kept);
@@ -263,10 +265,7 @@ public:
                     else *r.b = !*r.b;
                     if (r.label == "VSync") platform::setVsync(a.settings.vsync);
                     if (r.b == &a.settings.antialiasing) psychUi().setSmooth(a.settings.antialiasing);  // the loaded pictures too
-                    if (r.label == "Psych Engine interface") {
-                        a.applyPsychUi();  // no folder chosen: the best copy found among the mods
-                        if (a.settings.psychUi && a.settings.psychFolder.empty() && !psychUi().active()) chooseFolder();
-                    }
+                    if (r.label == "Psych Engine interface") a.applyPsychUi();  // the best copy found among the mods
                     changed = true;
                 }
                 break;
@@ -293,12 +292,6 @@ public:
                 break;
             case Row::Action:
                 if (in.accept()) { sfxPlay(Sfx::Confirm); r.action(); }
-                else if (r.label == "Psych Engine folder..." && in.pressed(KEY_BACKSPACE) && !a.settings.psychFolder.empty()) {
-                    a.settings.psychFolder.clear();  // back to the copy found among the mods
-                    a.applyPsychUi();
-                    a.saveSettings();
-                    sfxPlay(Sfx::Cancel);
-                }
                 break;
             case Row::Key:
                 if (dir) { slot_ = 1 - slot_; sfxPlay(Sfx::Scroll); }
@@ -406,17 +399,19 @@ private:
         a.saveSettings();
         sfxPlay(Sfx::Confirm);
     }
+    // The interface's pictures and sounds come from the most complete Psych
+    // Engine / JS Engine copy among the mods (engine packs such as JS Engine or
+    // H-Slice): its row says which, or that there is none.
     void refreshFolderHelp() {
         const App& a = app();
         for (Row& r : rows_)
-            if (r.label == "Psych Engine folder...") {
+            if (r.label == "Psych Engine interface") {
+                const std::string base = "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds.";
                 if (pickingFolder_) r.help = "Copying the interface files...";
-                else if (a.settings.psychFolder.empty() && !a.psychFolderInUse.empty())
-                    r.help = "Found among your mods: " + platform::displayPath(a.psychFolderInUse) + ". Pick another folder, or drop one on this window.";
-                else if (a.settings.psychFolder.empty())
-                    r.help = "None found among your mods (engine packs such as JS Engine or H-Slice have one). Pick the folder, or drop it on this window.";
-                else r.help = platform::displayPath(a.settings.psychFolder) + (a.psychReport.empty() ? "" : "  (" + a.psychReport + ")") +
-                              "  BACKSPACE: the copy found among your mods.";
+                else if (!a.psychFolderInUse.empty()) r.help = base + " From " + platform::displayPath(a.psychFolderInUse) + ".";
+                else if (a.settings.psychUi)
+                    r.help = base + " No copy among your mods yet: install an engine pack such as JS Engine or H-Slice (Freeplay > MOD PACKS).";
+                else r.help = base;
             }
     }
     bool pickingFolder_ = false;
@@ -435,6 +430,147 @@ private:
 
 public:
     bool keyReserved(int) const override { return waiting_; }  // rebinding: the next key is the binding
+};
+
+// ----------------------------------------------------------- Key bindings --
+// The keys of every key count, 1 to 18: the lanes as a song shows them, each
+// with its key. LEFT/RIGHT pick a lane (on the top row, the key count), ENTER
+// or a tap on a lane waits for its new key, BACKSPACE gives the lane its
+// default back, R all of them.
+
+class KeyBindState : public State {
+public:
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.keys = {{"FEWER KEYS", KEY_PAGE_DOWN}, {"MORE KEYS", KEY_PAGE_UP}, {"RESET LANE", KEY_DELETE}, {"RESET ALL", KEY_R}};
+        return t;
+    }
+    bool keyReserved(int) const override { return waiting_; }  // the next key is the binding
+
+    void update(double dt) override {
+        App& a = app();
+        Input& in = a.input;
+        Settings& s = a.settings;
+        anim_ = approach(anim_, float(lane_), 14.0f, float(dt));
+        if (waiting_) {
+            const int code = in.firstPressed();
+            if (code == KEY_ESCAPE || code == KEY_BACK) {
+                waiting_ = false;
+                sfxPlay(Sfx::Cancel);
+            } else if (code > 0 && code < kPadBase) {
+                setKey(s, lane_, code);
+                waiting_ = false;
+                sfxPlay(Sfx::Confirm);
+                a.saveSettings();
+            }
+            return;
+        }
+        const int before = keys_;
+        if (in.pressed(KEY_PAGE_UP) || (row_ == 0 && in.right())) keys_ = std::min(ek::kTableKeys, keys_ + 1);
+        if (in.pressed(KEY_PAGE_DOWN) || (row_ == 0 && in.left())) keys_ = std::max(1, keys_ - 1);
+        if (keys_ != before) {
+            lane_ = clampv(lane_, 0, keys_ - 1);
+            sfxPlay(Sfx::Scroll);
+        }
+        if (in.up() && row_ == 1) { row_ = 0; sfxPlay(Sfx::Scroll); }
+        if (in.down() && row_ == 0) { row_ = 1; sfxPlay(Sfx::Scroll); }
+        if (row_ == 1) {
+            if (in.left()) { lane_ = (lane_ + keys_ - 1) % keys_; sfxPlay(Sfx::Scroll); }
+            if (in.right()) { lane_ = (lane_ + 1) % keys_; sfxPlay(Sfx::Scroll); }
+        }
+        if (in.accept()) {
+            if (row_ == 0) row_ = 1;
+            else waiting_ = true;
+            sfxPlay(Sfx::Scroll);
+        }
+        if (in.pressed(KEY_DELETE) || (in.pressed(KEY_BACKSPACE) && row_ == 1)) {
+            setKey(s, lane_, 0);
+            sfxPlay(Sfx::Cancel);
+            a.saveSettings();
+            return;
+        }
+        if (in.pressed(KEY_R)) {
+            for (int l = 0; l < keys_; ++l) setKey(s, l, 0);
+            sfxPlay(Sfx::Confirm);
+            a.saveSettings();
+        }
+        // A tap or click on a lane: that lane waits for its key.
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            const Vector2 p = gfx::toCanvas(GetMousePosition());
+            for (int l = 0; l < keys_; ++l) {
+                const Vector2 c = laneCenter(l);
+                if (std::fabs(p.x - c.x) < laneStep() * 0.5f && std::fabs(p.y - c.y) < 90) {
+                    lane_ = l;
+                    row_ = 1;
+                    waiting_ = true;
+                    sfxPlay(Sfx::Scroll);
+                    return;
+                }
+            }
+        }
+        if (in.back() && !in.pressed(KEY_BACKSPACE)) {
+            a.saveSettings();
+            sfxPlay(Sfx::Cancel);
+            a.change(makeOptions());
+        }
+    }
+
+    void draw() override {
+        App& a = app();
+        const Settings& s = a.settings;
+        gfx::beginCanvas();
+        drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
+        gfx::text(FontId::Title, "KEY BINDINGS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        const bool top = row_ == 0;
+        DrawRectangleRounded({440, 110, 400, 56}, 0.4f, 8, top ? Color{255, 214, 120, 60} : Color{0, 0, 0, 110});
+        gfx::text(FontId::Title, TextFormat("<   %d KEY%s   >", keys_, keys_ == 1 ? "" : "S"), 640, 116, 38, top ? kGold : kIvory,
+                  Align::Center, 2.0f);
+        const auto lanes = s.laneKeys(keys_);
+        const auto defaults = Settings::defaultLaneKeys(keys_);
+        const float size = std::min(96.0f, laneStep() * 0.9f);
+        for (int l = 0; l < keys_; ++l) {
+            const Vector2 c = laneCenter(l);
+            const bool on = row_ == 1 && l == lane_;
+            if (on) DrawRectangleRounded({c.x - laneStep() * 0.5f + 2, c.y - 70, laneStep() - 4, 190}, 0.2f, 8, Color{255, 214, 120, 50});
+            gfx::drawNote(gfx::laneDir(keys_, l), {c.x, c.y}, size, on ? 1.0f : 0.75f);
+            const int code = l < int(lanes.size()) && !lanes[size_t(l)].empty() ? lanes[size_t(l)][0] : 0;
+            const bool changed = l < int(defaults.size()) && !defaults[size_t(l)].empty() && code != defaults[size_t(l)][0];
+            const std::string name = on && waiting_ ? std::string("?") : std::string(code ? keyName(code) : "-");
+            const float ts = keys_ > 12 ? 20.0f : keys_ > 8 ? 24.0f : 30.0f;
+            gfx::text(FontId::Ui, name, c.x, c.y + 64, ts, on ? WHITE : (changed ? kGold : kIvory), Align::Center, 1.5f);
+        }
+        std::string help = waiting_ ? "Press the key for this lane (ESC: keep the one it has)"
+                                    : "Lanes for charts with this many keys. Gold: a key you chose.";
+        if (keys_ == 4 && !waiting_) help = "4 keys: also in Options > CONTROLS, with a second key for each lane.";
+        DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
+        gfx::text(FontId::Ui, help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
+        if (!a.touchMode) {
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
+            gfx::text(FontId::Ui, "UP/DOWN row   LEFT/RIGHT keys or lane   ENTER rebind   BACKSPACE default   R all defaults   ESC back",
+                      gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+        }
+        gfx::endCanvas();
+    }
+
+private:
+    float laneStep() const { return std::min(130.0f, 1180.0f / float(keys_)); }
+    Vector2 laneCenter(int lane) const {
+        const float w = laneStep() * float(keys_);
+        return {640.0f - w * 0.5f + laneStep() * (float(lane) + 0.5f), 330.0f};
+    }
+    void setKey(Settings& s, int lane, int code) {
+        if (keys_ == 4) {
+            const Settings d;
+            s.keys4[lane][0] = code ? code : d.keys4[lane][0];
+            return;
+        }
+        std::vector<int>& v = s.laneBinds[keys_];
+        v.resize(size_t(keys_), 0);
+        v[size_t(lane)] = code;
+    }
+    int keys_ = 9, lane_ = 0, row_ = 1;
+    float anim_ = 0;
+    bool waiting_ = false;
 };
 
 // ------------------------------------------------------------ Calibration --
@@ -678,6 +814,7 @@ private:
 };
 
 std::unique_ptr<State> makeNoteColors() { return std::make_unique<NoteColorsState>(); }
+std::unique_ptr<State> makeKeyBindings() { return std::make_unique<KeyBindState>(); }
 
 std::unique_ptr<State> makeOptions() { return std::make_unique<OptionsState>(); }
 std::unique_ptr<State> makeCalibration() { return std::make_unique<CalibrationState>(); }

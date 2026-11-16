@@ -37,8 +37,6 @@ public:
     virtual bool keyReserved(int key) const { return false; }
     // More for godshand --perf (a song: how its notes were drawn).
     virtual std::string perfInfo() const { return {}; }
-    // Canvas areas the FPS panel keeps clear of (a song's HUD and arrows).
-    virtual void busyRects(std::vector<Rectangle>& out) const {}
     // A song: the pictures of the last one may stay uploaded for it (other
     // screens free them; see SceneRenderer::releaseKept).
     virtual bool keepsPictures() const { return false; }
@@ -56,6 +54,8 @@ struct Modifiers {
 struct PlayRequest {
     std::string songId, diff;
     bool story = false;
+    bool render = false;     // Render Mode (main menu): the song plays by itself and is recorded to a video
+    bool autoChart = false;  // AutoChart (main menu): a chart made from the song's audio, whatever charts it has
     std::string replayPath;  // watch this replay instead of playing
     std::vector<std::string> storyQueue;  // songs still to play after this one
     long long storyScore = 0;
@@ -91,6 +91,9 @@ public:
     std::string userDir;
     bool listSongs = false;
     bool checkCharts = false;  // --check-charts with --list-songs
+    std::string checkScriptsDir;  // --check-scripts <folder>
+    bool autoChartCli = false;    // --autochart: the --autoplay song played with an AutoChart
+    double frameBudget() const;   // seconds a frame may take (frame limit or the screen's refresh)
     Settings settings;
     Scores scores;
     Library library;
@@ -108,6 +111,8 @@ public:
 
     // remembered menu positions
     int mainSel = 0, freeplaySel = 0, freeplayDiff = 1, storyDiff = 1;
+    // What FREEPLAY, RENDER MODE or AUTOCHART on the main menu opened the song list for.
+    enum class SongListMode { Play, Render, AutoChart } songListMode = SongListMode::Play;
 
     struct Automation {
         bool enabled = false;
@@ -182,8 +187,6 @@ private:
     // processor use, hardware), sampled twice a second.
     void drawFpsPanel();
     double statsAt_ = -10, cpuAt_ = 0, cpuSecs_ = 0;
-    int fpsSpot_ = 0;          // which corner the FPS panel is in (see drawFpsPanel)
-    double fpsSpotAt_ = -10;   // when that was last checked
     float cpuUse_ = 0;
     unsigned long long memNow_ = 0, memPeak_ = 0, sysUsed_ = 0;
     double gpuBusy_ = -1;  // the graphics card's use (-1: the system does not say)
@@ -217,6 +220,7 @@ std::unique_ptr<State> makeOptions();
 std::unique_ptr<State> makeCredits();
 std::unique_ptr<State> makeCalibration();
 std::unique_ptr<State> makeNoteColors();  // Options: Psych's Note Colors
+std::unique_ptr<State> makeKeyBindings();  // Options: the keys of 1 to 18 key charts
 std::unique_ptr<State> makePlay(const PlayRequest& req);
 std::unique_ptr<State> makeResults(const ResultData& r);
 std::unique_ptr<State> makeChartEditor(const std::string& songId, const std::string& diff);

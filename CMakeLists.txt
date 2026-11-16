@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(GodsHand VERSION 1.10.0 LANGUAGES C CXX)
+project(GodsHand VERSION 1.11.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,6 +49,8 @@ endforeach()
 set_source_files_properties(${GH_LUA_SOURCES} PROPERTIES LANGUAGE CXX)
 add_library(gh_lua STATIC ${GH_LUA_SOURCES})
 target_include_directories(gh_lua PUBLIC ${lua_SOURCE_DIR})
+# Names may use any UTF-8 letter, as in Psych's LuaJIT (mods have "äniName").
+target_compile_definitions(gh_lua PRIVATE LUA_UCID)
 if(MSVC)
   target_compile_options(gh_lua PRIVATE /TP /W0)
   target_compile_definitions(gh_lua PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -89,6 +91,7 @@ add_library(gh_core STATIC
   src/chart_stream.cpp
   src/chart_binary.cpp
   src/basegame.cpp
+  src/builtin_events.cpp
   src/shader_glsl.cpp
   src/effects.cpp
   src/hscript.cpp
@@ -145,11 +148,11 @@ endif()
 
 # ---- the game ----------------------------------------------------------------
 if(GH_BUILD_GAME)
-  # Fonts (SIL OFL) ship in assets/fonts; copies of the source without them
+  # Fonts (SIL OFL, Apache 2.0) ship in assets/fonts; copies of the source without them
   # fetch the exact same files here. The game falls back to a built-in font.
   set(GH_FONT_COMMIT 5bb28733cec313b63fbd415b574b5ae35c8aa8b8)
   set(GH_FONTS
-    "CinzelDecorative-Bold.ttf|ofl/cinzeldecorative/CinzelDecorative-Bold.ttf|e854e68a388aa50d742a4415c1ae5c17a617ef7956c95a70021d0a4a44f20518"
+    "LuckiestGuy-Regular.ttf|apache/luckiestguy/LuckiestGuy-Regular.ttf|cfbdd68a039f92df51cf3721506af6242e64594c6325fe0bedbeff3fe385d980"
     "Rajdhani-Bold.ttf|ofl/rajdhani/Rajdhani-Bold.ttf|691470dd3286a14e9677940d0bf75796179841ba5215cbda1a2c8910a3226afd")
   foreach(entry IN LISTS GH_FONTS)
     string(REPLACE "|" ";" parts "${entry}")
@@ -289,6 +292,8 @@ if(GH_BUILD_GAME)
     src/sysinfo.cpp
     src/touch_ui.cpp
     src/visualizer.cpp
+    src/check_scripts.cpp
+    src/performance.cpp
   )
   if(ANDROID)
     # NativeActivity loads libgodshand.so; raylib's android_main() calls main().
@@ -322,6 +327,8 @@ if(GH_BUILD_GAME)
   endif()
   if(APPLE)
     target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL" "-framework CoreFoundation")
+    # A game for macOS (Game Mode): the Info.plist inside the program itself.
+    target_link_options(godshand PRIVATE "LINKER:-sectcreate,__TEXT,__info_plist,${CMAKE_SOURCE_DIR}/cmake/Info.plist")
   endif()
   if(UNIX AND NOT APPLE AND NOT ANDROID)
     target_link_libraries(godshand PRIVATE ${CMAKE_DL_LIBS})  # the FPS counter asks NVIDIA's library, when there is one
@@ -347,13 +354,13 @@ endif()
 # Streamed song audio is tested with raylib's decoders when raylib is built.
 if(GH_BUILD_TESTS AND TARGET raylib)
   target_sources(gh_tests PRIVATE tests/audio_tests.cpp src/audio.cpp src/audio_decode.cpp src/platform.cpp src/folder_picker.cpp
-                 src/render_mode.cpp src/process.cpp)
+                 src/render_mode.cpp src/process.cpp src/sysinfo.cpp)
   target_link_libraries(gh_tests PRIVATE raylib)
   if(WIN32)
-    target_link_libraries(gh_tests PRIVATE shell32 ole32)  # platform.cpp's folder dialog
+    target_link_libraries(gh_tests PRIVATE shell32 ole32 pdh)  # platform.cpp's folder dialog; sysinfo.cpp's GPU counters
   endif()
   if(APPLE)
-    target_link_libraries(gh_tests PRIVATE "-framework Cocoa")
+    target_link_libraries(gh_tests PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreFoundation")  # sysinfo.cpp
   endif()
   target_compile_definitions(gh_tests PRIVATE GH_AUDIO_TESTS=1)
 endif()
