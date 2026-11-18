@@ -147,8 +147,10 @@ public:
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
             {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
             {Row::Bool, "Hide HUD", "Hides the health bar, the icons, the score line and the ratings, as Psych's Hide HUD.", &s.hideHud},
-            {Row::Bool, "Watermark", "\"God's Hand Engine v.(version) (system) Edition\" in the bottom-left corner of songs, as JS Engine shows its own.",
+            {Row::Bool, "Watermark", "\"God's Hand Engine v.(version) (system) Slop Edition\" in the bottom-left corner of songs, as JS Engine shows its own.",
              &s.watermark},
+            {Row::Bool, "Intro video", "The engine's intro before the title screen. ENTER skips it (the SKIP button on a touchscreen).",
+             &s.introVideo},
             {Row::Bool, "Audio visualizer",
              "Bars in the top-right corner of songs that move with the music. Their colour follows the chart: whose turn it "
              "is, how thick the notes are, your hits and misses, and your health.",
