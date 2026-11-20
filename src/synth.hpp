@@ -5,6 +5,7 @@
 // effect at load time (no audio files are shipped with the game).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 

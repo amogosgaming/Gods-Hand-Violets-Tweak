@@ -2,15 +2,32 @@ name: Build
 
 on:
   push:
-    branches: [main, "claude/**"]
+    branches: [main, master, "claude/**"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
     inputs:
+      platforms:
+        description: "Platforms to build"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - windows
+          - linux
+          - macos
+          - android
+      skip_emulator:
+        description: "Skip Android emulator smoke test (faster APK-only runs)"
+        required: false
+        default: false
+        type: boolean
       release:
-        description: "Publish an official release with this tag (e.g. v1.0.0). Empty: only build."
+        description: "Publish an official release with this tag (e.g. v2.0.0). Empty: only build."
         required: false
         default: ""
+        type: string
 
 permissions:
   contents: write
@@ -26,8 +43,26 @@ jobs:
   tests:
     name: Core tests
     runs-on: ubuntu-24.04
+    outputs:
+      desktop_matrix: ${{ steps.plan.outputs.desktop_matrix }}
+      run_desktop: ${{ steps.plan.outputs.run_desktop }}
+      run_android: ${{ steps.plan.outputs.run_android }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select target platforms
+        id: plan
+        run: |
+          p="${{ inputs.platforms || 'all' }}"
+          case "$p" in
+            windows) m='[{"os":"windows-latest","name":"windows-x64"}]'; rd=true; ra=false ;;
+            linux)   m='[{"os":"ubuntu-22.04","name":"linux-x64"}]'; rd=true; ra=false ;;
+            macos)   m='[{"os":"macos-15","name":"macos-arm64"}]'; rd=true; ra=false ;;
+            android) m='[{"os":"ubuntu-22.04","name":"linux-x64"}]'; rd=false; ra=true ;;
+            *)       m='[{"os":"windows-latest","name":"windows-x64"},{"os":"ubuntu-22.04","name":"linux-x64"},{"os":"macos-15","name":"macos-arm64"}]'; rd=true; ra=true ;;
+          esac
+          echo "desktop_matrix=$m" >> "$GITHUB_OUTPUT"
+          echo "run_desktop=$rd" >> "$GITHUB_OUTPUT"
+          echo "run_android=$ra" >> "$GITHUB_OUTPUT"
       - name: Configure
         run: cmake -S . -B build -DGH_BUILD_GAME=OFF -DCMAKE_BUILD_TYPE=Release
       - name: Build
@@ -38,13 +73,11 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: tests
+    if: ${{ needs.tests.outputs.run_desktop == 'true' }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: windows-latest, name: windows-x64 }
-          - { os: ubuntu-22.04, name: linux-x64 }
-          - { os: macos-15, name: macos-arm64 }
+        include: ${{ fromJson(needs.tests.outputs.desktop_matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -52,9 +85,18 @@ jobs:
         if: runner.os == 'Linux'
         run: tools/ci_apt_install.sh libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=OFF
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=ON
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=OFF
+          fi
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Audio & hitsound tests (Linux + raylib)
+        if: runner.os == 'Linux'
+        run: ./build/gh_tests
       - name: Note renderer assembly (MSVC)
         # The MASM version of the x86-64 routine, checked against the C++ one
         # on Windows itself (the Linux tests check the GCC one).
@@ -92,6 +134,7 @@ jobs:
   android:
     name: Build android
     needs: tests
+    if: ${{ needs.tests.outputs.run_android == 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -131,6 +174,7 @@ jobs:
   android-test:
     name: Test android (emulator)
     needs: android
+    if: ${{ inputs.skip_emulator != true }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
