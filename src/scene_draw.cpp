@@ -87,7 +87,8 @@ SceneRenderer::CompiledShader* SceneRenderer::shaderFor(const scene::Scene& sc, 
         errors.push_back("shader " + name + ": no fragment shader");
         return &cs;
     }
-    const std::string glsl = translateShader(src->second.frag, rlGetVersion() == RL_OPENGL_ES_20);
+    const int glVer = rlGetVersion();
+    const std::string glsl = translateShader(src->second.frag, glVer == RL_OPENGL_ES_20, glVer == RL_OPENGL_21);
     std::string log;
     g_shaderLog = &log;
     SetTraceLogCallback(captureLog);

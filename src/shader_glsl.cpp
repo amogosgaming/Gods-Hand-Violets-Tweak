@@ -36,6 +36,17 @@ uniform vec4 colDiffuse;
 #define gh_sampleLod(s, uv, lod) texture2D(s, uv)
 )GLSL";
 
+// OpenGL 2.1 (legacy desktop): GLSL 1.20.
+constexpr const char* kPreludeGl120 = R"GLSL(#version 120
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+#define gh_FragColor gl_FragColor
+#define gh_sample texture2D
+#define gh_sampleLod(s, uv, lod) texture2D(s, uv)
+)GLSL";
+
 constexpr const char* kCommon = R"GLSL(uniform vec2 openfl_TextureSize;
 uniform float gh_flipY;
 uniform float gh_premul;
@@ -202,7 +213,7 @@ std::string fixMainWithParameters(std::string body) {
 
 }  // namespace
 
-std::string translateShader(std::string_view src, bool gles) {
+std::string translateShader(std::string_view src, bool gles, bool gl21) {
     // Line pass: drop directives and declarations the prelude provides.
     std::string body;
     size_t p = 0;
@@ -288,7 +299,8 @@ std::string translateShader(std::string_view src, bool gles) {
     if (uses("iResolution") && !declaresName(body, "iResolution")) extra += "#define iResolution vec3(openfl_TextureSize, 0.0)\n";
     if (uses("iTime") && !declaresName(body, "iTime")) extra += "uniform float iTime;\n";
     if (!extra.empty()) extra += "#line 1\n";
-    return std::string(gles ? kPreludeEs : kPrelude) + kCommon + extra + body;
+    const char* prelude = gles ? kPreludeEs : (gl21 ? kPreludeGl120 : kPrelude);
+    return std::string(prelude) + kCommon + extra + body;
 }
 
 }  // namespace gh

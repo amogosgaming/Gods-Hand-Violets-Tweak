@@ -18,13 +18,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#ifndef PSAPI_VERSION
-#define PSAPI_VERSION 2  // GetProcessMemoryInfo from kernel32 (Windows 7 and later)
-#endif
 #include <windows.h>
-#include <psapi.h>
-#include <pdh.h>
-#include <pdhmsg.h>
 #include <GL/gl.h>
 #elif defined(__APPLE__)
 #define GL_SILENCE_DEPRECATION
@@ -245,10 +239,44 @@ const Hardware& hardware() {
     return h;
 }
 
+#if defined(_WIN32)
+namespace {
+struct GhProcessMemoryCounters {
+    DWORD cb;
+    DWORD PageFaultCount;
+    SIZE_T PeakWorkingSetSize;
+    SIZE_T WorkingSetSize;
+    SIZE_T QuotaPeakPagedPoolUsage;
+    SIZE_T QuotaPagedPoolUsage;
+    SIZE_T QuotaPeakNonPagedPoolUsage;
+    SIZE_T QuotaNonPagedPoolUsage;
+    SIZE_T PagefileUsage;
+    SIZE_T PeakPagefileUsage;
+};
+
+bool winProcessMemory(GhProcessMemoryCounters& pmc) {
+    using Fn = BOOL(WINAPI*)(HANDLE, GhProcessMemoryCounters*, DWORD);
+    static Fn fn = []() -> Fn {
+        if (HMODULE k32 = GetModuleHandleW(L"kernel32.dll")) {
+            if (FARPROC p = GetProcAddress(k32, "K32GetProcessMemoryInfo"))
+                return reinterpret_cast<Fn>(reinterpret_cast<void*>(p));
+        }
+        if (HMODULE psapi = LoadLibraryW(L"psapi.dll")) {
+            if (FARPROC p = GetProcAddress(psapi, "GetProcessMemoryInfo"))
+                return reinterpret_cast<Fn>(reinterpret_cast<void*>(p));
+        }
+        return nullptr;
+    }();
+    pmc.cb = sizeof pmc;
+    return fn && fn(GetCurrentProcess(), &pmc, sizeof pmc) != 0;
+}
+}  // namespace
+#endif
+
 uint64_t processMemory() {
 #if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS pmc{};
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return uint64_t(pmc.WorkingSetSize);
+    GhProcessMemoryCounters pmc{};
+    if (winProcessMemory(pmc)) return uint64_t(pmc.WorkingSetSize);
     return 0;
 #elif defined(__APPLE__)
     mach_task_basic_info info{};
@@ -267,8 +295,8 @@ uint64_t processMemory() {
 
 uint64_t peakProcessMemory() {
 #if defined(_WIN32)
-    PROCESS_MEMORY_COUNTERS pmc{};
-    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof pmc)) return uint64_t(pmc.PeakWorkingSetSize);
+    GhProcessMemoryCounters pmc{};
+    if (winProcessMemory(pmc)) return uint64_t(pmc.PeakWorkingSetSize);
     return 0;
 #elif defined(__APPLE__)
     mach_task_basic_info info{};
@@ -360,24 +388,58 @@ void glVideoMemory(GpuUse& g) {
 #if defined(_WIN32)
 // Windows' own GPU counters, as Task Manager reads them: each 3D engine's use
 // added up over the processes (instances are "pid_<n>_luid_<card>_phys_<n>_eng_<n>_engtype_3D"),
-// the busiest engine's; and the dedicated video memory in use.
+// the busiest engine's; and the dedicated video memory in use. Loaded dynamically
+// from pdh.dll so older Windows versions without these counters still start cleanly.
+using PdhHandle = void*;
+using PdhStatus = LONG;
+constexpr PdhStatus kPdhMoreData = static_cast<PdhStatus>(0x800007D2L);
+constexpr DWORD kPdhFmtDouble = 0x00000200UL;
+constexpr DWORD kPdhCstatusValid = 0x00000000UL;
+constexpr DWORD kPdhCstatusNew = 0x00000001UL;
+
+struct PdhFmtCounterValue {
+    DWORD CStatus;
+    union {
+        LONG longValue;
+        double doubleValue;
+        LONGLONG largeValue;
+        LPCSTR AnsiStringValue;
+        LPCWSTR WideStringValue;
+    };
+};
+
+struct PdhFmtCounterValueItemW {
+    LPWSTR szName;
+    PdhFmtCounterValue FmtValue;
+};
+
 struct PdhGpu {
-    PDH_HQUERY query = nullptr;
-    PDH_HCOUNTER busy = nullptr, mem = nullptr;
+    using OpenQueryFn = PdhStatus(WINAPI*)(LPCWSTR, DWORD_PTR, PdhHandle*);
+    using AddEnglishCounterFn = PdhStatus(WINAPI*)(PdhHandle, LPCWSTR, DWORD_PTR, PdhHandle*);
+    using CollectQueryDataFn = PdhStatus(WINAPI*)(PdhHandle);
+    using GetFormattedArrayFn = PdhStatus(WINAPI*)(PdhHandle, DWORD, LPDWORD, LPDWORD, PdhFmtCounterValueItemW*);
+
+    OpenQueryFn openQuery = nullptr;
+    AddEnglishCounterFn addEnglishCounter = nullptr;
+    CollectQueryDataFn collectQueryData = nullptr;
+    GetFormattedArrayFn getFormattedArray = nullptr;
+    PdhHandle query = nullptr;
+    PdhHandle busy = nullptr, mem = nullptr;
     bool tried = false, ok = false;
 };
 
 // The counter's values by instance (false when there are none yet).
-bool counterValues(PDH_HCOUNTER c, std::vector<std::pair<std::wstring, double>>& out) {
+bool counterValues(const PdhGpu& p, PdhHandle c, std::vector<std::pair<std::wstring, double>>& out) {
     out.clear();
+    if (!p.getFormattedArray || !c) return false;
     DWORD size = 0, count = 0;
-    if (PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &size, &count, nullptr) != static_cast<PDH_STATUS>(PDH_MORE_DATA) || size == 0)
+    if (p.getFormattedArray(c, kPdhFmtDouble, &size, &count, nullptr) != kPdhMoreData || size == 0)
         return false;
     std::vector<unsigned char> buf(size);
-    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
-    if (PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &size, &count, items) != ERROR_SUCCESS) return false;
+    auto* items = reinterpret_cast<PdhFmtCounterValueItemW*>(buf.data());
+    if (p.getFormattedArray(c, kPdhFmtDouble, &size, &count, items) != ERROR_SUCCESS) return false;
     for (DWORD i = 0; i < count; ++i)
-        if (items[i].FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || items[i].FmtValue.CStatus == PDH_CSTATUS_NEW_DATA)
+        if (items[i].FmtValue.CStatus == kPdhCstatusValid || items[i].FmtValue.CStatus == kPdhCstatusNew)
             out.push_back({items[i].szName ? items[i].szName : L"", items[i].FmtValue.doubleValue});
     return true;
 }
@@ -386,16 +448,23 @@ bool windowsGpu(GpuUse& g) {
     static PdhGpu p;
     if (!p.tried) {
         p.tried = true;
-        if (PdhOpenQueryW(nullptr, 0, &p.query) == ERROR_SUCCESS &&
-            PdhAddEnglishCounterW(p.query, L"\\GPU Engine(*engtype_3D)\\Utilization Percentage", 0, &p.busy) == ERROR_SUCCESS) {
-            if (PdhAddEnglishCounterW(p.query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &p.mem) != ERROR_SUCCESS) p.mem = nullptr;
-            p.ok = PdhCollectQueryData(p.query) == ERROR_SUCCESS;
+        if (HMODULE pdh = LoadLibraryW(L"pdh.dll")) {
+            p.openQuery = reinterpret_cast<PdhGpu::OpenQueryFn>(reinterpret_cast<void*>(GetProcAddress(pdh, "PdhOpenQueryW")));
+            p.addEnglishCounter = reinterpret_cast<PdhGpu::AddEnglishCounterFn>(reinterpret_cast<void*>(GetProcAddress(pdh, "PdhAddEnglishCounterW")));
+            p.collectQueryData = reinterpret_cast<PdhGpu::CollectQueryDataFn>(reinterpret_cast<void*>(GetProcAddress(pdh, "PdhCollectQueryData")));
+            p.getFormattedArray = reinterpret_cast<PdhGpu::GetFormattedArrayFn>(reinterpret_cast<void*>(GetProcAddress(pdh, "PdhGetFormattedCounterArrayW")));
+        }
+        if (p.openQuery && p.addEnglishCounter && p.collectQueryData && p.getFormattedArray &&
+            p.openQuery(nullptr, 0, &p.query) == ERROR_SUCCESS &&
+            p.addEnglishCounter(p.query, L"\\GPU Engine(*engtype_3D)\\Utilization Percentage", 0, &p.busy) == ERROR_SUCCESS) {
+            if (p.addEnglishCounter(p.query, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &p.mem) != ERROR_SUCCESS) p.mem = nullptr;
+            p.ok = p.collectQueryData(p.query) == ERROR_SUCCESS;
         }
         return !p.ok;  // a use needs two readings
     }
-    if (!p.ok || PdhCollectQueryData(p.query) != ERROR_SUCCESS) return true;
+    if (!p.ok || p.collectQueryData(p.query) != ERROR_SUCCESS) return true;
     std::vector<std::pair<std::wstring, double>> v;
-    if (counterValues(p.busy, v)) {
+    if (counterValues(p, p.busy, v)) {
         std::vector<std::pair<std::wstring, double>> engines;
         for (const auto& [name, use] : v) {
             const size_t at = name.find(L"luid_");
@@ -408,7 +477,7 @@ bool windowsGpu(GpuUse& g) {
         for (const auto& e : engines) busiest = std::max(busiest, e.second);
         g.busy = std::clamp(busiest, 0.0, 100.0);
     }
-    if (p.mem && counterValues(p.mem, v)) {
+    if (p.mem && counterValues(p, p.mem, v)) {
         double used = 0;
         for (const auto& x : v) used += x.second;
         if (used > 0) g.memUsed = uint64_t(used);

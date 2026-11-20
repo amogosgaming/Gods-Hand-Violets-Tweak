@@ -111,6 +111,19 @@ void main() {
     gl_FragColor = vec4(min(c.r * r + c.g * g + c.b * b, vec3(1.0)), c.a) * colDiffuse * fragColor;
 }
 )GLSL";
+const char* kPaletteGl120 = R"GLSL(#version 120
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec3 r;
+uniform vec3 g;
+uniform vec3 b;
+void main() {
+    vec4 c = texture2D(texture0, fragTexCoord);
+    gl_FragColor = vec4(min(c.r * r + c.g * g + c.b * b, vec3(1.0)), c.a) * colDiffuse * fragColor;
+}
+)GLSL";
 const char* kDirs[4] = {"left", "down", "up", "right"};
 const char* kArrows[4] = {"arrowLEFT", "arrowDOWN", "arrowUP", "arrowRIGHT"};
 
@@ -389,7 +402,9 @@ bool PsychUi::loadNotes(const scene::Files& f) {
         // Skins in noteSkins/ (Psych 0.7, JS Engine) are colour templates.
         template_ = notePng.find("oteskins/") != std::string::npos || notePng.find("oteSkins/") != std::string::npos;
         if (template_) {
-            paletteShader_ = LoadShaderFromMemory(nullptr, rlGetVersion() == RL_OPENGL_ES_20 ? kPaletteGles : kPaletteGl330);
+            const int glVer = rlGetVersion();
+            paletteShader_ = LoadShaderFromMemory(
+                nullptr, glVer == RL_OPENGL_ES_20 ? kPaletteGles : (glVer == RL_OPENGL_21 ? kPaletteGl120 : kPaletteGl330));
             locR_ = GetShaderLocation(paletteShader_, "r");
             locG_ = GetShaderLocation(paletteShader_, "g");
             locB_ = GetShaderLocation(paletteShader_, "b");

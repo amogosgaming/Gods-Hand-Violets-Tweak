@@ -20,6 +20,6 @@
 
 namespace gh {
 
-std::string translateShader(std::string_view openflFragment, bool gles = false);
+std::string translateShader(std::string_view openflFragment, bool gles = false, bool gl21 = false);
 
 }  // namespace gh

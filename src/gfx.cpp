@@ -59,6 +59,22 @@ void main() {
 }
 )GLSL";
 
+const char* kBlurGl120 = R"GLSL(#version 120
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec2 dir;
+void main() {
+    vec4 sum = texture2D(texture0, fragTexCoord) * 0.22702703;
+    sum += texture2D(texture0, clamp(fragTexCoord + dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture2D(texture0, clamp(fragTexCoord - dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture2D(texture0, clamp(fragTexCoord + dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    sum += texture2D(texture0, clamp(fragTexCoord - dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    gl_FragColor = sum * colDiffuse * fragColor;
+}
+)GLSL";
+
 bool ensureBlurResources() {
     if (g_blurRt[0].id && g_blurRt[1].id && g_blurShader.id) return true;
     if (g_blurTried) return false;
@@ -71,7 +87,8 @@ bool ensureBlurResources() {
     SetTextureFilter(g_blurRt[1].texture, TEXTURE_FILTER_BILINEAR);
     SetTextureWrap(g_blurRt[0].texture, TEXTURE_WRAP_CLAMP);
     SetTextureWrap(g_blurRt[1].texture, TEXTURE_WRAP_CLAMP);
-    g_blurShader = LoadShaderFromMemory(nullptr, rlGetVersion() == RL_OPENGL_ES_20 ? kBlurGles : kBlurGl330);
+    const int glVer = rlGetVersion();
+    g_blurShader = LoadShaderFromMemory(nullptr, glVer == RL_OPENGL_ES_20 ? kBlurGles : (glVer == RL_OPENGL_21 ? kBlurGl120 : kBlurGl330));
     if (!g_blurShader.id || g_blurShader.id == rlGetShaderIdDefault()) {
         g_blurShader = Shader{};
         return false;

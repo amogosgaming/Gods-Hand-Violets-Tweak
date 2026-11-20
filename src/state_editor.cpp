@@ -125,6 +125,7 @@ public:
         App& a = app();
         a.stopMenuMusic();
         a.mixer.stop();
+        panelOpen_ = !a.touchMode;
         entry_ = a.library.find(songId_);
         if (!entry_) {
             error_ = "song not found";
@@ -141,8 +142,8 @@ public:
     TouchLayout touchLayout() const override {
         TouchLayout t;
         t.pad = false;
-        if (loaded_ && error_.empty())
-            t.keys = {{"PLAY", KEY_SPACE}, {"SAVE", KEY_F2}, {"UNDO", KEY_F3}, {"BACK", KEY_ESCAPE}};
+        if (!loaded_ || !error_.empty())
+            t.keys = {{"BACK", KEY_ESCAPE}};
         return t;
     }
 
@@ -189,12 +190,7 @@ public:
             }
             UnloadDroppedFiles(dropped);
         }
-        ui_.in = &in;
-        ui_.mouse = gfx::toCanvas(GetMousePosition());
-        ui_.click = in.mousePressed(MOUSE_BUTTON_LEFT) && !(a.touchMode && a.touch.covers(GetMousePosition()));
-        ui_.rclick = in.mousePressed(MOUSE_BUTTON_RIGHT);
-        ui_.wheel = in.wheel();
-        ui_.used = false;
+        ui_.syncPointer(in, gfx::toCanvas(GetMousePosition()), a.touchMode, a.touchMode && a.touch.covers(GetMousePosition()));
         typing_ = !ui_.focus.empty();
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
         const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
@@ -219,7 +215,7 @@ public:
         if (in.pressed(KEY_SPACE)) togglePlay();
 
         // Navigation (the wheel scrolls the grid unless it is over the panel)
-        const bool overPanel = ui_.mouse.x >= kPanelX - 10;
+        const bool overPanel = (!a.touchMode || panelOpen_) && ui_.mouse.x >= panelX() - 10;
         const float wheel = overPanel ? 0.0f : in.wheel();
         if (wheel != 0 || in.pressed(KEY_UP) || in.pressed(KEY_DOWN) || in.pressed(KEY_W) || in.pressed(KEY_S)) {
             if (!(ctrl && in.pressed(KEY_S))) {
@@ -281,14 +277,7 @@ public:
             if (save(true)) return;
         }
         if (in.back() && !in.pressed(KEY_BACKSPACE)) {
-            if (dirty_ && a.now - escAt_ > 2.0) {
-                escAt_ = a.now;
-                flash("Unsaved changes: ESC again to leave, Ctrl+S to save");
-            } else {
-                stopPlay();
-                a.change(makeFreeplay());
-                return;
-            }
+            if (tryLeave()) return;
         }
     }
 
@@ -314,14 +303,22 @@ public:
             return;
         }
         drawGrid();
+        if (drawTopBar()) {
+            gfx::endCanvas();
+            return;
+        }
         drawInfo();
+        if (a.touchMode) drawTouchBar();
         if (preview_) handlePreviewMouse();
         drawPanel();  // also handles the panel's clicks (immediate mode)
         if (preview_) drawPreview();
         if (!ui_.used && !typing_) handleGridMouse();
-        if (a.now - flashAt_ < 3.0)
-            gfx::text(FontId::Ui, flash_, kGridCenter, gfx::H - 40, 24,
+        if (a.now - flashAt_ < 3.0) {
+            const float fy = a.touchMode ? (gridBottom() - 34.0f) : (gfx::H - 40.0f);
+            const float fx = a.touchMode ? gridCenterX() : kGridCenter;
+            gfx::text(FontId::Ui, flash_, fx, fy, 24,
                       gfx::fade(gfx::rgb(0xFFE08A), float(std::min(1.0, 3.0 - (a.now - flashAt_)))), Align::Center, 1.5f);
+        }
         gfx::endCanvas();
     }
 
@@ -413,11 +410,29 @@ private:
             }
         loaded_ = true;
         App& a = app();
+        panelOpen_ = !a.touchMode;
+        if (a.touchMode) {
+            preview_ = false;  // can be toggled on anytime from the top bar
+            previewRect_ = {244, 54, 300, 220};
+        }
         previewDownscroll_ = a.settings.downscroll;
         a.mixer.setTracks(inst_, voiceP_, voiceO_);
         a.mixer.setRate(1.0);
         if (entry_->builtin) flash("Built-in song: saving makes an editable copy in songs/");
         else if (entry_->autoChart) flash("AutoChart draft: save to keep it as a real chart");
+    }
+
+    bool tryLeave() {
+        App& a = app();
+        if (dirty_ && a.now - escAt_ > 2.5) {
+            escAt_ = a.now;
+            flash(a.touchMode ? "Unsaved changes: tap BACK again to leave, or tap SAVE"
+                              : "Unsaved changes: ESC again to leave, Ctrl+S to save");
+            return false;
+        }
+        stopPlay();
+        a.change(makeFreeplay());
+        return true;
     }
 
     // Note types and events offered in the lists: the built-in ones, the
@@ -934,11 +949,23 @@ private:
 
     // ------------------------------------------------------------- layout --
     // The event lane and both sides share the space between the panels.
-    float laneW() const { return std::min(48.0f, 590.0f / float(2 * keys_ + 1)); }
+    float topBarH() const { return app().touchMode ? 46.0f : 40.0f; }
+    float gridBottom() const { return app().touchMode ? (gfx::H - 60.0f) : float(gfx::H); }
+    float panelX() const { return app().touchMode ? 836.0f : kPanelX; }
+    float laneW() const {
+        if (!app().touchMode) return std::min(48.0f, 590.0f / float(2 * keys_ + 1));
+        const float rightEdge = panelOpen_ ? (panelX() - 16.0f) : (gfx::W - 18.0f);
+        const float avail = std::max(180.0f, rightEdge - 242.0f - 10.0f);
+        return std::min(68.0f, avail / float(2 * keys_ + 1));
+    }
     float gridX() const {
         const float lw = laneW(), total = float(2 * keys_ + 1) * lw + 10;
-        return 250 + (610 - total) * 0.5f + lw + 10;
+        if (!app().touchMode) return 250 + (610 - total) * 0.5f + lw + 10;
+        const float leftEdge = 236.0f;
+        const float rightEdge = panelOpen_ ? (panelX() - 12.0f) : (gfx::W - 12.0f);
+        return leftEdge + (rightEdge - leftEdge - total) * 0.5f + lw + 10;
     }
+    float gridCenterX() const { return gridX() + laneW() * float(keys_); }
     float eventX() const { return gridX() - laneW() - 10; }
     float lineY() const { return 220.0f; }
     float pxPerMs() const { return 0.45f * zoom_; }
@@ -949,28 +976,99 @@ private:
     bool mouseCell(int& col, double& t) {
         const Vector2 m = ui_.mouse;
         const float x0 = gridX();
-        if (m.x < x0 || m.x >= x0 + laneW() * 2 * keys_ || m.y < 40 || m.y > gfx::H) return false;
+        if (m.x < x0 || m.x >= x0 + laneW() * 2 * keys_ || m.y < topBarH() || m.y > gridBottom()) return false;
         col = int((m.x - x0) / laneW());
         t = snappedTimeAtY(m.y);
         return t >= 0;
     }
     bool mouseEventCell(double& t) {
         const Vector2 m = ui_.mouse;
-        if (m.x < eventX() || m.x >= eventX() + laneW() || m.y < 40 || m.y > gfx::H) return false;
+        if (m.x < eventX() || m.x >= eventX() + laneW() || m.y < topBarH() || m.y > gridBottom()) return false;
         t = snappedTimeAtY(m.y);
         return t >= 0;
     }
 
     void handleGridMouse() {
-        const Input& in = app().input;
+        const App& a = app();
+        const Input& in = a.input;
+        const bool touch = a.touchMode;
         const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
+
+        // Two-finger vertical drag always scrolls the chart smoothly on touchscreens.
+        if (touch) {
+            const auto pts = touchPoints();
+            if (pts.size() >= 2) {
+                const float avgY = (gfx::toCanvas(pts[0].pos).y + gfx::toCanvas(pts[1].pos).y) * 0.5f;
+                if (!pinchScroll_) {
+                    pinchScroll_ = true;
+                    pinchScrollY_ = avgY;
+                    dragging_ = false;
+                    boxing_ = false;
+                    touchScrolling_ = false;
+                } else {
+                    if (playing_) stopPlay();
+                    const float dy = avgY - pinchScrollY_;
+                    pinchScrollY_ = avgY;
+                    cur_ = std::max(0.0, cur_ - dy / pxPerMs());
+                }
+                return;
+            }
+            pinchScroll_ = false;
+        }
+
         int col = 0;
         double t = 0;
         const bool inGrid = mouseCell(col, t);
         double et = 0;
         const bool inEvents = mouseEventCell(et);
         const double tol = std::max(4.0, 60000.0 / bpmAt(t) * snapBeats() * 0.45);
+
+        // Touch SCROLL tool: one-finger drag anywhere in the grid area scrolls the timeline.
+        if (touch && touchTool_ == 2) {
+            const bool inArea = ui_.mouse.y >= topBarH() && ui_.mouse.y <= gridBottom() && ui_.mouse.x >= 232.0f &&
+                                (!panelOpen_ || ui_.mouse.x < panelX() - 8.0f);
+            if (ui_.click && inArea) {
+                touchScrolling_ = true;
+                touchScrollY_ = ui_.mouse.y;
+                if (playing_) stopPlay();
+            }
+            if (touchScrolling_) {
+                if (!ui_.down) {
+                    touchScrolling_ = false;
+                } else {
+                    const float dy = ui_.mouse.y - touchScrollY_;
+                    touchScrollY_ = ui_.mouse.y;
+                    cur_ = std::max(0.0, cur_ - dy / pxPerMs());
+                }
+            }
+            return;
+        }
+        touchScrolling_ = false;
+
+        // Touch ERASE tool: tap or drag finger across notes/events to erase them.
+        if (touch && touchTool_ == 1) {
+            if (ui_.click || ui_.down) {
+                if (inGrid) {
+                    const long hit = findNote(t, col, exactPlace_ ? 0.5 : tol);
+                    if (hit >= 0) {
+                        snapshotRange(notes_[size_t(hit)].t, notes_[size_t(hit)].t);
+                        notes_.erase(notes_.begin() + hit);
+                        dirty_ = statsDirty_ = true;
+                    }
+                } else if (inEvents) {
+                    const long hit = findEvent(et, tol);
+                    if (hit >= 0) {
+                        snapshot();
+                        events_.erase(events_.begin() + hit);
+                        selEvent_ = -1;
+                        dirty_ = statsDirty_ = true;
+                    }
+                }
+            }
+            return;
+        }
+
         // Event lane: click selects or adds, right click removes.
         if (inEvents && ui_.click) {
             const long hit = findEvent(et, tol);
@@ -989,6 +1087,7 @@ private:
                 dirty_ = statsDirty_ = true;
             }
             tab_ = 3;
+            if (touch) panelOpen_ = true;
             return;
         }
         if (inEvents && ui_.rclick) {
@@ -1001,8 +1100,8 @@ private:
             }
             return;
         }
-        // Box selection: SHIFT + drag on the grid.
-        if (ui_.click && inGrid && shift) {
+        // Box selection: SHIFT + drag on desktop, or SELECT tool on touch.
+        if (ui_.click && inGrid && (shift || (touch && touchTool_ == 3))) {
             boxing_ = true;
             boxA_ = ui_.mouse;
             return;
@@ -1380,14 +1479,19 @@ private:
     // ------------------------------------------------------------ drawing --
     void drawGrid() {
         const float lw = laneW(), x0 = gridX(), ly = lineY(), pp = pxPerMs(), ex = eventX();
+        const float topY = topBarH(), botY = gridBottom();
         const int cols = 2 * keys_;
         const float gw = lw * cols;
-        const double tTop = cur_ - (ly - 40) / pp, tBot = cur_ + (gfx::H - ly) / pp;
+        const double tTop = cur_ - (ly - topY) / pp, tBot = cur_ + (botY - ly) / pp;
+        // Clip the grid vertically so notes never overlap the top bar or mobile transport bar.
+        const Vector2 org = gfx::canvasOrigin();
+        const float cs = gfx::canvasScale();
+        BeginScissorMode(int(org.x), int(org.y + topY * cs), std::max(1, int(gfx::W * cs)), std::max(1, int((botY - topY) * cs)));
         // Section backgrounds: the camera's side is lighter, gf sections tinted.
         const int s0 = sectionAt(std::max(0.0, tTop)), s1 = sectionAt(std::max(0.0, tBot));
         for (int s = s0; s <= s1; ++s) {
-            const float ya = std::max(40.0f, ly + float((sectionStart(s) - cur_) * pp));
-            const float yb = std::min(float(gfx::H), ly + float((sectionStart(s + 1) - cur_) * pp));
+            const float ya = std::max(topY, ly + float((sectionStart(s) - cur_) * pp));
+            const float yb = std::min(botY, ly + float((sectionStart(s + 1) - cur_) * pp));
             if (yb <= ya) continue;
             const EdSection& sec = section(s);
             const Color on = sec.gf ? Color{54, 40, 52, 255} : Color{44, 34, 66, 255}, off{28, 22, 40, 255};
@@ -1399,26 +1503,26 @@ private:
         const double b0 = std::floor(beatAt(std::max(0.0, tTop))), b1 = std::ceil(beatAt(std::max(0.0, tBot)));
         for (double b = b0; b <= b1; b += snapBeats()) {
             const float y = ly + float((msAtBeat(b) - cur_) * pp);
-            if (y < 40 || y > gfx::H) continue;
+            if (y < topY || y > botY) continue;
             const bool beat = std::fabs(b - std::round(b)) < 1e-6;
             DrawRectangleRec({ex, y - 0.5f, x0 + gw - ex, 1.0f},
                              beat ? Color{110, 90, 150, 140} : Color{80, 66, 110, 70});
         }
         for (int s = s0; s <= s1 + 1; ++s) {  // section starts, numbered
             const float y = ly + float((sectionStart(s) - cur_) * pp);
-            if (y < 40 || y > gfx::H) continue;
+            if (y < topY || y > botY) continue;
             DrawRectangleRec({ex, y - 1.5f, x0 + gw - ex, 3.0f}, Color{170, 140, 220, 200});
             gfx::text(FontId::Ui, std::to_string(s), ex - 8, y - 10, 18, gfx::fade(WHITE, 0.6f), Align::Right);
         }
         for (int c = 0; c <= cols; ++c)
-            DrawRectangleRec({x0 + c * lw - (c == keys_ ? 1.5f : 0.5f), 40, c == keys_ ? 3.0f : 1.0f, gfx::H - 40.0f},
+            DrawRectangleRec({x0 + c * lw - (c == keys_ ? 1.5f : 0.5f), topY, c == keys_ ? 3.0f : 1.0f, botY - topY},
                              c == keys_ ? Color{200, 170, 255, 200} : Color{70, 58, 96, 160});
-        DrawRectangleRec({ex + lw, 40, 1, gfx::H - 40.0f}, Color{70, 58, 96, 160});
+        DrawRectangleRec({ex + lw, topY, 1, botY - topY}, Color{70, 58, 96, 160});
         // Events
         for (size_t i = 0; i < events_.size(); ++i) {
             const psych::ChartEvent& e = events_[i];
             const float y = ly + float((e.timeMs - cur_) * pp);
-            if (y < 30 || y > gfx::H + 20) continue;
+            if (y < topY - 12 || y > botY + 20) continue;
             const bool sel = long(i) == selEvent_;
             DrawRectangleRounded({ex + 4, y - lw * 0.32f, lw - 8, lw * 0.64f}, 0.3f, 6, sel ? kAccent : Color{150, 120, 220, 255});
             gfx::text(FontId::Ui, "E", ex + lw * 0.5f, y - 10, 18, Color{20, 12, 36, 255}, Align::Center);
@@ -1464,7 +1568,7 @@ private:
             }
             ++it;
             const float y = ly + float((n.t - cur_) * pp);
-            if (y < 30 || y > gfx::H + 30 || n.col >= 2 * kMaxKeys) continue;
+            if (y < topY - 12 || y > botY + 30 || n.col >= 2 * kMaxKeys) continue;
             // Spam charts: one note per pixel row is enough to see them.
             if (std::fabs(y - lastY[n.col]) < rowPx && !n.sel) continue;
             lastY[n.col] = y;
@@ -1507,10 +1611,10 @@ private:
                               std::fabs(ui_.mouse.y - boxA_.y)};
             DrawRectangleRec(r, Color{255, 255, 255, 30});
             DrawRectangleLinesEx(r, 1.5f, Color{255, 255, 255, 160});
-        } else if (mouseCell(col, t)) {
+        } else if (!app().touchMode && mouseCell(col, t)) {
             const float y = ly + float((t - cur_) * pp);
             DrawRectangleRec({x0 + col * lw + 2, y - lw * 0.45f, lw - 4, lw * 0.9f}, Color{255, 255, 255, 40});
-        } else if (mouseEventCell(t)) {
+        } else if (!app().touchMode && mouseEventCell(t)) {
             const float y = ly + float((t - cur_) * pp);
             DrawRectangleRec({ex + 2, y - lw * 0.45f, lw - 4, lw * 0.9f}, Color{255, 255, 255, 40});
         }
@@ -1520,11 +1624,30 @@ private:
             const int dir = gfx::laneDir(keys_, c % keys_);
             gfx::drawReceptor(dir, {x0 + (c + 0.5f) * lw, ly}, lw * 0.82f, Color{200, 190, 230, 120});
         }
-        // Top bar
-        DrawRectangleRec({0, 0, gfx::W, 40}, Color{8, 5, 14, 235});
-        gfx::text(FontId::Ui, "EVENTS", ex + lw * 0.5f, 10, 16, gfx::fade(WHITE, 0.6f), Align::Center);
-        gfx::text(FontId::Ui, "OPPONENT", x0 + lw * keys_ * 0.5f, 8, 22, gfx::fade(WHITE, 0.75f), Align::Center);
-        gfx::text(FontId::Ui, "PLAYER", x0 + lw * keys_ * 1.5f, 8, 22, gfx::fade(WHITE, 0.75f), Align::Center);
+        EndScissorMode();
+    }
+
+    // Top bar (column labels on desktop; docked action buttons + labels on touch).
+    // Returns true if the screen transitioned away (BACK or TEST).
+    bool drawTopBar() {
+        const float lw = laneW(), x0 = gridX(), ex = eventX(), h = topBarH();
+        DrawRectangleRec({0, 0, gfx::W, h}, Color{8, 5, 14, 242});
+        DrawRectangleRec({0, h - 1, gfx::W, 1}, Color{110, 92, 150, 140});
+        gfx::text(FontId::Ui, app().touchMode ? "EV" : "EVENTS", ex + lw * 0.5f, (h - 16) * 0.5f, 16, gfx::fade(WHITE, 0.6f), Align::Center);
+        gfx::text(FontId::Ui, "OPPONENT", x0 + lw * keys_ * 0.5f, (h - 22) * 0.5f, 20, gfx::fade(WHITE, 0.75f), Align::Center);
+        gfx::text(FontId::Ui, "PLAYER", x0 + lw * keys_ * 1.5f, (h - 22) * 0.5f, 20, gfx::fade(WHITE, 0.75f), Align::Center);
+        if (!app().touchMode) return false;
+        if (ui_.mouse.y < h && (ui_.click || ui_.down || ui_.tap())) ui_.used = true;
+        if (ui_.button({8, 5, 80, 36}, "< BACK")) {
+            if (tryLeave()) return true;
+        }
+        if (ui_.button({94, 5, 76, 36}, "PREV", preview_)) preview_ = !preview_;
+        if (ui_.button({176, 5, 56, 36}, "TEST")) {
+            if (save(true)) return true;
+        }
+        if (ui_.button({gfx::W - 216, 5, 98, 36}, dirty_ ? "SAVE *" : "SAVE", dirty_)) save(false);
+        if (ui_.button({gfx::W - 112, 5, 104, 36}, panelOpen_ ? "PANEL >" : "< PANEL", panelOpen_)) panelOpen_ = !panelOpen_;
+        return false;
     }
 
     void rebuildPreviewSections() {
@@ -1583,22 +1706,33 @@ private:
 
     void clampPreviewRect() {
         previewRect_.width = clampv(previewRect_.width, 200.0f, 960.0f);
-        previewRect_.height = clampv(previewRect_.height, 150.0f, 620.0f);
+        previewRect_.height = clampv(previewRect_.height, 150.0f, gridBottom() - topBarH() - 8.0f);
         previewRect_.x = clampv(previewRect_.x, 4.0f, gfx::W - previewRect_.width - 4.0f);
-        previewRect_.y = clampv(previewRect_.y, 42.0f, gfx::H - previewRect_.height - 4.0f);
+        previewRect_.y = clampv(previewRect_.y, topBarH() + 2.0f, gridBottom() - previewRect_.height - 4.0f);
     }
 
-    Rectangle previewBtnMode() const { return {previewRect_.x + previewRect_.width - 104.0f, previewRect_.y + 3.0f, 48.0f, 18.0f}; }
-    Rectangle previewBtnScroll() const { return {previewRect_.x + previewRect_.width - 52.0f, previewRect_.y + 3.0f, 48.0f, 18.0f}; }
-    Rectangle previewBtnReload() const { return {previewRect_.x + previewRect_.width - 144.0f, previewRect_.y + 3.0f, 36.0f, 18.0f}; }
+    float previewBarH() const { return app().touchMode ? 32.0f : 24.0f; }
+    Rectangle previewBtnMode() const {
+        return app().touchMode ? Rectangle{previewRect_.x + previewRect_.width - 122.0f, previewRect_.y + 4.0f, 58.0f, 24.0f}
+                               : Rectangle{previewRect_.x + previewRect_.width - 104.0f, previewRect_.y + 3.0f, 48.0f, 18.0f};
+    }
+    Rectangle previewBtnScroll() const {
+        return app().touchMode ? Rectangle{previewRect_.x + previewRect_.width - 60.0f, previewRect_.y + 4.0f, 56.0f, 24.0f}
+                               : Rectangle{previewRect_.x + previewRect_.width - 52.0f, previewRect_.y + 3.0f, 48.0f, 18.0f};
+    }
+    Rectangle previewBtnReload() const {
+        return app().touchMode ? Rectangle{previewRect_.x + previewRect_.width - 172.0f, previewRect_.y + 4.0f, 46.0f, 24.0f}
+                               : Rectangle{previewRect_.x + previewRect_.width - 144.0f, previewRect_.y + 3.0f, 36.0f, 18.0f};
+    }
     Rectangle previewGripRect() const {
-        return {previewRect_.x + previewRect_.width - 18.0f, previewRect_.y + previewRect_.height - 18.0f, 18.0f, 18.0f};
+        const float gs = app().touchMode ? 30.0f : 18.0f;
+        return {previewRect_.x + previewRect_.width - gs, previewRect_.y + previewRect_.height - gs, gs, gs};
     }
 
     void handlePreviewMouse() {
         const Vector2 m = ui_.mouse;
         const Input& in = app().input;
-        const Rectangle titleBar{previewRect_.x, previewRect_.y, previewRect_.width, 24.0f};
+        const Rectangle titleBar{previewRect_.x, previewRect_.y, previewRect_.width, previewBarH()};
         const Rectangle grip = previewGripRect();
         if (previewDrag_) {
             if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
@@ -1667,23 +1801,25 @@ private:
     void drawPreview() {
         clampPreviewRect();
         const Rectangle box = previewRect_;
+        const float bh = previewBarH();
         DrawRectangleRounded(box, 0.03f, 6, Color{8, 5, 14, 242});
-        DrawRectangleRec({box.x + 1, box.y + 1, box.width - 2, 23}, Color{24, 18, 42, 245});
+        DrawRectangleRec({box.x + 1, box.y + 1, box.width - 2, bh - 1}, Color{24, 18, 42, 245});
         DrawRectangleLinesEx(box, 1.5f, (previewDrag_ || previewResize_) ? kAccent : Color{110, 92, 150, 210});
         const std::string title = previewFullVisuals_ && livePreview_.loaded()
             ? ("PREVIEW (" + livePreview_.status() + ")")
             : std::string("PREVIEW");
-        gfx::text(FontId::Ui, title, box.x + 7, box.y + 4, 15, gfx::fade(WHITE, 0.85f));
+        gfx::text(FontId::Ui, title, box.x + 7, box.y + (bh - 15) * 0.5f, 15, gfx::fade(WHITE, 0.85f));
         auto miniBtn = [&](Rectangle r, const char* label, bool on) {
             const bool hov = CheckCollisionPointRec(ui_.mouse, r);
             DrawRectangleRounded(r, 0.25f, 4, on ? Color{96, 72, 165, 240} : (hov ? Color{64, 52, 96, 235} : Color{38, 30, 62, 225}));
-            gfx::text(FontId::Ui, label, r.x + r.width * 0.5f, r.y + 2, 13, on ? kAccent : WHITE, Align::Center);
+            const float fs = app().touchMode ? 15.0f : 13.0f;
+            gfx::text(FontId::Ui, label, r.x + r.width * 0.5f, r.y + (r.height - fs) * 0.5f, fs, on ? kAccent : WHITE, Align::Center);
         };
         if (previewFullVisuals_) miniBtn(previewBtnReload(), "RLD", false);
         miniBtn(previewBtnMode(), previewFullVisuals_ ? "FULL" : "BASIC", previewFullVisuals_);
         miniBtn(previewBtnScroll(), previewDownscroll_ ? "DOWN" : "UP", previewDownscroll_);
 
-        const Rectangle content{box.x + 2.0f, box.y + 24.0f, box.width - 4.0f, box.height - 26.0f};
+        const Rectangle content{box.x + 2.0f, box.y + bh, box.width - 4.0f, box.height - bh - 2.0f};
         const Vector2 o = gfx::canvasOrigin();
         const float cs = gfx::canvasScale();
         BeginScissorMode(int(o.x + content.x * cs), int(o.y + content.y * cs), int(content.width * cs), int(content.height * cs));
@@ -1760,48 +1896,173 @@ private:
     }
 
     void drawInfo() {
-        const float x = 18;
-        float y = 56;
-        auto line = [&](const std::string& s, Color c = kInk, float size = 18) {
-            gfx::text(FontId::Ui, s, x, y, size, c);
-            y += size + 5;
-        };
-        DrawRectangleRounded({8, 48, 232, 330}, 0.04f, 6, kPanel);
-        line(title_, kAccent, 22);
-        line(diff_ + (dirty_ ? "  (unsaved)" : ""), gfx::fade(WHITE, 0.7f));
+        const bool touch = app().touchMode;
         const int sec = sectionAt(cur_);
         const double beat = beatAt(cur_);
-        line("Time  " + fmtTime(cur_ / 1000.0) + TextFormat(".%03d", int(std::fmod(std::max(0.0, cur_), 1000.0))));
-        line(TextFormat("Beat %.2f  Step %d", beat, int(std::floor(beat * 4))));
-        line(TextFormat("Section %d  BPM %.2f", sec, bpmAt(cur_)));
-        line(TextFormat("Snap 1/%d  Zoom %.2fx", kSnaps[snapIdx_], zoom_));
         const Stats& st = stats();
-        line("Notes " + fmtThousands(st.total));
-        line(TextFormat("Events %d", int(events_.size())));
-        if (st.selected) line(TextFormat("Selected %d", st.selected), gfx::rgb(0x9AE6FF));
-        y += 6;
-        static const char* help[] = {"SPACE play", "Wheel/W/S move", "A/D section (SHIFT: 4)", "LEFT/RIGHT snap",
-                                     "Click add/select", "SHIFT+drag select", "Ctrl+C/X/V copy, cut",
-                                     "DEL delete", "M mirror", "Ctrl+Z/Y undo", "ENTER save+play"};
-        for (const char* h : help) line(h, gfx::fade(WHITE, 0.55f), 15);
+        if (!touch) {
+            const float x = 18;
+            float y = 56;
+            auto line = [&](const std::string& s, Color c = kInk, float size = 18) {
+                gfx::text(FontId::Ui, s, x, y, size, c);
+                y += size + 5;
+            };
+            DrawRectangleRounded({8, 48, 232, 330}, 0.04f, 6, kPanel);
+            line(title_, kAccent, 22);
+            line(diff_ + (dirty_ ? "  (unsaved)" : ""), gfx::fade(WHITE, 0.7f));
+            line("Time  " + fmtTime(cur_ / 1000.0) + TextFormat(".%03d", int(std::fmod(std::max(0.0, cur_), 1000.0))));
+            line(TextFormat("Beat %.2f  Step %d", beat, int(std::floor(beat * 4))));
+            line(TextFormat("Section %d  BPM %.2f", sec, bpmAt(cur_)));
+            line(TextFormat("Snap 1/%d  Zoom %.2fx", kSnaps[snapIdx_], zoom_));
+            line("Notes " + fmtThousands(st.total));
+            line(TextFormat("Events %d", int(events_.size())));
+            if (st.selected) line(TextFormat("Selected %d", st.selected), gfx::rgb(0x9AE6FF));
+            y += 6;
+            static const char* help[] = {"SPACE play", "Wheel/W/S move", "A/D section (SHIFT: 4)", "LEFT/RIGHT snap",
+                                         "Click add/select", "SHIFT+drag select", "Ctrl+C/X/V copy, cut",
+                                         "DEL delete", "M mirror", "Ctrl+Z/Y undo", "ENTER save+play"};
+            for (const char* h : help) line(h, gfx::fade(WHITE, 0.55f), 15);
+            return;
+        }
+        // Touch left sidebar: compact song stats + thumb-friendly tools and quick edits.
+        const Rectangle dock{8, topBarH() + 6, 220, gridBottom() - topBarH() - 12};
+        DrawRectangleRounded(dock, 0.03f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(dock, 0.03f, 6, 1.5f, Color{110, 92, 150, 150});
+        if (CheckCollisionPointRec(ui_.mouse, dock) && (ui_.click || ui_.down || ui_.tap())) ui_.used = true;
+        const float x = dock.x + 10, w = dock.width - 20, hw = (w - 6) * 0.5f;
+        float y = dock.y + 8;
+        std::string shortTitle = title_;
+        if (shortTitle.size() > 17) shortTitle = shortTitle.substr(0, 16) + "...";
+        gfx::text(FontId::Ui, shortTitle, x, y, 19, kAccent);
+        y += 22;
+        gfx::text(FontId::Ui, diff_ + (dirty_ ? " *" : "") + "  " + fmtTime(cur_ / 1000.0), x, y, 15, gfx::fade(WHITE, 0.78f));
+        y += 19;
+        gfx::text(FontId::Ui, TextFormat("Sec %d  %.1f BPM  B%.1f", sec, bpmAt(cur_), beat), x, y, 15, kDim);
+        y += 19;
+        gfx::text(FontId::Ui,
+                  "Notes " + fmtThousands(st.total) + (st.selected ? TextFormat("  Sel %d", st.selected) : ""),
+                  x, y, 15, st.selected ? gfx::rgb(0x9AE6FF) : kDim);
+        y += 24;
+
+        gfx::text(FontId::Ui, "TOOL", x, y, 14, kAccent);
+        y += 18;
+        if (ui_.button({x, y, hw, 36}, "PLACE", touchTool_ == 0)) touchTool_ = 0;
+        if (ui_.button({x + hw + 6, y, hw, 36}, "ERASE", touchTool_ == 1)) touchTool_ = 1;
+        y += 42;
+        if (ui_.button({x, y, hw, 36}, "SCROLL", touchTool_ == 2)) touchTool_ = 2;
+        if (ui_.button({x + hw + 6, y, hw, 36}, "SELECT", touchTool_ == 3)) touchTool_ = 3;
+        y += 46;
+
+        gfx::text(FontId::Ui, "EDIT", x, y, 14, kAccent);
+        y += 18;
+        if (ui_.button({x, y, hw, 36}, "UNDO")) undo();
+        if (ui_.button({x + hw + 6, y, hw, 36}, "REDO")) redo();
+        y += 42;
+        if (ui_.button({x, y, hw, 36}, "COPY")) copySelectionOrSection();
+        if (ui_.button({x + hw + 6, y, hw, 36}, "PASTE")) paste();
+        y += 42;
+        if (ui_.button({x, y, hw, 36}, "MIRROR")) mirror();
+        if (ui_.button({x + hw + 6, y, hw, 36}, "DEL")) {
+            if (anySelected()) deleteSelection();
+            else clearSection(true, false);
+        }
+        y += 42;
+        const bool mh = section(sec).mustHit;
+        if (ui_.button({x, y, hw, 36}, "MUST HIT", mh)) {
+            snapshot();
+            section(sec).mustHit = !mh;
+            dirty_ = statsDirty_ = true;
+        }
+        if (ui_.button({x + hw + 6, y, hw, 36}, "TYPE")) {
+            if (!noteTypes_.empty()) {
+                typeIdx_ = (typeIdx_ + 1) % int(noteTypes_.size());
+                applyToSelection([&](EdNote& n) { n.type = typeId(noteTypes_[size_t(typeIdx_)]); });
+            }
+        }
+        y += 42;
+        if (ui_.button({x, y, hw, 36}, "HOLD -")) {
+            applyToSelection([&](EdNote& n) {
+                const double stepMs = 60000.0 / bpmAt(n.t) * snapBeats();
+                n.len = std::max(0.0, n.len - stepMs);
+            });
+        }
+        if (ui_.button({x + hw + 6, y, hw, 36}, "HOLD +")) {
+            applyToSelection([&](EdNote& n) {
+                const double stepMs = 60000.0 / bpmAt(n.t) * snapBeats();
+                n.len = std::max(0.0, n.len + stepMs);
+            });
+        }
+        y += 44;
+        const std::string tName = (typeIdx_ >= 0 && typeIdx_ < int(noteTypes_.size()) && !noteTypes_[size_t(typeIdx_)].empty())
+                                      ? noteTypes_[size_t(typeIdx_)]
+                                      : std::string("Normal");
+        gfx::text(FontId::Ui, "Note: " + tName, x, y, 15, kDim);
+        y += 20;
+        gfx::text(FontId::Ui, "2-finger drag scrolls", x, y, 14, gfx::fade(WHITE, 0.45f));
+    }
+
+    // Bottom docked transport bar for touchscreens (play, section/step seek, snap, zoom).
+    void drawTouchBar() {
+        const float by = gridBottom() + 2.0f, bh = gfx::H - by;
+        DrawRectangleRec({0, by, gfx::W, bh}, Color{10, 7, 18, 248});
+        DrawRectangleRec({0, by, gfx::W, 1.5f}, Color{110, 92, 150, 170});
+        if (ui_.mouse.y >= by && (ui_.click || ui_.down || ui_.tap())) ui_.used = true;
+        const float y = by + 7.0f, h = 44.0f;
+        if (ui_.button({10, y, 118, h}, playing_ ? "PAUSE" : "PLAY", playing_)) togglePlay();
+        if (ui_.button({136, y, 92, h}, "< SEC")) gotoSection(std::max(0, sectionAt(cur_) - 1));
+        if (ui_.button({234, y, 92, h}, "SEC >")) gotoSection(sectionAt(cur_) + 1);
+        if (ui_.button({338, y, 96, h}, "- STEP")) {
+            if (playing_) stopPlay();
+            cur_ = std::max(0.0, msAtBeat(snapBeat(beatAt(cur_)) - snapBeats()));
+        }
+        if (ui_.button({440, y, 96, h}, "+ STEP")) {
+            if (playing_) stopPlay();
+            cur_ = std::max(0.0, msAtBeat(snapBeat(beatAt(cur_)) + snapBeats()));
+        }
+        if (ui_.button({552, y, 78, h}, "SNAP -")) snapIdx_ = std::max(0, snapIdx_ - 1);
+        gfx::text(FontId::Ui, TextFormat("1/%d", kSnaps[snapIdx_]), 668, y + 12, 19, kAccent, Align::Center);
+        if (ui_.button({706, y, 78, h}, "SNAP +")) snapIdx_ = std::min(int(std::size(kSnaps)) - 1, snapIdx_ + 1);
+        if (ui_.button({800, y, 88, h}, "ZOOM -")) zoom_ = std::max(0.25f, zoom_ / 1.25f);
+        gfx::text(FontId::Ui, TextFormat("%.2fx", zoom_), 928, y + 12, 18, kInk, Align::Center);
+        if (ui_.button({968, y, 88, h}, "ZOOM +")) zoom_ = std::min(8.0f, zoom_ * 1.25f);
+        if (ui_.button({1072, y, 198, h}, "SELECT SEC")) selectSection();
     }
 
     // The tabbed panel. Immediate mode: drawing and clicks happen together.
     void drawPanel() {
-        if (ui_.click) ui_.focus.clear();  // a click anywhere ends typing; a text field takes it back
-        DrawRectangleRounded({kPanelX - 8, 46, gfx::W - kPanelX, gfx::H - 54}, 0.03f, 6, kPanel);
+        const bool touch = app().touchMode;
+        if (touch && !panelOpen_) return;
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();  // a click/tap anywhere ends typing; a text field takes it back
+        const float px = panelX();
+        const float py = topBarH() + 6.0f;
+        const float ph = gridBottom() - py - 6.0f;
+        const Rectangle panelRect{px - 8, py, gfx::W - px + 4, ph};
+        DrawRectangleRounded(panelRect, 0.03f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(panelRect, 0.03f, 6, 1.5f, Color{110, 92, 150, 150});
+        if (CheckCollisionPointRec(ui_.mouse, panelRect) && (ui_.click || ui_.down || ui_.tap())) ui_.used = true;
         static const char* tabs[] = {"Song", "Section", "Note", "Events", "Charting", "EZ Spam"};
-        const float tw = (gfx::W - kPanelX - 16) / 6.0f;
+        static const char* touchTabs[] = {"Song", "Sec", "Note", "Events", "Chart", "Spam"};
+        const float tabH = touch ? 36.0f : 30.0f;
+        const float tw = (gfx::W - px - 16) / 6.0f;
         for (int i = 0; i < 6; ++i)
-            if (ui_.button({kPanelX + i * tw, 52, tw - 4, 30}, tabs[i], tab_ == i)) tab_ = i;
-        const float x = kPanelX, w = gfx::W - kPanelX - 18;
-        float y = 96;
-        auto row = [&](float h = 30) {
+            if (ui_.button({px + i * tw, py + 6, tw - 4, tabH}, touch ? touchTabs[i] : tabs[i], tab_ == i)) {
+                tab_ = i;
+                panelScroll_ = 0.0f;
+            }
+        const float x = px, w = gfx::W - px - 18;
+        const float rh = touch ? 36.0f : 30.0f;
+        const float viewTop = py + tabH + 14.0f;
+        const Rectangle viewRect{px - 4, viewTop, gfx::W - px - 6, panelRect.y + panelRect.height - viewTop - 6.0f};
+        if (touch) ui_.beginScroll("chart_panel", viewRect, panelScroll_);
+        const float startY = touch ? (viewTop - panelScroll_) : 96.0f;
+        float y = startY;
+        auto row = [&](float h = -1.0f) {
+            if (h <= 0.0f) h = rh;
             const Rectangle r{x, y, w, h};
             y += h + 8;
             return r;
         };
-        auto half = [&](int i) { return Rectangle{x + i * (w * 0.5f + 4), y, w * 0.5f - 4, 30}; };
+        auto half = [&](int i) { return Rectangle{x + i * (w * 0.5f + 4), y, w * 0.5f - 4, rh}; };
         auto heading = [&](const std::string& s) {
             gfx::text(FontId::Ui, s, x, y, 18, kAccent);
             y += 26;
@@ -1824,12 +2085,15 @@ private:
                 y += 6;
                 if (ui_.button(half(0), "Save (F2)")) save(false);
                 if (ui_.button(half(1), "Save and play")) {
-                    if (save(true)) return;
+                    if (save(true)) {
+                        if (touch) ui_.endScroll(viewRect, panelScroll_, y - startY);
+                        return;
+                    }
                 }
-                y += 38;
+                y += rh + 8;
                 if (ui_.button(half(0), "Reload audio")) reloadAudio();
                 if (ui_.button(half(1), reloadArmed_ ? "Reload: unsaved, again" : "Reload chart")) reloadChart();
-                y += 38;
+                y += rh + 8;
                 if (ui_.button(half(0), "Clear notes")) {
                     snapshot();
                     notes_.clear();
@@ -1841,7 +2105,7 @@ private:
                     selEvent_ = -1;
                     dirty_ = statsDirty_ = true;
                 }
-                y += 38;
+                y += rh + 8;
                 gfx::text(FontId::Ui, "FL Studio (SNIFF): drop a .flp or .fsc here", x, y, 15, kDim);
                 y += 20;
                 gfx::text(FontId::Ui, "C3-D#3 player, C4-D#4 opponent, F3/F#3 camera", x, y, 15, kDim);
@@ -1897,17 +2161,17 @@ private:
                 y += 4;
                 {
                     const float tw3 = (w - 8) / 3.0f;
-                    if (ui_.button({x, y, tw3 - 2, 30}, "Copy (Ctrl+C)")) copySelectionOrSection();
-                    if (ui_.button({x + tw3 + 2, y, tw3 - 2, 30}, "Cut (Ctrl+X)")) cutSelectionOrSection();
-                    if (ui_.button({x + 2 * tw3 + 4, y, tw3 - 2, 30}, "Paste (Ctrl+V)")) paste();
-                    y += 38;
+                    if (ui_.button({x, y, tw3 - 2, rh}, touch ? "Copy" : "Copy (Ctrl+C)")) copySelectionOrSection();
+                    if (ui_.button({x + tw3 + 2, y, tw3 - 2, rh}, touch ? "Cut" : "Cut (Ctrl+X)")) cutSelectionOrSection();
+                    if (ui_.button({x + 2 * tw3 + 4, y, tw3 - 2, rh}, touch ? "Paste" : "Paste (Ctrl+V)")) paste();
+                    y += rh + 8;
                 }
                 if (ui_.button(half(0), "Clear notes")) clearSection(true, false);
                 if (ui_.button(half(1), "Clear events")) clearSection(false, true);
-                y += 38;
+                y += rh + 8;
                 if (ui_.button(half(0), "Swap sides")) swapSides();
                 if (ui_.button(half(1), "Mirror lanes")) mirror();
-                y += 38;
+                y += rh + 8;
                 ui_.stepper(row(), "Sections back", copyBack_, 1, 1, std::max(1.0, double(sections_.size())), "%.0f");
                 if (ui_.button(row(), "Copy notes from that section")) copyLastSection(int(copyBack_));
                 // JS Engine: a range of sections to the clipboard (paste puts it at the line).
@@ -1944,7 +2208,7 @@ private:
                         applyToSelection([&](EdNote& e) { e.stack = int(st); });
                     if (ui_.button(half(0), "Delete")) deleteSelection();
                     if (ui_.button(half(1), "Unselect")) clearSelection();
-                    y += 38;
+                    y += rh + 8;
                 }
                 y += 6;
                 heading("Spam tools");
@@ -1974,7 +2238,7 @@ private:
                     heading(TextFormat("Event %d of %d at %.0f ms", int(selEvent_) - first + 1, lastI - first + 1, e->timeMs));
                     if (ui_.button(half(0), "< previous")) selEvent_ = selEvent_ > first ? selEvent_ - 1 : lastI;
                     if (ui_.button(half(1), "next >")) selEvent_ = selEvent_ < lastI ? selEvent_ + 1 : first;
-                    y += 38;
+                    y += rh + 8;
                     int idx = int(std::find(eventNames_.begin(), eventNames_.end(), e->name) - eventNames_.begin());
                     if (idx >= int(eventNames_.size())) {
                         eventNames_.push_back(e->name);
@@ -1988,7 +2252,7 @@ private:
                     }
                     if (ui_.text("ev1", row(), "Value 1", e->v1)) dirty_ = statsDirty_ = true;
                     if (ui_.text("ev2", row(), "Value 2", e->v2)) dirty_ = statsDirty_ = true;
-                    drawEventHelp(e->name, y);
+                    drawEventHelp(e->name, x, w, y);
                     if (ui_.button(half(0), "Add here")) {
                         snapshot();
                         psych::ChartEvent c = *e;
@@ -2002,13 +2266,13 @@ private:
                         selEvent_ = -1;
                         dirty_ = statsDirty_ = true;
                     }
-                    y += 38;
+                    y += rh + 8;
                 } else {
                     heading("New events");
                     ui_.dropdown("evnew", row(), "Event", eventNames_, eventIdx_, 64);
                     ui_.text("nv1", row(), "Value 1", eventV1_);
                     ui_.text("nv2", row(), "Value 2", eventV2_);
-                    if (!eventNames_.empty()) drawEventHelp(eventNames_[size_t(eventIdx_)], y);
+                    if (!eventNames_.empty()) drawEventHelp(eventNames_[size_t(eventIdx_)], x, w, y);
                     if (ui_.button(row(), "Add at the line")) {
                         snapshot();
                         psych::ChartEvent c;
@@ -2021,8 +2285,10 @@ private:
                         selEvent_ = findEvent(c.timeMs, 0.01);
                         dirty_ = statsDirty_ = true;
                     }
-                    gfx::text(FontId::Ui, "Click the EVENTS lane to add or select one;", x, y, 16, kDim);
-                    gfx::text(FontId::Ui, "right click removes it.", x, y + 20, 16, kDim);
+                    gfx::text(FontId::Ui, touch ? "Tap the EV lane to add or select one;" : "Click the EVENTS lane to add or select one;",
+                              x, y, 16, kDim);
+                    gfx::text(FontId::Ui, touch ? "use ERASE tool to remove." : "right click removes it.", x, y + 20, 16, kDim);
+                    y += 44;
                 }
                 break;
             }
@@ -2042,12 +2308,12 @@ private:
                     else livePreview_.unload();
                 }
                 if (ui_.check(row(), "Preview: downscroll", previewDownscroll_)) livePreview_.setDownscroll(previewDownscroll_);
-                if (ui_.button(half(0), "Reset preview box")) previewRect_ = {12, 420, 280, 230};
+                if (ui_.button(half(0), "Reset preview box")) previewRect_ = touch ? Rectangle{244, 54, 300, 220} : Rectangle{12, 420, 280, 230};
                 if (ui_.button(half(1), "Reload preview")) {
                     if (previewFullVisuals_) loadFullPreview();
                     else flash("Enable full visuals to reload scripts/events");
                 }
-                y += 38;
+                y += rh + 8;
                 ui_.check(row(), "Metronome", metronome_);
                 double snap = snapIdx_;
                 if (ui_.stepper(row(), "Snap (1/N)", snap, 1, 0, double(std::size(kSnaps) - 1), "%.0f")) snapIdx_ = int(snap);
@@ -2063,7 +2329,7 @@ private:
                 auto twoButtons = [&](const char* a, const char* b, double& v, double lo, double hi) {
                     if (ui_.button(half(0), a)) v = clampv(v * 2, lo, hi);
                     if (ui_.button(half(1), b)) v = clampv(v / 2, lo, hi);
-                    y += 38;
+                    y += rh + 8;
                 };
                 ui_.stepper(row(), "Spam Count", ezCount_, 1, 0, 999999, "%.4g");
                 twoButtons("x2 Amount", "x0.5 Amount", ezCount_, 0, 999999);
@@ -2087,6 +2353,7 @@ private:
             }
             default: break;
         }
+        if (touch) ui_.endScroll(viewRect, panelScroll_, y - startY + 12.0f);
         ui_.overlays();
     }
 
@@ -2199,7 +2466,7 @@ private:
         if (cap < more) flash("EZ Spam: stopped at 5,000,000 notes for one click");
     }
 
-    void drawEventHelp(const std::string& name, float& y) {
+    void drawEventHelp(const std::string& name, float x, float maxW, float& y) {
         std::string help;
         for (const EventInfo& e : kEvents)
             if (name == e.name) help = e.help;
@@ -2207,10 +2474,9 @@ private:
             if (auto it = eventHelp_.find(name); it != eventHelp_.end()) help = it->second;
         if (help.empty()) help = "A custom event: its script decides what the values do.";
         // Word wrap to the panel.
-        const float maxW = gfx::W - kPanelX - 24;
         std::string lineText, word;
         auto flushLine = [&]() {
-            gfx::text(FontId::Ui, lineText, kPanelX, y, 16, kDim);
+            gfx::text(FontId::Ui, lineText, x, y, 16, kDim);
             y += 20;
             lineText.clear();
         };
@@ -2218,7 +2484,7 @@ private:
             const char c = i < help.size() ? help[i] : ' ';
             if (c == ' ' || c == '\n') {
                 const std::string cand = lineText.empty() ? word : lineText + " " + word;
-                if (gfx::measure(FontId::Ui, cand, 16).x > maxW && !lineText.empty()) {
+                if (gfx::measure(FontId::Ui, cand, 16).x > maxW - 6 && !lineText.empty()) {
                     flushLine();
                     lineText = word;
                 } else {
@@ -2286,6 +2552,14 @@ private:
     std::vector<PreviewSection> previewSections_;
     std::vector<PreviewNote> previewWindowNotes_;
     PcmPtr inst_, voiceP_, voiceO_;
+    // Mobile touch layout & tools
+    bool panelOpen_ = true;
+    float panelScroll_ = 0.0f;
+    int touchTool_ = 0;  // 0=PLACE, 1=ERASE, 2=SCROLL, 3=SELECT
+    bool touchScrolling_ = false;
+    float touchScrollY_ = 0.0f;
+    bool pinchScroll_ = false;
+    float pinchScrollY_ = 0.0f;
 };
 
 std::unique_ptr<State> makeChartEditor(const std::string& songId, const std::string& diff) {

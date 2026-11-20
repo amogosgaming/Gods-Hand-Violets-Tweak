@@ -362,11 +362,15 @@ bool iconColor(const std::string& path, uint32_t& rgb) {
 
 // What part of the world the editor shows (centre and zoom), through the
 // game camera of its scene; dragged with the right mouse button, zoomed with
-// the wheel.
+// the wheel (and two-finger pinch/pan or optional one-finger pan on touch).
 struct View {
     float x = 640, y = 360, zoom = 1;
     bool dragging = false;
+    bool touchPanning = false;
+    bool pinching = false;
     Vector2 last{};
+    Vector2 pinchMid{};
+    float pinchDist = 0;
 
     void apply(scene::Camera& cam) const {
         cam.zoom = zoom;
@@ -375,8 +379,49 @@ struct View {
     }
     Vector2 toWorld(Vector2 canvas) const { return {x + (canvas.x - gfx::W * 0.5f) / zoom, y + (canvas.y - gfx::H * 0.5f) / zoom}; }
     Vector2 toCanvas(float wx, float wy) const { return {gfx::W * 0.5f + (wx - x) * zoom, gfx::H * 0.5f + (wy - y) * zoom}; }
-    void handle(const Input& in, const Ui& ui, bool overPanel) {
+    void handle(const Input& in, const Ui& ui, bool overPanel, bool oneFingerPan = false) {
         const Vector2 m = ui.mouse;
+        if (ui.touchMode) {
+            const auto pts = touchPoints();
+            if (pts.size() >= 2) {
+                const Vector2 p0 = gfx::toCanvas(pts[0].pos), p1 = gfx::toCanvas(pts[1].pos);
+                const Vector2 mid{(p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f};
+                const float dist = std::max(8.0f, std::hypot(p1.x - p0.x, p1.y - p0.y));
+                if (!pinching) {
+                    pinching = true;
+                    touchPanning = false;
+                    pinchMid = mid;
+                    pinchDist = dist;
+                } else {
+                    const Vector2 before = toWorld(pinchMid);
+                    zoom = clampv(zoom * (dist / pinchDist), 0.05f, 8.0f);
+                    const Vector2 after = toWorld(mid);
+                    x += before.x - after.x;
+                    y += before.y - after.y;
+                    pinchMid = mid;
+                    pinchDist = dist;
+                }
+                return;
+            }
+            pinching = false;
+            if (oneFingerPan) {
+                if (!overPanel && ui.click && !ui.used) {
+                    touchPanning = true;
+                    last = m;
+                }
+                if (touchPanning) {
+                    if (!ui.down) {
+                        touchPanning = false;
+                    } else {
+                        x -= (m.x - last.x) / zoom;
+                        y -= (m.y - last.y) / zoom;
+                        last = m;
+                    }
+                }
+            } else {
+                touchPanning = false;
+            }
+        }
         if (!overPanel && (in.mousePressed(MOUSE_BUTTON_RIGHT) || in.mousePressed(MOUSE_BUTTON_MIDDLE))) {
             dragging = true;
             last = m;
@@ -415,23 +460,21 @@ void cross(Vector2 c, float r, Color col) {
     DrawLineEx({c.x, c.y - r}, {c.x, c.y + r}, 1.5f, col);
 }
 
-void panelBox(float y0, float y1) {
-    DrawRectangleRounded({kPanelX - 6, y0, kPanelW + 12, y1 - y0}, 0.03f, 6, kPanel);
-    DrawRectangleRoundedLinesEx({kPanelX - 6, y0, kPanelW + 12, y1 - y0}, 0.03f, 6, 1.5f, Color{110, 92, 150, 160});
+void panelBox(float y0, float y1, float px = kPanelX) {
+    const float pw = gfx::W - px - 8.0f;
+    DrawRectangleRounded({px - 6, y0, pw + 12, y1 - y0}, 0.03f, 6, kPanel);
+    DrawRectangleRoundedLinesEx({px - 6, y0, pw + 12, y1 - y0}, 0.03f, 6, 1.5f, Color{110, 92, 150, 160});
 }
 
 void feedUi(Ui& ui) {
     App& a = app();
     SceneRenderer::smoothScaling = a.settings.antialiasing;
-    ui.in = &a.input;
-    ui.mouse = gfx::toCanvas(GetMousePosition());
-    ui.click = a.input.mousePressed(MOUSE_BUTTON_LEFT) && !(a.touchMode && a.touch.covers(GetMousePosition()));
-    ui.rclick = a.input.mousePressed(MOUSE_BUTTON_RIGHT);
-    ui.wheel = a.input.wheel();
-    ui.used = false;
+    ui.syncPointer(a.input, gfx::toCanvas(GetMousePosition()), a.touchMode, a.touchMode && a.touch.covers(GetMousePosition()));
 }
 
-bool overPanel(const Ui& ui) { return ui.mouse.x >= kPanelX - 8 || !ui.dropId.empty(); }
+bool overPanel(const Ui& ui, bool panelOpen = true, float px = kPanelX) {
+    return !ui.dropId.empty() || (panelOpen && ui.mouse.x >= px - 8);
+}
 
 // Scripts in the editors: a stage's Lua builds its sprites; nothing else happens.
 struct EditorGame : ScriptGame {
@@ -460,8 +503,9 @@ struct Status {
         if (app().now - at > 6 || text.empty()) return;
         const float al = float(std::min(1.0, 6 - (app().now - at)));
         const float w = gfx::measure(FontId::Ui, text, 18).x;
-        DrawRectangleRec({12, gfx::H - 70, w + 20, 28}, fade(BLACK, 0.7f * al));
-        gfx::text(FontId::Ui, text, 22, gfx::H - 66, 18, fade(bad ? Color{255, 120, 120, 255} : kGold, al));
+        const float y = app().touchMode ? (gfx::H - 96.0f) : (gfx::H - 70.0f);
+        DrawRectangleRec({12, y, w + 20, 28}, fade(BLACK, 0.78f * al));
+        gfx::text(FontId::Ui, text, 22, y + 4, 18, fade(bad ? Color{255, 120, 120, 255} : kGold, al));
     }
 };
 
@@ -483,6 +527,7 @@ public:
     void update(double) override {
         App& a = app();
         Input& in = a.input;
+        feedUi(ui_);
         if (running_.load()) {
             if (in.back()) stop_ = true;  // stops after the chart being converted
             return;
@@ -510,30 +555,85 @@ public:
     }
     void draw() override {
         App& a = app();
+        const bool touch = a.touchMode;
         gfx::beginCanvas();
         drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
-        DrawRectangleRec({40, 30, gfx::W - 80, gfx::H - 90}, fade(BLACK, 0.6f));
-        gfx::text(FontId::Ui, "Binary charts (.ghc)   mod: " + modLabel(mod_), 60, 44, 26, kGold);
-        gfx::text(FontId::Ui, "Each chart gets a .ghc beside its JSON (the JSON stays, for Psych). The game loads the .ghc.", 60, 78,
+        const float boxBot = touch ? (gfx::H - 70.0f) : (gfx::H - 60.0f);
+        DrawRectangleRec({40, 24, gfx::W - 80, boxBot - 24}, fade(BLACK, 0.65f));
+        gfx::text(FontId::Ui, "Binary charts (.ghc)   mod: " + modLabel(mod_), 60, 38, 26, kGold);
+        gfx::text(FontId::Ui, "Each chart gets a .ghc beside its JSON (the JSON stays, for Psych). The game loads the .ghc.", 60, 72,
                   17, fade(kIvory, 0.75f));
-        std::lock_guard<std::mutex> lk(mtx_);
-        if (rows_.empty()) gfx::text(FontId::Ui, "No charts in this mod.", 60, 130, 22, kIvory);
-        const int visible = 17, first = std::clamp(sel_ - visible / 2, 0, std::max(0, int(rows_.size()) - visible));
-        for (int i = first; i < std::min(int(rows_.size()), first + visible); ++i) {
-            const Row& r = rows_[size_t(i)];
-            const float y = 116.0f + float(i - first) * 30.0f;
-            if (i == sel_) DrawRectangleRec({52, y - 3, gfx::W - 104, 28}, fade(kGold, 0.18f));
-            gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y, 19, i == sel_ ? kGold : kIvory);
-            gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y, 19, fade(kIvory, 0.8f), Align::Right);
-            gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y, 19, fade(kIvory, 0.8f), Align::Right);
-            gfx::text(FontId::Ui, r.note, 870, y, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
+        gfx::text(FontId::Ui, "JSON", 700, 96, 15, fade(kIvory, 0.5f), Align::Right);
+        gfx::text(FontId::Ui, ".ghc", 840, 96, 15, fade(kIvory, 0.5f), Align::Right);
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            if (rows_.empty()) {
+                gfx::text(FontId::Ui, "No charts in this mod.", 60, 130, 22, kIvory);
+            } else if (!touch) {
+                const int visible = 17, first = std::clamp(sel_ - visible / 2, 0, std::max(0, int(rows_.size()) - visible));
+                for (int i = first; i < std::min(int(rows_.size()), first + visible); ++i) {
+                    const Row& r = rows_[size_t(i)];
+                    const float y = 116.0f + float(i - first) * 30.0f;
+                    if (i == sel_) DrawRectangleRec({52, y - 3, gfx::W - 104, 28}, fade(kGold, 0.18f));
+                    gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y, 19, i == sel_ ? kGold : kIvory);
+                    gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.note, 870, y, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
+                }
+            } else {
+                const Rectangle view{48, 114, gfx::W - 96, boxBot - 122};
+                const float rowH = 40.0f;
+                ui_.beginScroll("conv_list", view, scroll_);
+                for (int i = 0; i < int(rows_.size()); ++i) {
+                    const Row& r = rows_[size_t(i)];
+                    const float y = view.y + float(i) * rowH - scroll_;
+                    if (y + rowH < view.y || y > view.y + view.height) continue;
+                    const Rectangle rr{view.x + 4, y + 2, view.width - 14, rowH - 4};
+                    const bool hov = ui_.hover(rr);
+                    if (i == sel_ || hov) DrawRectangleRounded(rr, 0.18f, 4, i == sel_ ? fade(kGold, 0.22f) : Color{56, 44, 86, 160});
+                    gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y + 10, 19, i == sel_ ? kGold : kIvory);
+                    gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.note, 870, y + 11, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
+                    if (hov && ui_.tap() && !running_.load()) sel_ = i;
+                }
+                ui_.endScroll(view, scroll_, float(rows_.size()) * rowH + 6.0f);
+            }
         }
-        gfx::text(FontId::Ui, "JSON", 700, 98, 15, fade(kIvory, 0.5f), Align::Right);
-        gfx::text(FontId::Ui, ".ghc", 840, 98, 15, fade(kIvory, 0.5f), Align::Right);
+        if (touch) {
+            const float by = gfx::H - 60.0f;
+            DrawRectangleRec({0, by, gfx::W, 60}, Color{10, 7, 18, 248});
+            DrawRectangleRec({0, by, gfx::W, 1.5f}, Color{110, 92, 150, 170});
+            const float y = by + 8.0f, h = 44.0f;
+            if (ui_.button({20, y, 140, h}, running_.load() ? "STOP" : "< BACK")) {
+                if (running_.load()) {
+                    stop_ = true;
+                } else {
+                    sfxPlay(Sfx::Cancel);
+                    a.change(makeEditorMenu());
+                    gfx::endCanvas();
+                    return;
+                }
+            }
+            if (!running_.load() && !rows_.empty()) {
+                if (ui_.button({gfx::W - 460, y, 210, h}, "CONVERT SELECTED")) start({size_t(sel_)});
+                if (ui_.button({gfx::W - 236, y, 216, h}, "CONVERT ALL")) {
+                    std::vector<size_t> all;
+                    for (size_t i = 0; i < rows_.size(); ++i) all.push_back(i);
+                    start(all);
+                }
+            } else if (running_.load()) {
+                gfx::text(FontId::Ui, "Converting charts...", gfx::W * 0.5f, y + 11, 22, kGold, Align::Center);
+            }
+        }
         hints(running_.load() ? "Converting...   ESC stop" : "UP/DOWN choose   ENTER convert this one   A convert all   ESC back");
         gfx::endCanvas();
     }
-    TouchLayout touchLayout() const override { return {}; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
 private:
     struct Row {
@@ -616,6 +716,8 @@ private:
     }
 
     ModChoice mod_;
+    Ui ui_;
+    float scroll_ = 0.0f;
     std::vector<Row> rows_;
     int sel_ = 0;
     std::mutex mtx_;
@@ -632,6 +734,7 @@ class ScriptEditorState : public State {
 public:
     void enter() override {
         mod_ = currentMod();
+        filesOpen_ = !app().touchMode;
         listFiles();
         if (!files_.empty()) open(0);
     }
@@ -640,14 +743,27 @@ public:
     void update(double dt) override {
         App& a = app();
         Input& in = a.input;
+        feedUi(ui_);
+        if (editingLine_) {
+            std::string res;
+            const platform::TextAsk st = platform::textStatus(&res);
+            if (st == platform::TextAsk::Done) {
+                if (editLineIdx_ >= 0 && editLineIdx_ < int(lines_.size()) && res != lines_[size_t(editLineIdx_)]) {
+                    remember();
+                    lines_[size_t(editLineIdx_)] = res;
+                    cx_ = int(res.size());
+                }
+                platform::resetText();
+                editingLine_ = false;
+            } else if (st == platform::TextAsk::Cancelled) {
+                platform::resetText();
+                editingLine_ = false;
+            }
+            return;
+        }
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
         if (in.pressed(KEY_ESCAPE)) {
-            if (dirty_ && !leaveArmed_) {
-                status_ = "Unsaved changes: ESC again to leave without saving (CTRL+S saves)";
-                leaveArmed_ = true;
-            } else {
-                a.change(makeEditorMenu());
-            }
+            tryLeave();
             return;
         }
         if (ctrl && in.pressed(KEY_S)) save();
@@ -658,7 +774,7 @@ public:
             open(size_t(((cur_ + (in.pressed(KEY_PAGE_UP) ? -1 : 1)) % n + n) % n));
             return;
         }
-        mouse(in);
+        if (!a.touchMode) mouse(in);
         if (lines_.empty()) lines_.push_back("");
         if (!ctrl)
             for (char32_t c : in.typed())
@@ -676,47 +792,188 @@ public:
         if (hit(KEY_PAGE_DOWN) && !ctrl) moveLine(kRows);
         if (in.pressed(KEY_HOME)) cx_ = 0;
         if (in.pressed(KEY_END)) cx_ = int(lines_[size_t(cy_)].size());
-        if (cy_ < top_) top_ = cy_;
-        if (cy_ >= top_ + kRows) top_ = cy_ - kRows + 1;
+        if (!a.touchMode) {
+            if (cy_ < top_) top_ = cy_;
+            if (cy_ >= top_ + kRows) top_ = cy_ - kRows + 1;
+        }
     }
 
     void draw() override {
+        const bool touch = app().touchMode;
         gfx::beginCanvas();
         ClearBackground(Color{14, 10, 22, 255});
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{14, 10, 22, 255});
-        // Files
-        DrawRectangleRec({0, 0, kListW, gfx::H}, Color{10, 7, 16, 255});
-        gfx::text(FontId::Ui, "Scripts: " + modLabel(mod_), 12, 10, 18, kGold);
-        for (size_t i = 0; i < files_.size() && i < 40; ++i) {
-            const float y = 40.0f + float(i) * 17.0f;
-            if (int(i) == cur_) DrawRectangleRec({4, y - 1, kListW - 8, 17}, fade(kGold, 0.2f));
-            gfx::text(FontId::Ui, files_[i].label, 10, y, 14, int(i) == cur_ ? kGold : fade(kIvory, 0.75f));
+        if (!touch) {
+            // Files
+            DrawRectangleRec({0, 0, kListW, gfx::H}, Color{10, 7, 16, 255});
+            gfx::text(FontId::Ui, "Scripts: " + modLabel(mod_), 12, 10, 18, kGold);
+            for (size_t i = 0; i < files_.size() && i < 40; ++i) {
+                const float y = 40.0f + float(i) * 17.0f;
+                if (int(i) == cur_) DrawRectangleRec({4, y - 1, kListW - 8, 17}, fade(kGold, 0.2f));
+                gfx::text(FontId::Ui, files_[i].label, 10, y, 14, int(i) == cur_ ? kGold : fade(kIvory, 0.75f));
+            }
+            // Text
+            const float x0 = kListW + 56, y0 = 40;
+            gfx::text(FontId::Ui, (cur_ >= 0 ? files_[size_t(cur_)].label : std::string("(no file)")) + (dirty_ ? "  *" : ""), kListW + 12,
+                      10, 18, kIvory);
+            for (int k = 0; k < kRows && top_ + k < int(lines_.size()); ++k) {
+                const int ln = top_ + k;
+                const float y = y0 + float(k) * kLineH;
+                if (ln == cy_) DrawRectangleRec({kListW, y - 1, gfx::W - kListW, kLineH}, Color{30, 22, 46, 255});
+                gfx::text(FontId::Ui, std::to_string(ln + 1), x0 - 10, y, 15, fade(kIvory, 0.35f), Align::Right);
+                drawLine(lines_[size_t(ln)], x0, y);
+            }
+            if (cy_ >= top_ && cy_ < top_ + kRows && std::fmod(GetTime(), 1.0) < 0.6) {
+                const std::string& l = lines_[size_t(cy_)];
+                const float cx = x0 + gfx::measure(FontId::Ui, l.substr(0, size_t(std::min<int>(cx_, int(l.size())))), 16).x;
+                DrawRectangleRec({cx, y0 + float(cy_ - top_) * kLineH, 2, kLineH - 2}, kGold);
+            }
+            if (!status_.empty()) gfx::text(FontId::Ui, status_, kListW + 12, gfx::H - 52, 16, kGold);
+            hints("Type to edit   CTRL+S save   CTRL+Z undo   CTRL+N new script   CTRL+PGUP/PGDN file   click a file   ESC back");
+            gfx::endCanvas();
+            return;
         }
-        // Text
-        const float x0 = kListW + 56, y0 = 40;
-        gfx::text(FontId::Ui, (cur_ >= 0 ? files_[size_t(cur_)].label : std::string("(no file)")) + (dirty_ ? "  *" : ""), kListW + 12,
-                  10, 18, kIvory);
-        for (int k = 0; k < kRows && top_ + k < int(lines_.size()); ++k) {
-            const int ln = top_ + k;
-            const float y = y0 + float(k) * kLineH;
-            if (ln == cy_) DrawRectangleRec({kListW, y - 1, gfx::W - kListW, kLineH}, Color{30, 22, 46, 255});
-            gfx::text(FontId::Ui, std::to_string(ln + 1), x0 - 10, y, 15, fade(kIvory, 0.35f), Align::Right);
-            drawLine(lines_[size_t(ln)], x0, y);
+        // Touch script editor: top bar, collapsible scrollable files drawer, tap-to-edit code lines, bottom toolbar.
+        const float topH = 48.0f, botY = gfx::H - 60.0f;
+        DrawRectangleRec({0, 0, gfx::W, topH}, Color{8, 5, 14, 245});
+        DrawRectangleRec({0, topH - 1, gfx::W, 1}, Color{110, 92, 150, 150});
+        if (ui_.button({8, 6, 94, 36}, "< BACK")) {
+            if (tryLeave()) {
+                gfx::endCanvas();
+                return;
+            }
         }
-        if (cy_ >= top_ && cy_ < top_ + kRows && std::fmod(GetTime(), 1.0) < 0.6) {
-            const std::string& l = lines_[size_t(cy_)];
-            const float cx = x0 + gfx::measure(FontId::Ui, l.substr(0, size_t(std::min<int>(cx_, int(l.size())))), 16).x;
-            DrawRectangleRec({cx, y0 + float(cy_ - top_) * kLineH, 2, kLineH - 2}, kGold);
+        if (ui_.button({108, 6, 98, 36}, filesOpen_ ? "FILES <" : "FILES >", filesOpen_)) filesOpen_ = !filesOpen_;
+        const std::string title = (cur_ >= 0 ? files_[size_t(cur_)].label : std::string("(no file)")) + (dirty_ ? "  *" : "");
+        gfx::text(FontId::Ui, title, 220, 14, 20, kIvory);
+        if (ui_.button({gfx::W - 118, 6, 110, 36}, dirty_ ? "SAVE *" : "SAVE", dirty_)) save();
+
+        const float codeLeft = filesOpen_ ? 316.0f : 6.0f;
+        if (filesOpen_) {
+            const Rectangle fBox{4, topH + 4, 306, botY - topH - 8};
+            DrawRectangleRounded(fBox, 0.02f, 6, Color{10, 7, 16, 245});
+            DrawRectangleRoundedLinesEx(fBox, 0.02f, 6, 1.5f, Color{110, 92, 150, 140});
+            const Rectangle fView{fBox.x + 4, fBox.y + 4, fBox.width - 8, fBox.height - 8};
+            const float fRow = 36.0f;
+            ui_.beginScroll("script_files", fView, filesScroll_);
+            for (size_t i = 0; i < files_.size(); ++i) {
+                const float y = fView.y + float(i) * fRow - filesScroll_;
+                if (y + fRow < fView.y || y > fView.y + fView.height) continue;
+                const Rectangle r{fView.x + 2, y + 2, fView.width - 10, fRow - 4};
+                const bool hov = ui_.hover(r);
+                if (int(i) == cur_ || hov) DrawRectangleRounded(r, 0.18f, 4, int(i) == cur_ ? fade(kGold, 0.24f) : Color{54, 42, 82, 180});
+                gfx::text(FontId::Ui, files_[i].label, r.x + 8, r.y + 7, 16, int(i) == cur_ ? kGold : kIvory);
+                if (hov && ui_.tap()) {
+                    open(i);
+                    filesOpen_ = false;
+                }
+            }
+            ui_.endScroll(fView, filesScroll_, float(files_.size()) * fRow + 8.0f);
         }
-        if (!status_.empty()) gfx::text(FontId::Ui, status_, kListW + 12, gfx::H - 52, 16, kGold);
-        hints("Type to edit   CTRL+S save   CTRL+Z undo   CTRL+N new script   CTRL+PGUP/PGDN file   click a file   ESC back");
+
+        const Rectangle cView{codeLeft, topH + 4, gfx::W - codeLeft - 6, botY - topH - (status_.empty() ? 8.0f : 32.0f)};
+        const float lineH = 28.0f;
+        ui_.beginScroll("script_code", cView, codeScroll_);
+        const float x0 = cView.x + 56.0f;
+        for (int ln = 0; ln < int(lines_.size()); ++ln) {
+            const float y = cView.y + float(ln) * lineH - codeScroll_;
+            if (y + lineH < cView.y || y > cView.y + cView.height) continue;
+            const Rectangle lr{cView.x, y, cView.width - 8, lineH};
+            const bool hov = ui_.hover(lr);
+            if (ln == cy_) DrawRectangleRec(lr, Color{42, 30, 68, 255});
+            else if (hov) DrawRectangleRec(lr, Color{26, 20, 42, 200});
+            gfx::text(FontId::Ui, std::to_string(ln + 1), x0 - 10, y + 5, 16, ln == cy_ ? kGold : fade(kIvory, 0.4f), Align::Right);
+            drawLine(lines_[size_t(ln)], x0, y + 5);
+            if (hov && ui_.tap()) {
+                if (cy_ == ln) editSelectedLine();
+                else {
+                    cy_ = ln;
+                    cx_ = int(lines_[size_t(ln)].size());
+                }
+            }
+        }
+        ui_.endScroll(cView, codeScroll_, float(lines_.size()) * lineH + 24.0f);
+        if (!status_.empty()) gfx::text(FontId::Ui, status_, codeLeft + 10, botY - 24, 16, kGold);
+
+        // Bottom docked mobile editing bar
+        DrawRectangleRec({0, botY, gfx::W, 60}, Color{10, 7, 18, 248});
+        DrawRectangleRec({0, botY, gfx::W, 1.5f}, Color{110, 92, 150, 170});
+        const float by = botY + 8.0f, bh = 44.0f;
+        if (ui_.button({12, by, 148, bh}, "EDIT LINE")) editSelectedLine();
+        if (ui_.button({168, by, 126, bh}, "+ LINE")) {
+            remember();
+            if (lines_.empty()) lines_.push_back("");
+            cy_ = std::clamp(cy_, 0, int(lines_.size()) - 1);
+            lines_.insert(lines_.begin() + cy_ + 1, "");
+            ++cy_;
+            cx_ = 0;
+            editSelectedLine();
+        }
+        if (ui_.button({302, by, 128, bh}, "DEL LINE")) {
+            if (!lines_.empty()) {
+                remember();
+                if (lines_.size() == 1) lines_[0].clear();
+                else {
+                    lines_.erase(lines_.begin() + cy_);
+                    cy_ = std::clamp(cy_, 0, int(lines_.size()) - 1);
+                }
+                cx_ = 0;
+            }
+        }
+        if (ui_.button({442, by, 124, bh}, "INDENT")) {
+            if (cy_ >= 0 && cy_ < int(lines_.size())) {
+                remember();
+                lines_[size_t(cy_)].insert(0, "    ");
+            }
+        }
+        if (ui_.button({574, by, 136, bh}, "UNINDENT")) {
+            if (cy_ >= 0 && cy_ < int(lines_.size())) {
+                std::string& l = lines_[size_t(cy_)];
+                int rm = 0;
+                while (rm < 4 && rm < int(l.size()) && l[size_t(rm)] == ' ') ++rm;
+                if (rm == 0 && !l.empty() && l[0] == '\t') rm = 1;
+                if (rm > 0) {
+                    remember();
+                    l.erase(0, size_t(rm));
+                }
+            }
+        }
+        if (ui_.button({726, by, 114, bh}, "UNDO")) undo();
+        if (ui_.button({848, by, 154, bh}, "NEW SCRIPT")) newFile();
+        if (ui_.button({1010, by, 126, bh}, "SAVE")) save();
         gfx::endCanvas();
     }
-    TouchLayout touchLayout() const override { return {}; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
 private:
     static constexpr float kListW = 300, kLineH = 19;
     static constexpr int kRows = 33;
+
+    bool tryLeave() {
+        if (dirty_ && !leaveArmed_) {
+            status_ = app().touchMode ? "Unsaved changes: tap BACK again to leave, or tap SAVE"
+                                      : "Unsaved changes: ESC again to leave without saving (CTRL+S saves)";
+            leaveArmed_ = true;
+            return false;
+        }
+        app().change(makeEditorMenu());
+        return true;
+    }
+
+    void editSelectedLine() {
+        if (lines_.empty()) lines_.push_back("");
+        cy_ = std::clamp(cy_, 0, int(lines_.size()) - 1);
+        if (platform::askText("Line " + std::to_string(cy_ + 1), lines_[size_t(cy_)])) {
+            editingLine_ = true;
+            editLineIdx_ = cy_;
+        } else {
+            status_ = "Line " + std::to_string(cy_ + 1) + " selected (type on keyboard)";
+        }
+    }
     struct File {
         std::string path, label;
     };
@@ -987,6 +1244,11 @@ private:
     }
 
     ModChoice mod_;
+    Ui ui_;
+    bool filesOpen_ = true;
+    float filesScroll_ = 0.0f, codeScroll_ = 0.0f;
+    bool editingLine_ = false;
+    int editLineIdx_ = -1;
     std::vector<File> files_;
     int cur_ = -1;
     std::vector<std::string> lines_;
@@ -1004,6 +1266,7 @@ public:
     void update(double) override {
         App& a = app();
         Input& in = a.input;
+        feedUi(ui_);
         const int mods = int(modChoices().size());
         if (in.up()) { sel_ = (sel_ + kItems - 1) % kItems; sfxPlay(Sfx::Scroll); }
         if (in.down()) { sel_ = (sel_ + 1) % kItems; sfxPlay(Sfx::Scroll); }
@@ -1018,52 +1281,13 @@ public:
             return;
         }
         if (!in.accept()) return;
-        sfxPlay(Sfx::Confirm);
-        switch (sel_) {
-            case 0: openChartEditor(); break;
-            case 1: a.change(makeCharacterEditor()); break;
-            case 2: a.change(makeStageEditor()); break;
-            case 3: a.change(makeEventEditor()); break;
-            case 4: a.change(makeScriptEditor()); break;
-            default: a.change(makeChartConverter()); break;
-        }
+        launch(sel_);
     }
     void draw() override {
         App& a = app();
+        const bool touch = a.touchMode;
         const bool psychStyle = a.psychMenusActive();
         const PsychUi& ui = psychUi();
-        gfx::beginCanvas();
-        if (psychStyle) {
-            drawPsychMenuBackground(1, Color{53, 53, 53, 255}, 0.0f, false, a.now, 0x353535, menuPulse());
-            static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",
-                                                "Chart Converter"};
-            static const char* about[kItems] = {"A song of this mod (the one chosen in Freeplay if it is here)",
-                                                "Animations, offsets, image, icon and colours of a character",
-                                                "Zoom, where the characters stand and what the camera sees",
-                                                "New events for charts: a description and a Lua script",
-                                                "The mod's Lua and HScript scripts and its shaders",
-                                                "The mod's charts to binary .ghc files: much smaller, loaded faster"};
-            for (int i = 0; i < kItems; ++i) {
-                const bool on = i == sel_;
-                const float y = 110.0f + float(i) * 82.0f;
-                const float al = on ? 1.0f : 0.55f;
-                if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y, on ? 56.0f : 44.0f, al) < 0)
-                    ui.uiText(items[i], gfx::W * 0.5f, y + 6, on ? 46.0f : 38.0f, fade(WHITE, al), 0, 2.0f);
-            }
-            const ModChoice m = currentMod();
-            DrawRectangleRec({0, gfx::H - 134, gfx::W, 94}, Color{0, 0, 0, 170});
-            ui.uiText(about[sel_], gfx::W * 0.5f, gfx::H - 124, 18, WHITE, 0, 1.0f);
-            ui.uiText("<  Current Mod Directory: " + modLabel(m) + "  >", gfx::W * 0.5f, gfx::H - 92, 22, kGold, 0, 1.25f);
-            ui.uiText("Saves into: " + m.roots[0], gfx::W * 0.5f, gfx::H - 64, 15, fade(WHITE, 0.72f), 0, 1.0f);
-            if (!a.touchMode) {
-                DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 195});
-                ui.uiText("UP/DOWN choose   LEFT/RIGHT mod   ENTER open   ESC back", gfx::W / 2, gfx::H - 31, 18, WHITE, 0, 1.0f);
-            }
-            gfx::endCanvas();
-            return;
-        }
-        drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
-        gfx::text(FontId::Title, "EDITORS", gfx::W / 2, 60, 64, kGold, Align::Center, 2.0f);
         static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",
                                             "Chart Converter"};
         static const char* about[kItems] = {"A song of this mod (the one chosen in Freeplay if it is here)",
@@ -1072,23 +1296,105 @@ public:
                                             "New events for charts: a description and a Lua script",
                                             "The mod's Lua and HScript scripts and its shaders",
                                             "The mod's charts to binary .ghc files: much smaller, loaded faster"};
-        for (int i = 0; i < kItems; ++i) {
-            const bool on = i == sel_;
-            const float y = 140.0f + i * 74.0f;
-            gfx::text(FontId::Title, items[i], gfx::W / 2, y, on ? 50.0f : 40.0f, on ? kGold : fade(kIvory, 0.55f), Align::Center, 2.0f);
-            if (on) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 50, 18, fade(kIvory, 0.85f), Align::Center, 1.5f);
+        gfx::beginCanvas();
+        if (psychStyle) {
+            drawPsychMenuBackground(1, Color{53, 53, 53, 255}, 0.0f, false, a.now, 0x353535, menuPulse());
+            for (int i = 0; i < kItems; ++i) {
+                const bool on = i == sel_;
+                const float y = (touch ? 76.0f : 110.0f) + float(i) * (touch ? 78.0f : 82.0f);
+                const float al = on ? 1.0f : 0.55f;
+                const Rectangle hit{gfx::W * 0.5f - 280.0f, y - 6.0f, 560.0f, 68.0f};
+                if (touch) DrawRectangleRounded(hit, 0.2f, 6, on ? Color{90, 66, 140, 140} : Color{20, 14, 34, 120});
+                if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y, on ? 56.0f : 44.0f, al) < 0)
+                    ui.uiText(items[i], gfx::W * 0.5f, y + 6, on ? 46.0f : 38.0f, fade(WHITE, al), 0, 2.0f);
+                if (touch && ui_.hover(hit) && ui_.tap()) {
+                    sel_ = i;
+                    launch(i);
+                    gfx::endCanvas();
+                    return;
+                }
+            }
+            const ModChoice m = currentMod();
+            DrawRectangleRec({0, gfx::H - 134, gfx::W, 134}, Color{0, 0, 0, 185});
+            ui.uiText(about[sel_], gfx::W * 0.5f, gfx::H - 124, 18, WHITE, 0, 1.0f);
+            ui.uiText("<  Current Mod Directory: " + modLabel(m) + "  >", gfx::W * 0.5f, gfx::H - 92, 22, kGold, 0, 1.25f);
+            ui.uiText("Saves into: " + m.roots[0], gfx::W * 0.5f, gfx::H - 60, 15, fade(WHITE, 0.72f), 0, 1.0f);
+            if (!touch) {
+                DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 195});
+                ui.uiText("UP/DOWN choose   LEFT/RIGHT mod   ENTER open   ESC back", gfx::W / 2, gfx::H - 31, 18, WHITE, 0, 1.0f);
+            }
+        } else {
+            drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
+            gfx::text(FontId::Title, "EDITORS", gfx::W / 2, touch ? 22.0f : 60.0f, touch ? 48.0f : 64.0f, kGold, Align::Center, 2.0f);
+            for (int i = 0; i < kItems; ++i) {
+                const bool on = i == sel_;
+                const float y = (touch ? 92.0f : 140.0f) + i * 74.0f;
+                const Rectangle hit{gfx::W * 0.5f - 280.0f, y - 4.0f, 560.0f, 66.0f};
+                if (touch) {
+                    DrawRectangleRounded(hit, 0.22f, 6, on ? Color{90, 66, 140, 170} : Color{24, 18, 42, 165});
+                    DrawRectangleRoundedLinesEx(hit, 0.22f, 6, 1.5f, on ? kGold : Color{110, 92, 150, 160});
+                }
+                gfx::text(FontId::Title, items[i], gfx::W / 2, y + (touch ? 6.0f : 0.0f), on ? 46.0f : 38.0f, on ? kGold : fade(kIvory, 0.75f),
+                          Align::Center, 2.0f);
+                if (on && !touch) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 50, 18, fade(kIvory, 0.85f), Align::Center, 1.5f);
+                if (touch && ui_.hover(hit) && ui_.tap()) {
+                    sel_ = i;
+                    launch(i);
+                    gfx::endCanvas();
+                    return;
+                }
+            }
+            const ModChoice m = currentMod();
+            gfx::text(FontId::Ui, "<  Mod: " + modLabel(m) + "  >", gfx::W / 2, gfx::H - 108, 24, kIvory, Align::Center, 1.5f);
+            gfx::text(FontId::Ui, "The editors save into " + m.roots[0], gfx::W / 2, gfx::H - 72, 16, fade(kIvory, 0.6f), Align::Center, 1.0f);
+            hints("UP/DOWN choose   LEFT/RIGHT mod   ENTER open   ESC back");
         }
-        const ModChoice m = currentMod();
-        gfx::text(FontId::Ui, "<  Mod: " + modLabel(m) + "  >", gfx::W / 2, gfx::H - 112, 26, kIvory, Align::Center, 1.5f);
-        gfx::text(FontId::Ui, "The editors save into " + m.roots[0], gfx::W / 2, gfx::H - 80, 16, fade(kIvory, 0.6f), Align::Center, 1.0f);
-        hints("UP/DOWN choose   LEFT/RIGHT mod   ENTER open   ESC back");
+        if (touch) {
+            if (ui_.button({18, 16, 118, 44}, "< BACK")) {
+                sfxPlay(Sfx::Cancel);
+                a.change(makeMainMenu());
+                gfx::endCanvas();
+                return;
+            }
+            const int mods = int(modChoices().size());
+            if (mods > 1) {
+                if (ui_.button({120, gfx::H - 108, 96, 44}, "< MOD")) {
+                    int& m = modIndex();
+                    m = ((m - 1) % mods + mods) % mods;
+                    sfxPlay(Sfx::Scroll);
+                }
+                if (ui_.button({gfx::W - 216, gfx::H - 108, 96, 44}, "MOD >")) {
+                    int& m = modIndex();
+                    m = (m + 1) % mods;
+                    sfxPlay(Sfx::Scroll);
+                }
+            }
+        }
         gfx::endCanvas();
     }
-    TouchLayout touchLayout() const override { return {}; }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
 private:
     static constexpr int kItems = 6;
     int sel_ = 0;
+    Ui ui_;
+
+    void launch(int idx) {
+        App& a = app();
+        sfxPlay(Sfx::Confirm);
+        switch (idx) {
+            case 0: openChartEditor(); break;
+            case 1: a.change(makeCharacterEditor()); break;
+            case 2: a.change(makeStageEditor()); break;
+            case 3: a.change(makeEventEditor()); break;
+            case 4: a.change(makeScriptEditor()); break;
+            default: a.change(makeChartConverter()); break;
+        }
+    }
 
     void openChartEditor() {
         App& a = app();
@@ -1117,29 +1423,32 @@ class CharacterEditorState : public State {
 public:
     void enter() override {
         mod_ = currentMod();
+        panelOpen_ = !app().touchMode;
         useMod(sc_, mod_);
         names_ = listNames(sc_, "characters/", ".json");
         auto it = std::find(names_.begin(), names_.end(), "bf");
         load(it != names_.end() ? *it : names_.empty() ? std::string("bf") : names_[0]);
     }
     bool keyReserved(int) const override { return !ui_.focus.empty(); }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
     void update(double dt) override {
         App& a = app();
         Input& in = a.input;
         feedUi(ui_);
         if (ch_) ch_->updateAnim(dt);
-        view_.handle(in, ui_, overPanel(ui_));
+        const bool overChrome = a.touchMode && (ui_.mouse.y < 52.0f || ui_.mouse.y > gfx::H - 62.0f ||
+                                                (ui_.mouse.x < 192.0f && ui_.mouse.y > gfx::H - 224.0f));
+        view_.handle(in, ui_, overPanel(ui_, !a.touchMode || panelOpen_, panelX()) || overChrome, a.touchMode);
         if (!ui_.focus.empty()) return;
         const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
         if (in.pressed(KEY_ESCAPE)) {
-            if (dirty_ && !leaveArmed_) {
-                status_.set("Unsaved changes: ESC again to leave without saving (CTRL+S saves)");
-                leaveArmed_ = true;
-            } else {
-                a.change(makeEditorMenu());
-            }
+            tryLeave();
             return;
         }
         if (ctrl && in.pressed(KEY_S)) save();
@@ -1176,7 +1485,11 @@ public:
         } else {
             gfx::text(FontId::Ui, error_.empty() ? "No character" : error_, 430, 340, 22, Color{255, 140, 140, 255}, Align::Center, 1.5f);
         }
-        drawInfo();
+        if (drawInfo()) {
+            gfx::endCanvas();
+            return;
+        }
+        if (app().touchMode) drawTouchControls();
         drawPanel();
         status_.draw();
         gfx::endCanvas();
@@ -1201,6 +1514,22 @@ private:
     double fFps_ = 24;
     bool fLoop_ = false;
     float listScroll_ = 0;
+    bool panelOpen_ = true, nudgeBig_ = false;
+    float panelScroll_ = 0.0f;
+
+    float panelX() const { return app().touchMode ? 836.0f : kPanelX; }
+    float panelW() const { return gfx::W - panelX() - 8.0f; }
+
+    bool tryLeave() {
+        if (dirty_ && !leaveArmed_) {
+            status_.set(app().touchMode ? "Unsaved changes: tap BACK again to leave, or tap SAVE"
+                                        : "Unsaved changes: ESC again to leave without saving (CTRL+S saves)");
+            leaveArmed_ = true;
+            return false;
+        }
+        app().change(makeEditorMenu());
+        return true;
+    }
 
     void load(const std::string& name) {
         std::string err;
@@ -1273,7 +1602,7 @@ private:
             view_.y = 360;
         }
         view_.zoom = 1;
-        view_.x -= (kPanelX - gfx::W) * 0.5f / view_.zoom;  // centred in the part left of the panel
+        if (!app().touchMode || panelOpen_) view_.x -= (panelX() - gfx::W) * 0.5f / view_.zoom;  // centred left of the panel
     }
 
     void selectAnim(int i) {
@@ -1312,32 +1641,95 @@ private:
         rebuild();
     }
 
-    void drawInfo() {
+    bool drawInfo() {
         std::string l1 = "Animation: none";
         if (anim_ < int(def_.anims.size())) {
             const psych::AnimDef& ad = def_.anims[size_t(anim_)];
-            l1 = "Animation: " + ad.anim + "   offset [" + jnum(ad.offX) + ", " + jnum(ad.offY) + "]";
-            if (ch_ && !ch_->hasAnim(ad.anim)) l1 += "   (no frames named \"" + ad.prefix + "\" in the image)";
+            l1 = "Anim: " + ad.anim + "   offset [" + jnum(ad.offX) + ", " + jnum(ad.offY) + "]";
+            if (ch_ && !ch_->hasAnim(ad.anim)) l1 += "   (missing \"" + ad.prefix + "\")";
         }
-        DrawRectangleRec({8, 8, 856, 56}, fade(BLACK, 0.55f));
-        gfx::text(FontId::Ui, l1, 18, 13, 20, kInk);
-        gfx::text(FontId::Ui, saveName_ + (dirty_ ? "  (not saved)" : "") + "   mod: " + modLabel(mod_), 18, 38, 16, kDim);
-        hints("W/S animation  SPACE play  ARROWS offset (SHIFT x10)  G ghost  RIGHT-DRAG move  WHEEL zoom  R reset  CTRL+S save");
+        if (!app().touchMode) {
+            DrawRectangleRec({8, 8, 856, 56}, fade(BLACK, 0.55f));
+            gfx::text(FontId::Ui, l1, 18, 13, 20, kInk);
+            gfx::text(FontId::Ui, saveName_ + (dirty_ ? "  (not saved)" : "") + "   mod: " + modLabel(mod_), 18, 38, 16, kDim);
+            hints("W/S animation  SPACE play  ARROWS offset (SHIFT x10)  G ghost  RIGHT-DRAG move  WHEEL zoom  R reset  CTRL+S save");
+            return false;
+        }
+        // Mobile top bar
+        DrawRectangleRec({0, 0, gfx::W, 48}, Color{8, 5, 14, 242});
+        DrawRectangleRec({0, 47, gfx::W, 1}, Color{110, 92, 150, 140});
+        if (ui_.button({8, 6, 94, 36}, "< BACK")) {
+            if (tryLeave()) return true;
+        }
+        gfx::text(FontId::Ui, l1, 114, 7, 18, kInk);
+        gfx::text(FontId::Ui, saveName_ + (dirty_ ? " *" : "") + "   mod: " + modLabel(mod_), 114, 27, 14, kDim);
+        if (ui_.button({gfx::W - 224, 6, 100, 36}, dirty_ ? "SAVE *" : "SAVE", dirty_)) save();
+        if (ui_.button({gfx::W - 118, 6, 110, 36}, panelOpen_ ? "PANEL >" : "< PANEL", panelOpen_)) panelOpen_ = !panelOpen_;
+        return false;
+    }
+
+    void drawTouchControls() {
+        // Bottom-left compact offset nudge pad
+        const Rectangle pad{12, gfx::H - 220, 174, 154};
+        DrawRectangleRounded(pad, 0.08f, 6, Color{12, 8, 22, 205});
+        DrawRectangleRoundedLinesEx(pad, 0.08f, 6, 1.5f, Color{110, 92, 150, 150});
+        gfx::text(FontId::Ui, "OFFSET", pad.x + 10, pad.y + 9, 15, kAccent);
+        if (ui_.button({pad.x + pad.width - 66, pad.y + 4, 60, 28}, nudgeBig_ ? "x10" : "x1", nudgeBig_)) nudgeBig_ = !nudgeBig_;
+        auto nudge = [&](int dx, int dy) {
+            if (anim_ < int(def_.anims.size())) {
+                const int s = nudgeBig_ ? 10 : 1;
+                def_.anims[size_t(anim_)].offX += float(dx * s);
+                def_.anims[size_t(anim_)].offY += float(dy * s);
+                offsetsChanged();
+            }
+        };
+        if (ui_.button({pad.x + 62, pad.y + 38, 50, 36}, "^")) nudge(0, 1);
+        if (ui_.button({pad.x + 8, pad.y + 76, 50, 36}, "<")) nudge(1, 0);
+        if (ui_.button({pad.x + 116, pad.y + 76, 50, 36}, ">")) nudge(-1, 0);
+        if (ui_.button({pad.x + 62, pad.y + 112, 50, 36}, "v")) nudge(0, -1);
+
+        // Bottom transport & view bar
+        const float by = gfx::H - 58.0f;
+        DrawRectangleRec({0, by, gfx::W, 58}, Color{10, 7, 18, 248});
+        DrawRectangleRec({0, by, gfx::W, 1.5f}, Color{110, 92, 150, 170});
+        const float y = by + 7.0f, h = 44.0f;
+        const int n = int(def_.anims.size());
+        if (ui_.button({12, y, 118, h}, "< ANIM") && n > 0) selectAnim((anim_ + n - 1) % n);
+        if (ui_.button({138, y, 110, h}, "PLAY")) playSelected();
+        if (ui_.button({256, y, 118, h}, "ANIM >") && n > 0) selectAnim((anim_ + 1) % n);
+        if (ui_.button({386, y, 112, h}, "GHOST", ghostOn_)) {
+            ghostOn_ = !ghostOn_;
+            if (ghost_) ghost_->visible = ghostOn_;
+        }
+        if (ui_.button({gfx::W - 348, y, 104, h}, "ZOOM -")) view_.zoom = clampv(view_.zoom / 1.2f, 0.05f, 8.0f);
+        if (ui_.button({gfx::W - 236, y, 104, h}, "ZOOM +")) view_.zoom = clampv(view_.zoom * 1.2f, 0.05f, 8.0f);
+        if (ui_.button({gfx::W - 124, y, 112, h}, "RESET")) resetView();
     }
 
     void drawPanel() {
-        panelBox(8, gfx::H - 40);
-        float y = 16;
-        const float x = kPanelX, w = kPanelW, rh = 30;
-        if (ui_.button({x, y, w * 0.5f - 4, rh}, "Character", tab_ == 0)) tab_ = 0;
-        if (ui_.button({x + w * 0.5f + 4, y, w * 0.5f - 4, rh}, "Animations", tab_ == 1)) tab_ = 1;
+        const bool touch = app().touchMode;
+        if (touch && !panelOpen_) return;
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();
+        const float px = panelX(), pw = panelW();
+        const float topY = touch ? 54.0f : 8.0f;
+        const float botY = touch ? (gfx::H - 64.0f) : (gfx::H - 40.0f);
+        panelBox(topY, botY, px);
+        const float x = px, w = pw, rh = touch ? 36.0f : 30.0f;
+        float y = topY + 8.0f;
+        if (ui_.button({x, y, w * 0.5f - 4, rh}, "Character", tab_ == 0)) { tab_ = 0; panelScroll_ = 0; }
+        if (ui_.button({x + w * 0.5f + 4, y, w * 0.5f - 4, rh}, "Animations", tab_ == 1)) { tab_ = 1; panelScroll_ = 0; }
         y += rh + 12;
-        if (tab_ == 0) drawCharacterTab(x, y, w, rh);
-        else drawAnimTab(x, y, w, rh);
+        const Rectangle viewRect{x - 4, y, w + 8, botY - y - 6};
+        if (touch) ui_.beginScroll("char_panel", viewRect, panelScroll_);
+        const float startY = touch ? (y - panelScroll_) : y;
+        float curY = startY;
+        if (tab_ == 0) curY = drawCharacterTab(x, startY, w, rh);
+        else curY = drawAnimTab(x, startY, w, rh);
+        if (touch) ui_.endScroll(viewRect, panelScroll_, curY - startY + 14.0f);
         ui_.overlays();
     }
 
-    void drawCharacterTab(float x, float y, float w, float rh) {
+    float drawCharacterTab(float x, float y, float w, float rh) {
         if (!names_.empty()) {
             if (ui_.dropdown("char", {x, y, w, rh}, "Character", names_, nameIdx_)) load(names_[size_t(nameIdx_)]);
             y += rh + 6;
@@ -1430,35 +1822,38 @@ private:
         y += rh + 10;
         if (ui_.button({x, y, w * 0.5f - 4, rh + 4}, "Save")) save();
         if (ui_.button({x + w * 0.5f + 4, y, w * 0.5f - 4, rh + 4}, "New character")) newCharacter();
+        return y + rh + 10;
     }
 
-    void drawAnimTab(float x, float y, float w, float rh) {
-        // The animations: a click picks and plays one.
-        const float listH = 210;
-        DrawRectangleRec({x, y, w, listH}, Color{20, 14, 32, 255});
+    float drawAnimTab(float x, float y, float w, float rh) {
+        // The animations: a click/tap picks and plays one.
+        const bool touch = app().touchMode;
         const int n = int(def_.anims.size());
-        const float row = 24;
-        const int rows = int(listH / row);
+        const float row = touch ? 32.0f : 24.0f;
+        const float listH = touch ? std::max(60.0f, float(n) * row + 6.0f) : 210.0f;
+        DrawRectangleRec({x, y, w, listH}, Color{20, 14, 32, 255});
+        const int rows = std::max(1, int(listH / row));
         if (CheckCollisionPointRec(ui_.mouse, {x, y, w, listH}) && ui_.wheel != 0) {
             listScroll_ = clampv(listScroll_ - ui_.wheel * 2, 0.0f, float(std::max(0, n - rows)));
             ui_.used = true;
         }
-        const int first = int(listScroll_);
-        for (int k = 0; k < rows && first + k < n; ++k) {
+        const int first = touch ? 0 : int(listScroll_);
+        const int count = touch ? n : std::min(rows, n - first);
+        for (int k = 0; k < count && first + k < n; ++k) {
             const int i = first + k;
             const Rectangle r{x + 2, y + 2 + k * row, w - 4, row - 2};
             const bool hov = ui_.hover(r);
             if (i == anim_ || hov) DrawRectangleRec(r, i == anim_ ? Color{90, 66, 140, 255} : Color{50, 38, 76, 255});
             const psych::AnimDef& ad = def_.anims[size_t(i)];
             const bool ok = ch_ && ch_->hasAnim(ad.anim);
-            gfx::text(FontId::Ui, ad.anim, r.x + 6, r.y + 2, 18, ok ? kInk : Color{255, 130, 130, 255});
-            gfx::text(FontId::Ui, "[" + jnum(ad.offX) + ", " + jnum(ad.offY) + "]", r.x + r.width - 8, r.y + 2, 16, kDim, Align::Right);
-            if (hov && ui_.click) {
+            gfx::text(FontId::Ui, ad.anim, r.x + 6, r.y + (r.height - 18) * 0.5f, 18, ok ? kInk : Color{255, 130, 130, 255});
+            gfx::text(FontId::Ui, "[" + jnum(ad.offX) + ", " + jnum(ad.offY) + "]", r.x + r.width - 8, r.y + (r.height - 16) * 0.5f, 16, kDim, Align::Right);
+            if (hov && ui_.tap()) {
                 ui_.used = true;
                 selectAnim(i);
             }
         }
-        y += listH + 10;
+        y += (touch ? (float(n) * row + 12.0f) : (listH + 10.0f));
         ui_.text("aname", {x, y, w, rh}, "Name", fName_);
         y += rh + 6;
         ui_.text("aprefix", {x, y, w, rh}, "Prefix", fPrefix_);
@@ -1494,6 +1889,7 @@ private:
             ghostOn_ = g;
             if (ghost_) ghost_->visible = g;
         }
+        return y + rh + 8;
     }
 
     void addOrUpdate() {
@@ -1607,6 +2003,7 @@ class StageEditorState : public State {
 public:
     void enter() override {
         mod_ = currentMod();
+        panelOpen_ = !app().touchMode;
         scene::Scene probe;
         useMod(probe, mod_);
         names_ = listNames(probe, "stages/", ".json");
@@ -1614,24 +2011,28 @@ public:
         load(it != names_.end() ? *it : names_.empty() ? std::string("stage") : names_[0]);
     }
     bool keyReserved(int) const override { return !ui_.focus.empty(); }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
     void update(double dt) override {
         App& a = app();
         Input& in = a.input;
         feedUi(ui_);
         if (sc_) runStage(dt);
-        view_.handle(in, ui_, overPanel(ui_));
-        if (tab_ == 4) dragObjects(in);
-        else dragCharacters(in);
+        const bool blocked = overPanel(ui_, !a.touchMode || panelOpen_, panelX()) ||
+                             (a.touchMode && (ui_.mouse.y < 52.0f || ui_.mouse.y > gfx::H - 62.0f));
+        view_.handle(in, ui_, blocked, a.touchMode && panMode_);
+        if (!(a.touchMode && (panMode_ || touchPoints().size() >= 2))) {
+            if (tab_ == 4) dragObjects(in, blocked);
+            else dragCharacters(in, blocked);
+        }
         if (!ui_.focus.empty()) return;
         const bool ctrl = in.isDown(KEY_LEFT_CONTROL) || in.isDown(KEY_RIGHT_CONTROL);
         if (in.pressed(KEY_ESCAPE)) {
-            if (dirty_ && !leaveArmed_) {
-                status_.set("Unsaved changes: ESC again to leave without saving (CTRL+S saves)");
-                leaveArmed_ = true;
-            } else {
-                a.change(makeEditorMenu());
-            }
+            tryLeave();
             return;
         }
         if (ctrl && in.pressed(KEY_S)) save();
@@ -1682,10 +2083,25 @@ public:
             }
             if (showCam_) drawCameraFrame();
         }
-        DrawRectangleRec({8, 8, 856, 32}, fade(BLACK, 0.55f));
-        gfx::text(FontId::Ui, saveName_ + (dirty_ ? "  (not saved)" : "") + "   mod: " + modLabel(mod_) + "   zoom " + jnum(def_.zoom), 18, 13,
-                  18, kInk);
-        hints("LEFT-DRAG a character to move it   RIGHT-DRAG move the view   WHEEL zoom   C camera   R reset   CTRL+S save");
+        if (!app().touchMode) {
+            DrawRectangleRec({8, 8, 856, 32}, fade(BLACK, 0.55f));
+            gfx::text(FontId::Ui, saveName_ + (dirty_ ? "  (not saved)" : "") + "   mod: " + modLabel(mod_) + "   zoom " + jnum(def_.zoom), 18, 13,
+                      18, kInk);
+            hints("LEFT-DRAG a character to move it   RIGHT-DRAG move the view   WHEEL zoom   C camera   R reset   CTRL+S save");
+        } else {
+            DrawRectangleRec({0, 0, gfx::W, 48}, Color{8, 5, 14, 242});
+            DrawRectangleRec({0, 47, gfx::W, 1}, Color{110, 92, 150, 140});
+            if (ui_.button({8, 6, 94, 36}, "< BACK")) {
+                if (tryLeave()) {
+                    gfx::endCanvas();
+                    return;
+                }
+            }
+            gfx::text(FontId::Ui, saveName_ + (dirty_ ? " *" : "") + "   mod: " + modLabel(mod_) + "   zoom " + jnum(def_.zoom), 114, 14, 18, kInk);
+            if (ui_.button({gfx::W - 224, 6, 100, 36}, dirty_ ? "SAVE *" : "SAVE", dirty_)) save();
+            if (ui_.button({gfx::W - 118, 6, 110, 36}, panelOpen_ ? "PANEL >" : "< PANEL", panelOpen_)) panelOpen_ = !panelOpen_;
+            drawTouchBar();
+        }
         drawPanel();
         status_.draw();
         gfx::endCanvas();
@@ -1750,6 +2166,22 @@ private:
     bool dirty_ = false, leaveArmed_ = false, showCam_ = true;
     int drag_ = -1;
     Vector2 dragLast_{};
+    bool panelOpen_ = true, panMode_ = false;
+    float panelScroll_ = 0.0f;
+
+    float panelX() const { return app().touchMode ? 836.0f : kPanelX; }
+    float panelW() const { return gfx::W - panelX() - 8.0f; }
+
+    bool tryLeave() {
+        if (dirty_ && !leaveArmed_) {
+            status_.set(app().touchMode ? "Unsaved changes: tap BACK again to leave, or tap SAVE"
+                                        : "Unsaved changes: ESC again to leave without saving (CTRL+S saves)");
+            leaveArmed_ = true;
+            return false;
+        }
+        app().change(makeEditorMenu());
+        return true;
+    }
 
     float* pos(int i) { return i == 0 ? def_.bf : i == 1 ? def_.gf : def_.dad; }
     float* camOff(int i) { return i == 0 ? def_.camBf : i == 1 ? def_.camGf : def_.camDad; }
@@ -1898,10 +2330,10 @@ private:
         gfx::text(FontId::Ui, std::string("Camera on ") + kWho[camWho_], a.x + 6, a.y + 4, 16, kGold);
     }
 
-    void dragCharacters(const Input& in) {
+    void dragCharacters(const Input& in, bool blocked) {
         if (!sc_) return;
         const Vector2 w = view_.toWorld(ui_.mouse);
-        if (in.mousePressed(MOUSE_BUTTON_LEFT) && !overPanel(ui_) && ui_.focus.empty()) {
+        if (in.mousePressed(MOUSE_BUTTON_LEFT) && !blocked && ui_.focus.empty()) {
             for (int i : {0, 2, 1}) {  // the front one first
                 const scene::CharacterPtr& c = chars_[i];
                 if (c && w.x >= c->x && w.x <= c->x + c->width && w.y >= c->y && w.y <= c->y + c->height) {
@@ -1937,24 +2369,51 @@ private:
         view_.x = (a.x + b.x) * 0.5f;
         view_.y = (a.y + b.y) * 0.5f;
         view_.zoom = float(std::max(0.05, def_.zoom)) * 0.55f;
-        view_.x -= (kPanelX - gfx::W) * 0.5f / view_.zoom;
+        if (!app().touchMode || panelOpen_) view_.x -= (panelX() - gfx::W) * 0.5f / view_.zoom;
+    }
+
+    void drawTouchBar() {
+        const float by = gfx::H - 58.0f;
+        DrawRectangleRec({0, by, gfx::W, 58}, Color{10, 7, 18, 248});
+        DrawRectangleRec({0, by, gfx::W, 1.5f}, Color{110, 92, 150, 170});
+        const float y = by + 7.0f, h = 44.0f;
+        if (ui_.button({12, y, 120, h}, "DRAG", !panMode_)) panMode_ = false;
+        if (ui_.button({138, y, 120, h}, "PAN VIEW", panMode_)) panMode_ = true;
+        if (ui_.button({270, y, 108, h}, "CAM BOX", showCam_)) showCam_ = !showCam_;
+        if (ui_.button({390, y, 76, h}, "BF", camWho_ == 0)) { camWho_ = 0; tab_ = 1; }
+        if (ui_.button({472, y, 76, h}, "GF", camWho_ == 1)) { camWho_ = 1; tab_ = 2; }
+        if (ui_.button({554, y, 76, h}, "DAD", camWho_ == 2)) { camWho_ = 2; tab_ = 3; }
+        if (ui_.button({gfx::W - 348, y, 104, h}, "ZOOM -")) view_.zoom = clampv(view_.zoom / 1.2f, 0.05f, 8.0f);
+        if (ui_.button({gfx::W - 236, y, 104, h}, "ZOOM +")) view_.zoom = clampv(view_.zoom * 1.2f, 0.05f, 8.0f);
+        if (ui_.button({gfx::W - 124, y, 112, h}, "RESET")) resetView();
     }
 
     void drawPanel() {
-        panelBox(8, gfx::H - 40);
-        float y = 16;
-        const float x = kPanelX, w = kPanelW, rh = 30;
+        const bool touch = app().touchMode;
+        if (touch && !panelOpen_) return;
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();
+        const float px = panelX(), pw = panelW();
+        const float topY = touch ? 54.0f : 8.0f;
+        const float botY = touch ? (gfx::H - 64.0f) : (gfx::H - 40.0f);
+        panelBox(topY, botY, px);
+        const float x = px, w = pw, rh = touch ? 36.0f : 30.0f;
+        float y = topY + 8.0f;
         static const char* tabs[5] = {"Stage", "BF", "GF", "Dad", "Objects"};
         for (int i = 0; i < 5; ++i)
-            if (ui_.button({x + i * (w / 5), y, w / 5 - 4, rh}, tabs[i], tab_ == i)) tab_ = i;
+            if (ui_.button({x + i * (w / 5), y, w / 5 - 4, rh}, tabs[i], tab_ == i)) { tab_ = i; panelScroll_ = 0; }
         y += rh + 12;
-        if (tab_ == 0) drawStageTab(x, y, w, rh);
-        else if (tab_ == 4) drawObjectsTab(x, y, w, rh);
-        else drawCharTab(tab_ - 1, x, y, w, rh);
+        const Rectangle viewRect{x - 4, y, w + 8, botY - y - 6};
+        if (touch) ui_.beginScroll("stage_panel", viewRect, panelScroll_);
+        const float startY = touch ? (y - panelScroll_) : y;
+        float curY = startY;
+        if (tab_ == 0) curY = drawStageTab(x, startY, w, rh);
+        else if (tab_ == 4) curY = drawObjectsTab(x, startY, w, rh);
+        else curY = drawCharTab(tab_ - 1, x, startY, w, rh);
+        if (touch) ui_.endScroll(viewRect, panelScroll_, curY - startY + 14.0f);
         ui_.overlays();
     }
 
-    void drawStageTab(float x, float y, float w, float rh) {
+    float drawStageTab(float x, float y, float w, float rh) {
         if (!names_.empty()) {
             if (ui_.dropdown("stage", {x, y, w, rh}, "Stage", names_, nameIdx_)) load(names_[size_t(nameIdx_)]);
             y += rh + 6;
@@ -1981,12 +2440,13 @@ private:
         y += 26;
         if (ui_.button({x, y, w * 0.5f - 4, rh + 4}, "Save")) save();
         if (ui_.button({x + w * 0.5f + 4, y, w * 0.5f - 4, rh + 4}, "Reload")) load(saveName_);
+        return y + rh + 12;
     }
 
     // Issue #22: the stage's own objects (Psych 0.7.3 "objects"): pick one
     // (here or by clicking it), drag it, change what it is and how it shows,
     // its layer, add sprites and remove them. Saved with the stage's JSON.
-    void drawObjectsTab(float x, float y, float w, float rh) {
+    float drawObjectsTab(float x, float y, float w, float rh) {
         std::vector<std::string> names;
         for (size_t i = 0; i < def_.objects.size(); ++i) names.push_back(objLabel(i));
         if (!names.empty()) {
@@ -2086,7 +2546,8 @@ private:
             buildScene(saveName_);
         }
         y += rh + 6;
-        gfx::text(FontId::Ui, "Click an object in the view to pick it; drag to move it.", x, y, 15, kDim);
+        gfx::text(FontId::Ui, app().touchMode ? "Tap an object to pick it; drag to move it." : "Click an object in the view to pick it; drag to move it.", x, y, 15, kDim);
+        return y + 24;
     }
 
     std::string objLabel(size_t i) const {
@@ -2125,10 +2586,10 @@ private:
     }
 
     // Objects: a click picks the front one under the mouse; a drag moves it.
-    void dragObjects(const Input& in) {
+    void dragObjects(const Input& in, bool blocked) {
         if (!sc_ || tab_ != 4) return;
         const Vector2 w = view_.toWorld(ui_.mouse);
-        if (in.mousePressed(MOUSE_BUTTON_LEFT) && !overPanel(ui_) && ui_.focus.empty()) {
+        if (in.mousePressed(MOUSE_BUTTON_LEFT) && !blocked && ui_.focus.empty()) {
             for (int i = int(objSprites_.size()) - 1; i >= 0; --i) {
                 const scene::SpritePtr& s = objSprites_[size_t(i)];
                 if (!s) continue;
@@ -2191,7 +2652,7 @@ private:
         return o + (def_.objects.empty() ? "]" : "\n\t]");
     }
 
-    void drawCharTab(int i, float x, float y, float w, float rh) {
+    float drawCharTab(int i, float x, float y, float w, float rh) {
         gfx::text(FontId::Ui, kWho[i], x, y, 22, kGold);
         y += 34;
         ui_.text("who", {x, y, w - 92, rh}, "Character", who_[i]);
@@ -2218,6 +2679,7 @@ private:
         step("Camera X", c[0], false);
         step("Camera Y", c[1], false);
         camWho_ = i;
+        return y + 8;
     }
 
     void save() {
@@ -2285,6 +2747,11 @@ public:
         refresh();
     }
     bool keyReserved(int) const override { return !ui_.focus.empty(); }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
 
     void update(double) override {
         App& a = app();
@@ -2295,14 +2762,29 @@ public:
 
     void draw() override {
         App& a = app();
+        const bool touch = a.touchMode;
         gfx::beginCanvas();
         drawMenuBackground(a.now, 0x6C8CFF, 0);
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.45f));
-        gfx::text(FontId::Title, "EVENT EDITOR", 40, 18, 40, kGold, Align::Left, 2.0f);
-        gfx::text(FontId::Ui, "Custom events of " + modLabel(mod_) + ": custom_events/<name>.txt (what the chart editor shows) and .lua",
-                  40, 70, 18, kIvory);
+        if (touch) {
+            if (ui_.button({20, 18, 110, 42}, "< BACK")) {
+                a.change(makeEditorMenu());
+                gfx::endCanvas();
+                return;
+            }
+            gfx::text(FontId::Title, "EVENT EDITOR", 148, 18, 38, kGold, Align::Left, 2.0f);
+            gfx::text(FontId::Ui, "Mod: " + modLabel(mod_) + "   custom_events/<name>.txt and .lua", 148, 66, 17, kIvory);
+        } else {
+            gfx::text(FontId::Title, "EVENT EDITOR", 40, 18, 40, kGold, Align::Left, 2.0f);
+            gfx::text(FontId::Ui, "Custom events of " + modLabel(mod_) + ": custom_events/<name>.txt (what the chart editor shows) and .lua",
+                      40, 70, 18, kIvory);
+        }
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();
         drawList();
-        drawForm();
+        if (drawForm()) {
+            gfx::endCanvas();
+            return;
+        }
         ui_.overlays();
         hints("Click an event to see it   ESC back");
         status_.draw();
@@ -2316,7 +2798,7 @@ private:
     ModChoice mod_;
     std::vector<std::string> names_;
     int sel_ = -1, template_ = 0;
-    float scroll_ = 0;
+    float scroll_ = 0, formScroll_ = 0;
     std::string name_, desc_, v1_, v2_, script_;
 
     void refresh() {
@@ -2339,30 +2821,58 @@ private:
     }
 
     void drawList() {
-        const Rectangle box{40, 104, 400, gfx::H - 160};
+        const bool touch = app().touchMode;
+        const Rectangle box{touch ? 20.0f : 40.0f, 100, touch ? 360.0f : 400.0f, gfx::H - (touch ? 118.0f : 160.0f)};
         DrawRectangleRounded(box, 0.02f, 6, kPanel);
-        const float row = 26;
-        const int rows = int((box.height - 8) / row), n = int(names_.size());
-        if (CheckCollisionPointRec(ui_.mouse, box) && ui_.wheel != 0) scroll_ = clampv(scroll_ - ui_.wheel * 3, 0.0f, float(std::max(0, n - rows)));
+        const int n = int(names_.size());
         if (n == 0) gfx::text(FontId::Ui, "No custom events yet", box.x + 12, box.y + 10, 18, kDim);
-        const int first = int(scroll_);
-        for (int k = 0; k < rows && first + k < n; ++k) {
-            const int i = first + k;
-            const Rectangle r{box.x + 4, box.y + 4 + k * row, box.width - 8, row - 2};
+        if (!touch) {
+            const float row = 26;
+            const int rows = int((box.height - 8) / row);
+            if (CheckCollisionPointRec(ui_.mouse, box) && ui_.wheel != 0) scroll_ = clampv(scroll_ - ui_.wheel * 3, 0.0f, float(std::max(0, n - rows)));
+            const int first = int(scroll_);
+            for (int k = 0; k < rows && first + k < n; ++k) {
+                const int i = first + k;
+                const Rectangle r{box.x + 4, box.y + 4 + k * row, box.width - 8, row - 2};
+                const bool hov = ui_.hover(r);
+                if (i == sel_ || hov) DrawRectangleRec(r, i == sel_ ? Color{90, 66, 140, 255} : Color{50, 38, 76, 255});
+                gfx::text(FontId::Ui, names_[size_t(i)], r.x + 8, r.y + 3, 18, kInk);
+                if (hov && ui_.click) {
+                    ui_.used = true;
+                    open(i);
+                }
+            }
+            return;
+        }
+        const Rectangle view{box.x + 4, box.y + 4, box.width - 8, box.height - 8};
+        const float row = 38.0f;
+        ui_.beginScroll("ev_list", view, scroll_);
+        for (int i = 0; i < n; ++i) {
+            const float y = view.y + float(i) * row - scroll_;
+            if (y + row < view.y || y > view.y + view.height) continue;
+            const Rectangle r{view.x + 2, y + 2, view.width - 10, row - 4};
             const bool hov = ui_.hover(r);
-            if (i == sel_ || hov) DrawRectangleRec(r, i == sel_ ? Color{90, 66, 140, 255} : Color{50, 38, 76, 255});
-            gfx::text(FontId::Ui, names_[size_t(i)], r.x + 8, r.y + 3, 18, kInk);
-            if (hov && ui_.click) {
+            if (i == sel_ || hov) DrawRectangleRounded(r, 0.18f, 4, i == sel_ ? Color{90, 66, 140, 255} : Color{50, 38, 76, 255});
+            gfx::text(FontId::Ui, names_[size_t(i)], r.x + 10, r.y + 8, 18, kInk);
+            if (hov && ui_.tap()) {
                 ui_.used = true;
                 open(i);
             }
         }
+        ui_.endScroll(view, scroll_, float(n) * row + 8.0f);
     }
 
-    void drawForm() {
-        const float x = 470, w = gfx::W - x - 40, rh = 30;
-        float y = 104;
-        DrawRectangleRounded({x - 10, y - 8, w + 20, gfx::H - 152}, 0.02f, 6, kPanel);
+    bool drawForm() {
+        const bool touch = app().touchMode;
+        const float x = touch ? 404.0f : 470.0f;
+        const float w = gfx::W - x - (touch ? 24.0f : 40.0f);
+        const float rh = touch ? 36.0f : 30.0f;
+        const Rectangle box{x - 10, 96, w + 20, gfx::H - (touch ? 114.0f : 152.0f)};
+        DrawRectangleRounded(box, 0.02f, 6, kPanel);
+        const Rectangle view{box.x + 6, box.y + 6, box.width - 12, box.height - 12};
+        if (touch) ui_.beginScroll("ev_form", view, formScroll_);
+        const float startY = touch ? (view.y + 4.0f - formScroll_) : 104.0f;
+        float y = startY;
         ui_.text("name", {x, y, w, rh}, "Name", name_);
         y += rh + 8;
         ui_.text("desc", {x, y, w, rh}, "Description", desc_);
@@ -2379,14 +2889,24 @@ private:
             if (v2_.empty() || isTemplateHint(v2_)) v2_ = t.v2;
         }
         y += rh + 12;
-        if (ui_.button({x, y, 220, rh + 4}, "Create / save")) create();
-        if (ui_.button({x + 230, y, 160, rh + 4}, "Open script")) openFile(".lua");
-        if (ui_.button({x + 400, y, 160, rh + 4}, "Open folder")) {
-            std::error_code ec;
-            fs::create_directories(toPath(mod_.roots[0] + "custom_events"), ec);
-            if (!openWithSystem(mod_.roots[0] + "custom_events")) status_.set("This system cannot open folders from the game", true);
+        if (!touch) {
+            if (ui_.button({x, y, 220, rh + 4}, "Create / save")) create();
+            if (ui_.button({x + 230, y, 160, rh + 4}, "Open script")) openFile(".lua");
+            if (ui_.button({x + 400, y, 160, rh + 4}, "Open folder")) {
+                std::error_code ec;
+                fs::create_directories(toPath(mod_.roots[0] + "custom_events"), ec);
+                if (!openWithSystem(mod_.roots[0] + "custom_events")) status_.set("This system cannot open folders from the game", true);
+            }
+        } else {
+            const float bw = (w - 16.0f) * 0.5f;
+            if (ui_.button({x, y, bw, rh + 6}, "Create / save")) create();
+            if (ui_.button({x + bw + 16, y, bw, rh + 6}, "Edit in Script Editor")) {
+                if (touch) ui_.endScroll(view, formScroll_, y - startY);
+                app().change(makeScriptEditor());
+                return true;
+            }
         }
-        y += rh + 18;
+        y += rh + 20;
         gfx::text(FontId::Ui, "Script:", x, y, 18, kDim);
         y += 24;
         // The script as it is (the first lines).
@@ -2403,6 +2923,8 @@ private:
             ++line;
             p = e + 1;
         }
+        if (touch) ui_.endScroll(view, formScroll_, y - startY + 14.0f);
+        return false;
     }
 
     static bool isTemplateHint(const std::string& s) {

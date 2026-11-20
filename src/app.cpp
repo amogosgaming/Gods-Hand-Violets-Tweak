@@ -391,7 +391,6 @@ int App::run(int argc, char** argv) {
         state_ = makePlay(r);
     } else if (!autoRun.editorSong.empty()) state_ = makeChartEditor(autoRun.editorSong, autoRun.diff);
     else if (autoRun.state == "menu") state_ = makeMainMenu();
-    else if (autoRun.state == "intro") state_ = makeIntro();  // the engine's intro, then the title
     else if (autoRun.state == "freeplay") state_ = makeFreeplay();
     else if (autoRun.state == "render-list" || autoRun.state == "autochart-list") {
         songListMode = autoRun.state == "render-list" ? SongListMode::Render : SongListMode::AutoChart;
@@ -412,7 +411,7 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "character-editor") state_ = makeCharacterEditor();
     else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "event-editor") state_ = makeEventEditor();
-    else state_ = introWanted() ? makeIntro() : makeTitle();
+    else state_ = makeTitle();
     state_->enter();
     logScreen(*state_);
 

@@ -9,6 +9,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(GH_BUILD_GAME "Build the game executable (needs raylib)" ON)
+option(GH_WINDOWS_LEGACY "Build for Windows Vista/7+ (OpenGL 2.1, Vista subsystem 6.0)" OFF)
 if(ANDROID)
   # Android (NDK toolchain): the game is libgodshand.so inside an APK, see android/.
   option(GH_BUILD_TESTS "Build the headless test executable" OFF)
@@ -177,6 +178,8 @@ if(GH_BUILD_GAME)
   set(CUSTOMIZE_BUILD OFF CACHE BOOL "" FORCE)
   if(ANDROID)
     set(PLATFORM "Android" CACHE STRING "" FORCE)  # raylib's NativeActivity + OpenGL ES 2 backend
+  elseif(WIN32 AND GH_WINDOWS_LEGACY)
+    set(OPENGL_VERSION "2.1" CACHE STRING "" FORCE)  # older Vista/7 GPUs (Intel GMA/HD 2000-3000, DX9/10 cards)
   endif()
   # Pinned raylib release. Set FETCHCONTENT_SOURCE_DIR_RAYLIB to use a local copy.
   FetchContent_Declare(raylib
@@ -307,32 +310,46 @@ if(GH_BUILD_GAME)
     add_executable(godshand WIN32 ${GH_GAME_SOURCES})
   endif()
   if(WIN32)
-    # UTF-8 as the process code page (Windows 10 1903+): files and folders
-    # named in any script (mods with Chinese, Japanese... names) open.
+    # UTF-8 as the process code page (Windows 10 1903+; ignored safely on Vista/7/8)
+    # and the program icon (Explorer, taskbar, GLFW window).
     if(MSVC)
       target_sources(godshand PRIVATE src/windows/godshand.manifest)
+      set(GH_ICON_RC "${CMAKE_BINARY_DIR}/godshand_icon.rc")
+      file(CONFIGURE OUTPUT "${GH_ICON_RC}" CONTENT "GLFW_ICON ICON \"${CMAKE_SOURCE_DIR}/src/windows/godshand.ico\"\n")
+      target_sources(godshand PRIVATE "${GH_ICON_RC}")
+      set_source_files_properties("${GH_ICON_RC}" PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/windows/godshand.ico")
     else()
-      target_sources(godshand PRIVATE src/windows/godshand.rc)
+      # MinGW/windres: combine manifest and icon into a single .rc so GNU ld never drops a second .rsrc section.
+      set(GH_WIN_RC "${CMAKE_BINARY_DIR}/godshand_win.rc")
+      file(CONFIGURE OUTPUT "${GH_WIN_RC}" CONTENT
+        "1 24 \"${CMAKE_SOURCE_DIR}/src/windows/godshand.manifest\"\nGLFW_ICON ICON \"${CMAKE_SOURCE_DIR}/src/windows/godshand.ico\"\n")
+      target_sources(godshand PRIVATE "${GH_WIN_RC}")
+      set_source_files_properties("${GH_WIN_RC}" PROPERTIES OBJECT_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/windows/godshand.manifest;${CMAKE_SOURCE_DIR}/src/windows/godshand.ico")
     endif()
-    # The program's icon (Explorer, the taskbar and the window: GLFW gives the
-    # window the GLFW_ICON resource). Written with the .ico's full path, which
-    # both windres and rc.exe find from the build folder.
-    set(GH_ICON_RC "${CMAKE_BINARY_DIR}/godshand_icon.rc")
-    file(CONFIGURE OUTPUT "${GH_ICON_RC}" CONTENT "GLFW_ICON ICON \"${CMAKE_SOURCE_DIR}/src/windows/godshand.ico\"\n")
-    target_sources(godshand PRIVATE "${GH_ICON_RC}")
-    set_source_files_properties("${GH_ICON_RC}" PROPERTIES OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/src/windows/godshand.ico")
   endif()
   target_link_libraries(godshand PRIVATE gh_core raylib)
   target_compile_definitions(godshand PRIVATE GH_VERSION="${PROJECT_VERSION}")
   target_include_directories(godshand PRIVATE ${pl_mpeg_SOURCE_DIR})
+  if(WIN32 AND GH_WINDOWS_LEGACY)
+    target_compile_definitions(gh_core PUBLIC _WIN32_WINNT=0x0600 WINVER=0x0600)
+    target_compile_definitions(raylib PRIVATE _WIN32_WINNT=0x0600 WINVER=0x0600)
+    target_compile_definitions(godshand PRIVATE _WIN32_WINNT=0x0600 WINVER=0x0600)
+  endif()
   if(MSVC)
     target_compile_options(godshand PRIVATE /W3 /utf-8)
     target_link_options(godshand PRIVATE /ENTRY:mainCRTStartup)
+    if(GH_WINDOWS_LEGACY)
+      target_link_options(godshand PRIVATE /SUBSYSTEM:WINDOWS,6.0)
+    endif()
   else()
     target_compile_options(godshand PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
   endif()
   if(MINGW)
     target_link_options(godshand PRIVATE -static -static-libgcc -static-libstdc++)
+    if(GH_WINDOWS_LEGACY)
+      target_link_options(godshand PRIVATE -Wl,--subsystem,windows:6.0)
+    endif()
   endif()
   if(APPLE)
     target_link_libraries(godshand PRIVATE "-framework IOKit" "-framework Cocoa" "-framework OpenGL" "-framework CoreFoundation")
@@ -343,7 +360,7 @@ if(GH_BUILD_GAME)
     target_link_libraries(godshand PRIVATE ${CMAKE_DL_LIBS})  # the FPS counter asks NVIDIA's library, when there is one
   endif()
   if(WIN32)
-    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32 pdh)  # the folder dialog; the FPS counter's graphics card
+    target_link_libraries(godshand PRIVATE shell32 ole32 opengl32 advapi32)  # folder dialog, OpenGL, registry (psapi/pdh loaded dynamically)
   endif()
 
   # Runtime layout next to the executable: assets/, songs/, mods/
@@ -366,7 +383,7 @@ if(GH_BUILD_TESTS AND TARGET raylib)
                  src/render_mode.cpp src/process.cpp src/sysinfo.cpp)
   target_link_libraries(gh_tests PRIVATE raylib)
   if(WIN32)
-    target_link_libraries(gh_tests PRIVATE shell32 ole32 pdh)  # platform.cpp's folder dialog; sysinfo.cpp's GPU counters
+    target_link_libraries(gh_tests PRIVATE shell32 ole32 advapi32)  # platform.cpp folder dialog, sysinfo registry (psapi/pdh loaded dynamically)
   endif()
   if(APPLE)
     target_link_libraries(gh_tests PRIVATE "-framework Cocoa" "-framework IOKit" "-framework CoreFoundation")  # sysinfo.cpp
