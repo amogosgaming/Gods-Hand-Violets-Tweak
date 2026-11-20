@@ -20,6 +20,65 @@ bool g_titleOwned = false, g_uiOwned = false;
 Texture2D g_glow{};
 Texture2D g_note[5]{};
 Texture2D g_receptor[2]{};  // arrow, diamond
+RenderTexture2D g_blurRt[2]{};
+Shader g_blurShader{};
+int g_blurDirLoc = -1;
+bool g_blurTried = false;
+
+const char* kBlurGl330 = R"GLSL(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec2 dir;
+out vec4 finalColor;
+void main() {
+    vec4 sum = texture(texture0, fragTexCoord) * 0.22702703;
+    sum += texture(texture0, clamp(fragTexCoord + dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture(texture0, clamp(fragTexCoord - dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture(texture0, clamp(fragTexCoord + dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    sum += texture(texture0, clamp(fragTexCoord - dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    finalColor = sum * colDiffuse * fragColor;
+}
+)GLSL";
+
+const char* kBlurGles = R"GLSL(#version 100
+precision mediump float;
+varying vec2 fragTexCoord;
+varying vec4 fragColor;
+uniform sampler2D texture0;
+uniform vec4 colDiffuse;
+uniform vec2 dir;
+void main() {
+    vec4 sum = texture2D(texture0, fragTexCoord) * 0.22702703;
+    sum += texture2D(texture0, clamp(fragTexCoord + dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture2D(texture0, clamp(fragTexCoord - dir * 1.38461538, 0.002, 0.998)) * 0.31621622;
+    sum += texture2D(texture0, clamp(fragTexCoord + dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    sum += texture2D(texture0, clamp(fragTexCoord - dir * 3.23076923, 0.002, 0.998)) * 0.07027027;
+    gl_FragColor = sum * colDiffuse * fragColor;
+}
+)GLSL";
+
+bool ensureBlurResources() {
+    if (g_blurRt[0].id && g_blurRt[1].id && g_blurShader.id) return true;
+    if (g_blurTried) return false;
+    g_blurTried = true;
+    constexpr int kBw = 640, kBh = 360;
+    g_blurRt[0] = LoadRenderTexture(kBw, kBh);
+    g_blurRt[1] = LoadRenderTexture(kBw, kBh);
+    if (!g_blurRt[0].id || !g_blurRt[1].id) return false;
+    SetTextureFilter(g_blurRt[0].texture, TEXTURE_FILTER_BILINEAR);
+    SetTextureFilter(g_blurRt[1].texture, TEXTURE_FILTER_BILINEAR);
+    SetTextureWrap(g_blurRt[0].texture, TEXTURE_WRAP_CLAMP);
+    SetTextureWrap(g_blurRt[1].texture, TEXTURE_WRAP_CLAMP);
+    g_blurShader = LoadShaderFromMemory(nullptr, rlGetVersion() == RL_OPENGL_ES_20 ? kBlurGles : kBlurGl330);
+    if (!g_blurShader.id || g_blurShader.id == rlGetShaderIdDefault()) {
+        g_blurShader = Shader{};
+        return false;
+    }
+    g_blurDirLoc = GetShaderLocation(g_blurShader, "dir");
+    return g_blurDirLoc >= 0;
+}
 
 Color lerpColor(Color a, Color b, float t) {
     t = saturate(t);
@@ -133,6 +192,12 @@ void shutdown() {
     UnloadTexture(g_glow);
     for (auto& t : g_note) UnloadTexture(t);
     for (auto& t : g_receptor) UnloadTexture(t);
+    for (auto& rt : g_blurRt)
+        if (rt.id) { UnloadRenderTexture(rt); rt = RenderTexture2D{}; }
+    if (g_blurShader.id && g_blurShader.id != rlGetShaderIdDefault()) UnloadShader(g_blurShader);
+    g_blurShader = Shader{};
+    g_blurDirLoc = -1;
+    g_blurTried = false;
 }
 
 // ---------------------------------------------------------------- canvas --
@@ -205,6 +270,42 @@ Camera2D screenCamera(float zoom, Vector2 focus, float rotationDeg) {
 
 void beginCanvas(float zoom, Vector2 focus, float rotationDeg) { BeginMode2D(screenCamera(zoom, focus, rotationDeg)); }
 void endCanvas() { EndMode2D(); }
+
+void drawBlurred(const std::function<void()>& drawScene, float radius) {
+    if (!drawScene) return;
+    if (radius <= 0.05f || !ensureBlurResources()) {
+        drawScene();
+        return;
+    }
+    const int bw = g_blurRt[0].texture.width, bh = g_blurRt[0].texture.height;
+    endCanvas();
+    setRenderTargetSize(bw, bh);
+    beginTexture(g_blurRt[0]);
+    ClearBackground(BLACK);
+    beginCanvas();
+    drawScene();
+    endCanvas();
+    endTexture();
+
+    // Pass 1: horizontal Gaussian blur into g_blurRt[1].
+    beginTexture(g_blurRt[1]);
+    ClearBackground(BLACK);
+    BeginShaderMode(g_blurShader);
+    const float hDir[2] = {radius / float(bw), 0.0f};
+    SetShaderValue(g_blurShader, g_blurDirLoc, hDir, SHADER_UNIFORM_VEC2);
+    DrawTexturePro(g_blurRt[0].texture, {0, 0, float(bw), -float(bh)}, {0, 0, float(bw), float(bh)}, {0, 0}, 0, WHITE);
+    EndShaderMode();
+    endTexture();
+
+    // Pass 2: vertical Gaussian blur back onto the main canvas.
+    setRenderTargetSize(0, 0);
+    beginCanvas();
+    BeginShaderMode(g_blurShader);
+    const float vDir[2] = {0.0f, radius / float(bh)};
+    SetShaderValue(g_blurShader, g_blurDirLoc, vDir, SHADER_UNIFORM_VEC2);
+    DrawTexturePro(g_blurRt[1].texture, {0, 0, float(bw), -float(bh)}, {0, 0, W, H}, {0, 0}, 0, WHITE);
+    EndShaderMode();
+}
 
 void drawLetterbox() {
     const float sw = float(targetWidth()), sh = float(targetHeight());

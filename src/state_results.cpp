@@ -7,6 +7,7 @@
 #include "app.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
+#include "psych_ui.hpp"
 #include "raylib.h"
 
 namespace gh {
@@ -85,39 +86,66 @@ public:
         App& a = app();
         const double now = a.now;
         const float t = float(now - t0_);
+        const bool psychStyle = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawMenuBackground(now, r_.color, menuPulse());
+        if (psychStyle) {
+            drawPsychMenuBackground(1, gfx::rgb(r_.color), 0.0f, false, now, r_.color, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.45f));
+        } else {
+            drawMenuBackground(now, r_.color, menuPulse());
+        }
+        auto drawTxt = [&](const std::string& s, float x, float y, float size, Color c, int align, float outline) {
+            if (psychStyle) ui.uiText(s, x, y, size * 0.85f, c, align, outline);
+            else gfx::text(FontId::Ui, s, x, y, size, c, align < 0 ? Align::Left : (align > 0 ? Align::Right : Align::Center), outline);
+        };
         // rank
         const float pop = easeOutBack(saturate(t * 2.0f));
         const Color rc = rankColor(r_.rank);
-        gfx::glowText(FontId::Title, r_.rank, 250, 120 + (1 - pop) * 60, 210 * std::max(0.2f, pop), fade(rc, saturate(t * 3)), rc);
-        if (!r_.clear.empty()) gfx::text(FontId::Title, r_.clear, 250, 380, 34, kGold, Align::Center, 2.0f);
+        if (psychStyle) {
+            if (ui.alphabetCentered(r_.rank, 250, 150 + (1 - pop) * 50, 140 * std::max(0.2f, pop), saturate(t * 3)) < 0)
+                ui.uiText(r_.rank, 250, 140 + (1 - pop) * 50, 140 * std::max(0.2f, pop), fade(rc, saturate(t * 3)), 0, 3.0f);
+        } else {
+            gfx::glowText(FontId::Title, r_.rank, 250, 120 + (1 - pop) * 60, 210 * std::max(0.2f, pop), fade(rc, saturate(t * 3)), rc);
+        }
+        if (!r_.clear.empty()) {
+            if (psychStyle) ui.uiText(r_.clear, 250, 380, 30, kGold, 0, 2.0f);
+            else gfx::text(FontId::Title, r_.clear, 250, 380, 34, kGold, Align::Center, 2.0f);
+        }
         if (r_.newBest && std::fmod(t * 2.0f, 2.0f) < 1.5f)
-            gfx::text(FontId::Ui, "NEW BEST!", 250, 430, 36, WHITE, Align::Center, 2.0f);
-        if (r_.botplay) gfx::text(FontId::Ui, "Botplay - not saved", 250, 470, 24, fade(kIvory, 0.7f), Align::Center);
-        else if (r_.practice) gfx::text(FontId::Ui, "Practice - not saved", 250, 470, 24, fade(kIvory, 0.7f), Align::Center);
+            drawTxt("NEW BEST!", 250, 430, 36, WHITE, 0, 2.0f);
+        if (r_.botplay) drawTxt("Botplay - not saved", 250, 470, 24, fade(kIvory, 0.7f), 0, 1.0f);
+        else if (r_.practice) drawTxt("Practice - not saved", 250, 470, 24, fade(kIvory, 0.7f), 0, 1.0f);
         // stats
         const float x = 520;
-        gfx::text(FontId::Title, r_.title, x, 50, 44, kGold, Align::Left, 2.0f);
-        gfx::text(FontId::Ui, r_.diff + (r_.rate != 1.0 ? std::string(TextFormat("   %.2fx", r_.rate)) : std::string()), x, 104, 28,
-                  kIvory, Align::Left, 1.5f);
+        if (psychStyle) {
+            if (ui.alphabet(r_.title, x, 46, 46, 1.0f) < 0) ui.uiText(r_.title, x, 50, 38, WHITE, -1, 2.0f);
+        } else {
+            gfx::text(FontId::Title, r_.title, x, 50, 44, kGold, Align::Left, 2.0f);
+        }
+        drawTxt(r_.diff + (r_.rate != 1.0 ? std::string(TextFormat("   %.2fx", r_.rate)) : std::string()), x, 104, 28,
+                kIvory, -1, 1.5f);
         const float shown = saturate(t * 1.5f);
-        gfx::text(FontId::Ui, "SCORE", x, 150, 22, fade(kGold, 0.8f));
-        fitText(FontId::Ui, fmtThousands(shown >= 1 ? r_.score : (long long)(double(r_.score) * shown)), x, 170, 56, 360, WHITE,
-                Align::Left, 2.0f);
-        gfx::text(FontId::Ui, "ACCURACY", x + 380, 150, 22, fade(kGold, 0.8f));
-        gfx::text(FontId::Ui, TextFormat("%.2f%%", r_.acc * 100.0 * shown), x + 380, 170, 56, WHITE, Align::Left, 2.0f);
+        drawTxt("SCORE", x, 150, 22, fade(kGold, 0.85f), -1, 1.0f);
+        const std::string scoreStr = fmtThousands(shown >= 1 ? r_.score : (long long)(double(r_.score) * shown));
+        if (psychStyle) ui.uiText(scoreStr, x, 174, 44, WHITE, -1, 2.0f);
+        else fitText(FontId::Ui, scoreStr, x, 170, 56, 360, WHITE, Align::Left, 2.0f);
+        drawTxt("ACCURACY", x + 380, 150, 22, fade(kGold, 0.85f), -1, 1.0f);
+        drawTxt(TextFormat("%.2f%%", r_.acc * 100.0 * shown), x + 380, 174, 52, WHITE, -1, 2.0f);
         static const char* names[4] = {"SICK!", "GOOD", "BAD", "WACK"};
         for (int i = 0; i < 4; ++i) {
-            gfx::text(FontId::Ui, names[i], x, 250.0f + i * 38, 30, kRatingCols[i], Align::Left, 1.5f);
-            fitText(FontId::Ui, fmtThousands(r_.counts[size_t(i)]), x + 350, 250.0f + i * 38, 30, 350 - 130, WHITE, Align::Right, 1.5f);
+            drawTxt(names[i], x, 250.0f + i * 38, 30, kRatingCols[i], -1, 1.5f);
+            if (psychStyle) ui.uiText(fmtThousands(r_.counts[size_t(i)]), x + 350, 250.0f + i * 38, 26, WHITE, 1, 1.5f);
+            else fitText(FontId::Ui, fmtThousands(r_.counts[size_t(i)]), x + 350, 250.0f + i * 38, 30, 350 - 130, WHITE, Align::Right, 1.5f);
         }
-        gfx::text(FontId::Ui, "MISSES", x + 380, 250, 30, Color{255, 90, 100, 255}, Align::Left, 1.5f);
-        fitText(FontId::Ui, fmtThousands(r_.misses), x + 640, 250, 30, 260 - 110, WHITE, Align::Right, 1.5f);
-        gfx::text(FontId::Ui, "MAX COMBO", x + 380, 288, 30, kGold, Align::Left, 1.5f);
-        fitText(FontId::Ui, fmtThousands(r_.maxCombo), x + 640, 288, 30, 260 - 160, WHITE, Align::Right, 1.5f);
-        gfx::text(FontId::Ui, "TIMING", x + 380, 326, 30, kIvory, Align::Left, 1.5f);
-        gfx::text(FontId::Ui, TextFormat("%+.1f / %.1f ms", mean_, sd_), x + 640, 326, 30, WHITE, Align::Right, 1.5f);
+        drawTxt("MISSES", x + 380, 250, 30, Color{255, 90, 100, 255}, -1, 1.5f);
+        if (psychStyle) ui.uiText(fmtThousands(r_.misses), x + 640, 250, 26, WHITE, 1, 1.5f);
+        else fitText(FontId::Ui, fmtThousands(r_.misses), x + 640, 250, 30, 260 - 110, WHITE, Align::Right, 1.5f);
+        drawTxt("MAX COMBO", x + 380, 288, 30, kGold, -1, 1.5f);
+        if (psychStyle) ui.uiText(fmtThousands(r_.maxCombo), x + 640, 288, 26, WHITE, 1, 1.5f);
+        else fitText(FontId::Ui, fmtThousands(r_.maxCombo), x + 640, 288, 30, 260 - 160, WHITE, Align::Right, 1.5f);
+        drawTxt("TIMING", x + 380, 326, 30, kIvory, -1, 1.5f);
+        drawTxt(TextFormat("%+.1f / %.1f ms", mean_, sd_), x + 640, 326, 30, WHITE, 1, 1.5f);
         // Notes hit / notes in the chart; "Both sides" (Options, Note counter) adds the opponent's.
         long long hit = 0, total = r_.totalNotes;
         for (long long c : r_.counts) hit += c;
@@ -126,9 +154,10 @@ public:
             hit += r_.opponentHits;
             total += r_.opponentNotes;
         }
-        gfx::text(FontId::Ui, both ? "NOTES (BOTH)" : "NOTES", x + 380, 364, both ? 22 : 30, kIvory, Align::Left, 1.5f);
-        fitText(FontId::Ui, fmtThousands(hit) + " / " + fmtThousands(total), x + 640, 364, 30, 260 - (both ? 125 : 95), WHITE,
-                Align::Right, 1.5f);
+        drawTxt(both ? "NOTES (BOTH)" : "NOTES", x + 380, 364, both ? 22 : 30, kIvory, -1, 1.5f);
+        if (psychStyle) ui.uiText(fmtThousands(hit) + " / " + fmtThousands(total), x + 640, 364, 24, WHITE, 1, 1.5f);
+        else fitText(FontId::Ui, fmtThousands(hit) + " / " + fmtThousands(total), x + 640, 364, 30, 260 - (both ? 125 : 95), WHITE,
+                     Align::Right, 1.5f);
         // timing graph
         const Rectangle g{x, 420, 680, 190};
         DrawRectangleRounded({g.x - 8, g.y - 8, g.width + 16, g.height + 16}, 0.06f, 8, Color{8, 4, 14, 200});
@@ -148,17 +177,18 @@ public:
             const int ri = ae <= 45 ? 0 : ae <= 90 ? 1 : ae <= 135 ? 2 : 3;
             DrawCircleV({px, py}, 2.2f, kRatingCols[ri]);
         }
-        gfx::text(FontId::Ui, "early", g.x + 6, g.y + 2, 18, fade(kIvory, 0.6f));
-        gfx::text(FontId::Ui, "late", g.x + 6, g.y + g.height - 20, 18, fade(kIvory, 0.6f));
+        drawTxt("early", g.x + 6, g.y + 2, 18, fade(kIvory, 0.6f), -1, 1.0f);
+        drawTxt("late", g.x + 6, g.y + g.height - 20, 18, fade(kIvory, 0.6f), -1, 1.0f);
         if (r_.req.story && r_.req.storyQueue.empty())
-            gfx::text(FontId::Title, "WEEK COMPLETE  -  " + fmtThousands(r_.req.storyScore), 250, 540, 28, kGold, Align::Center, 2.0f);
-        DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
+            drawTxt("WEEK COMPLETE  -  " + fmtThousands(r_.req.storyScore), 250, 540, 28, kGold, 0, 2.0f);
+        DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, static_cast<unsigned char>(psychStyle ? 185 : 150)});
         const bool next = r_.req.story && !r_.req.storyQueue.empty();
         const char* ok = a.touchMode ? "OK" : "ENTER";
         std::string hint = std::string(ok) + (next ? " next song" : " continue");
         if (!r_.replayPath.empty() && !a.touchMode) hint += "      R watch replay";
         if (r_.replay) hint = "REPLAY      " + hint;
-        gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+        if (psychStyle) ui.uiText(hint, gfx::W / 2, gfx::H - 31, 18, WHITE, 0, 1.0f);
+        else gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         gfx::endCanvas();
     }
 

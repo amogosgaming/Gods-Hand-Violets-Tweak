@@ -16,6 +16,7 @@
 #include "gfx.hpp"
 #include "platform.hpp"
 #include "process.hpp"
+#include "psych_ui.hpp"
 #include "raylib.h"
 
 namespace gh {
@@ -116,11 +117,22 @@ public:
 
     void draw() override {
         App& a = app();
+        const bool psychStyle = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5A3C8C, menuPulse());
-        gfx::text(FontId::Title, "MOD PACKS", gfx::W / 2, 40, 54, gfx::rgb(0xFFE08A), Align::Center, 3);
-        gfx::text(FontId::Ui, "Not all of these mods are by deatuamae67-crypto: the others belong to their creators", gfx::W / 2, 98,
-                  17, gfx::fade(WHITE, 0.5f), Align::Center);
+        if (psychStyle) {
+            drawPsychMenuBackground(1, Color{135, 92, 215, 255}, 0.0f, false, a.now, 0x5A3C8C, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, gfx::fade(BLACK, 0.35f));
+            if (ui.alphabetCentered("MOD PACKS", gfx::W / 2, 32, 54, 1.0f) < 0)
+                ui.uiText("MOD PACKS", gfx::W / 2, 36, 46, WHITE, 0, 2.5f);
+            ui.uiText("Not all of these mods are by deatuamae67-crypto: the others belong to their creators", gfx::W / 2, 98,
+                      15, gfx::fade(WHITE, 0.7f), 0, 1.0f);
+        } else {
+            drawMenuBackground(a.now, 0x5A3C8C, menuPulse());
+            gfx::text(FontId::Title, "MOD PACKS", gfx::W / 2, 40, 54, gfx::rgb(0xFFE08A), Align::Center, 3);
+            gfx::text(FontId::Ui, "Not all of these mods are by deatuamae67-crypto: the others belong to their creators", gfx::W / 2, 98,
+                      17, gfx::fade(WHITE, 0.5f), Align::Center);
+        }
         std::string status, current;
         bool busy;
         {
@@ -133,9 +145,14 @@ public:
         float y = 130;
         auto row = [&](int i, const std::string& label, const std::string& right) {
             const bool on = i == sel_;
-            if (on) DrawRectangleRounded({200, y - 6, 880, 36}, 0.3f, 6, Color{255, 255, 255, 30});
-            gfx::text(FontId::Ui, label, 220, y, 26, on ? gfx::rgb(0xFFFFFF) : gfx::fade(WHITE, 0.7f));
-            gfx::text(FontId::Ui, right, 1060, y, 22, gfx::fade(WHITE, 0.6f), Align::Right);
+            if (on) DrawRectangleRounded({200, y - 6, 880, 36}, 0.3f, 6, psychStyle ? Color{0, 0, 0, 150} : Color{255, 255, 255, 30});
+            if (psychStyle) {
+                ui.uiText(on ? "> " + label : label, 220, y + 2, 22, on ? WHITE : gfx::fade(WHITE, 0.72f), -1, 1.25f);
+                ui.uiText(right, 1060, y + 4, 18, gfx::fade(WHITE, 0.75f), 1, 1.0f);
+            } else {
+                gfx::text(FontId::Ui, label, 220, y, 26, on ? gfx::rgb(0xFFFFFF) : gfx::fade(WHITE, 0.7f));
+                gfx::text(FontId::Ui, right, 1060, y, 22, gfx::fade(WHITE, 0.6f), Align::Right);
+            }
             y += 38;
         };
         if (!list.empty()) {
@@ -150,9 +167,16 @@ public:
         }
         if (busy && !current.empty())
             status += TextFormat("  (%.1f MB)", double(fileSizeOf(current)) / 1e6);
-        gfx::text(FontId::Ui, status, gfx::W / 2, 620, 20, gfx::fade(WHITE, 0.8f), Align::Center);
-        const char* help = busy ? "Working... please wait" : a.touchMode ? "OK download" : "UP/DOWN select   ENTER download   ESC back";
-        gfx::text(FontId::Ui, help, gfx::W / 2, 670, 20, gfx::fade(WHITE, 0.55f), Align::Center);
+        if (psychStyle) {
+            DrawRectangleRec({0, gfx::H - 104, gfx::W, 104}, Color{0, 0, 0, 175});
+            ui.uiText(status, gfx::W / 2, 624, 18, WHITE, 0, 1.0f);
+            const char* help = busy ? "Working... please wait" : a.touchMode ? "OK download" : "UP/DOWN select   ENTER download   ESC back";
+            ui.uiText(help, gfx::W / 2, 670, 18, gfx::fade(WHITE, 0.8f), 0, 1.0f);
+        } else {
+            gfx::text(FontId::Ui, status, gfx::W / 2, 620, 20, gfx::fade(WHITE, 0.8f), Align::Center);
+            const char* help = busy ? "Working... please wait" : a.touchMode ? "OK download" : "UP/DOWN select   ENTER download   ESC back";
+            gfx::text(FontId::Ui, help, gfx::W / 2, 670, 20, gfx::fade(WHITE, 0.55f), Align::Center);
+        }
         gfx::endCanvas();
     }
 

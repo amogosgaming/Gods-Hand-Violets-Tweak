@@ -23,9 +23,11 @@
 #include "chart_stream.hpp"
 #include "flp_import.hpp"
 #include "common.hpp"
+#include "editor_preview.hpp"
 #include "editor_ui.hpp"
 #include "keys.hpp"
 #include "gfx.hpp"
+#include "psych_ui.hpp"
 #include "raylib.h"
 #include "scene.hpp"
 
@@ -178,7 +180,6 @@ public:
             a.quit = true;
             return;
         }
-        (void)dt;
         // SNIFF in the editor: an FL Studio project or score dropped on the window.
         if (IsFileDropped()) {
             FilePathList dropped = LoadDroppedFiles();
@@ -205,6 +206,11 @@ public:
             lastT_ = t;
             cur_ = t;
             if (a.mixer.ended() || cur_ > songLength() + 2000) stopPlay();
+        }
+        if (preview_ && previewFullVisuals_) {
+            if (!livePreview_.loaded()) loadFullPreview();
+            updatePreviewWindow();
+            livePreview_.sync(cur_, dt, playing_, speed_, keys_, previewSections_, previewWindowNotes_, events_);
         }
         if (typing_) {
             if (in.pressed(KEY_ESCAPE)) ui_.focus.clear();
@@ -288,6 +294,10 @@ public:
 
     void draw() override {
         App& a = app();
+        // Render offscreen full-visuals preview before opening the main canvas.
+        if (loaded_ && error_.empty() && preview_ && previewFullVisuals_ && livePreview_.loaded()) {
+            livePreview_.render(cur_, speed_, keys_, previewWindowNotes_);
+        }
         gfx::beginCanvas();
         ClearBackground(Color{14, 10, 22, 255});
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{14, 10, 22, 255});
@@ -305,8 +315,9 @@ public:
         }
         drawGrid();
         drawInfo();
-        if (preview_) drawPreview();
+        if (preview_) handlePreviewMouse();
         drawPanel();  // also handles the panel's clicks (immediate mode)
+        if (preview_) drawPreview();
         if (!ui_.used && !typing_) handleGridMouse();
         if (a.now - flashAt_ < 3.0)
             gfx::text(FontId::Ui, flash_, kGridCenter, gfx::H - 40, 24,
@@ -402,6 +413,7 @@ private:
             }
         loaded_ = true;
         App& a = app();
+        previewDownscroll_ = a.settings.downscroll;
         a.mixer.setTracks(inst_, voiceP_, voiceO_);
         a.mixer.setRate(1.0);
         if (entry_->builtin) flash("Built-in song: saving makes an editable copy in songs/");
@@ -1515,55 +1527,236 @@ private:
         gfx::text(FontId::Ui, "PLAYER", x0 + lw * keys_ * 1.5f, 8, 22, gfx::fade(WHITE, 0.75f), Align::Center);
     }
 
-    // The chart as it will be played, in a small window under the info: the
-    // strums, and the notes coming up to them at the song's scroll speed
-    // (Charting tab: Chart preview).
+    void rebuildPreviewSections() {
+        if (starts_.size() != sections_.size() + 1) rebuildStarts();
+        previewSections_.resize(sections_.size());
+        for (size_t i = 0; i < sections_.size(); ++i) {
+            PreviewSection& ps = previewSections_[i];
+            ps.mustHit = sections_[i].mustHit;
+            ps.altAnim = sections_[i].altAnim;
+            ps.gf = sections_[i].gf;
+            ps.bpm = sections_[i].bpm;
+            ps.beats = sections_[i].beats;
+            ps.startMs = starts_[i];
+            ps.beatStart = beatStarts_[i];
+        }
+    }
+
+    void updatePreviewWindow() {
+        rebuildPreviewSections();
+        previewWindowNotes_.clear();
+        const Stats& st = stats();
+        const double loMs = cur_ - std::max(15000.0, st.maxLen + 500.0);
+        const double hiMs = cur_ + 10000.0;
+        auto r = notesIn(loMs, hiMs);
+        previewWindowNotes_.reserve(std::min<size_t>(size_t(r.second - r.first), 12000));
+        for (auto it = r.first; it != r.second && previewWindowNotes_.size() < 12000; ++it) {
+            PreviewNote pn;
+            pn.t = it->t;
+            pn.len = it->len;
+            pn.col = it->col;
+            pn.mine = it->type < typeHurt_.size() && typeHurt_[it->type] != 0;
+            if (it->type < typeNames_.size()) pn.type = typeNames_[it->type];
+            previewWindowNotes_.push_back(std::move(pn));
+        }
+    }
+
+    void loadFullPreview() {
+        if (!entry_) return;
+        rebuildPreviewSections();
+        PreviewConfig cfg;
+        cfg.entry = entry_;
+        cfg.diff = diff_;
+        cfg.title = title_;
+        cfg.player = player_;
+        cfg.opponent = opponent_;
+        cfg.gf = gf_;
+        cfg.stage = stage_;
+        cfg.keys = keys_;
+        cfg.speed = speed_;
+        cfg.lengthMs = songLength();
+        cfg.downscroll = previewDownscroll_;
+        livePreview_.load(cfg, previewSections_, events_);
+        updatePreviewWindow();
+        flash("Preview loaded (" + livePreview_.status() + ")");
+    }
+
+    void clampPreviewRect() {
+        previewRect_.width = clampv(previewRect_.width, 200.0f, 960.0f);
+        previewRect_.height = clampv(previewRect_.height, 150.0f, 620.0f);
+        previewRect_.x = clampv(previewRect_.x, 4.0f, gfx::W - previewRect_.width - 4.0f);
+        previewRect_.y = clampv(previewRect_.y, 42.0f, gfx::H - previewRect_.height - 4.0f);
+    }
+
+    Rectangle previewBtnMode() const { return {previewRect_.x + previewRect_.width - 104.0f, previewRect_.y + 3.0f, 48.0f, 18.0f}; }
+    Rectangle previewBtnScroll() const { return {previewRect_.x + previewRect_.width - 52.0f, previewRect_.y + 3.0f, 48.0f, 18.0f}; }
+    Rectangle previewBtnReload() const { return {previewRect_.x + previewRect_.width - 144.0f, previewRect_.y + 3.0f, 36.0f, 18.0f}; }
+    Rectangle previewGripRect() const {
+        return {previewRect_.x + previewRect_.width - 18.0f, previewRect_.y + previewRect_.height - 18.0f, 18.0f, 18.0f};
+    }
+
+    void handlePreviewMouse() {
+        const Vector2 m = ui_.mouse;
+        const Input& in = app().input;
+        const Rectangle titleBar{previewRect_.x, previewRect_.y, previewRect_.width, 24.0f};
+        const Rectangle grip = previewGripRect();
+        if (previewDrag_) {
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                previewRect_.x = m.x - previewDragOff_.x;
+                previewRect_.y = m.y - previewDragOff_.y;
+                clampPreviewRect();
+                ui_.used = true;
+            } else {
+                previewDrag_ = false;
+            }
+            return;
+        }
+        if (previewResize_) {
+            if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                previewRect_.width = m.x - previewRect_.x + previewDragOff_.x;
+                previewRect_.height = m.y - previewRect_.y + previewDragOff_.y;
+                clampPreviewRect();
+                ui_.used = true;
+            } else {
+                previewResize_ = false;
+            }
+            return;
+        }
+        if (!CheckCollisionPointRec(m, previewRect_)) return;
+        ui_.used = true;  // clicks over the preview box do not place notes behind it
+        if (ui_.click) {
+            if (CheckCollisionPointRec(m, previewBtnMode())) {
+                previewFullVisuals_ = !previewFullVisuals_;
+                if (previewFullVisuals_) loadFullPreview();
+                else livePreview_.unload();
+                ui_.click = false;
+                return;
+            }
+            if (CheckCollisionPointRec(m, previewBtnScroll())) {
+                previewDownscroll_ = !previewDownscroll_;
+                livePreview_.setDownscroll(previewDownscroll_);
+                ui_.click = false;
+                return;
+            }
+            if (previewFullVisuals_ && CheckCollisionPointRec(m, previewBtnReload())) {
+                loadFullPreview();
+                ui_.click = false;
+                return;
+            }
+            if (CheckCollisionPointRec(m, grip)) {
+                previewResize_ = true;
+                previewDragOff_ = {previewRect_.x + previewRect_.width - m.x, previewRect_.y + previewRect_.height - m.y};
+                ui_.click = false;
+                return;
+            }
+            if (CheckCollisionPointRec(m, titleBar)) {
+                previewDrag_ = true;
+                previewDragOff_ = {m.x - previewRect_.x, m.y - previewRect_.y};
+                ui_.click = false;
+                return;
+            }
+            ui_.click = false;
+        }
+        if (ui_.rclick) ui_.rclick = false;
+        (void)in;
+    }
+
+    // The chart as it will be played, in a movable & resizable window:
+    // supports Basic (notes-only) and Full Visuals (stage, characters, Lua
+    // scripts and events) modes, as well as upscroll and downscroll.
     void drawPreview() {
-        const Rectangle box{12, 478, 228, 230};
-        DrawRectangleRounded(box, 0.04f, 6, Color{8, 5, 14, 235});
-        DrawRectangleRoundedLinesEx(box, 0.04f, 6, 1.5f, Color{110, 92, 150, 200});
-        const int cols = 2 * keys_;
-        const float lw = std::min(26.0f, (box.width - 16) / float(cols));
-        const float x0 = box.x + (box.width - lw * cols) * 0.5f, recY = box.y + 26;
-        const double pp = 0.45 * speed_ * (lw / 112.0) * 1.6;  // pixels per ms, as Psych scales it
-        const double tTop = cur_ - (recY - box.y) / pp, tBot = cur_ + (box.y + box.height - recY) / pp;
+        clampPreviewRect();
+        const Rectangle box = previewRect_;
+        DrawRectangleRounded(box, 0.03f, 6, Color{8, 5, 14, 242});
+        DrawRectangleRec({box.x + 1, box.y + 1, box.width - 2, 23}, Color{24, 18, 42, 245});
+        DrawRectangleLinesEx(box, 1.5f, (previewDrag_ || previewResize_) ? kAccent : Color{110, 92, 150, 210});
+        const std::string title = previewFullVisuals_ && livePreview_.loaded()
+            ? ("PREVIEW (" + livePreview_.status() + ")")
+            : std::string("PREVIEW");
+        gfx::text(FontId::Ui, title, box.x + 7, box.y + 4, 15, gfx::fade(WHITE, 0.85f));
+        auto miniBtn = [&](Rectangle r, const char* label, bool on) {
+            const bool hov = CheckCollisionPointRec(ui_.mouse, r);
+            DrawRectangleRounded(r, 0.25f, 4, on ? Color{96, 72, 165, 240} : (hov ? Color{64, 52, 96, 235} : Color{38, 30, 62, 225}));
+            gfx::text(FontId::Ui, label, r.x + r.width * 0.5f, r.y + 2, 13, on ? kAccent : WHITE, Align::Center);
+        };
+        if (previewFullVisuals_) miniBtn(previewBtnReload(), "RLD", false);
+        miniBtn(previewBtnMode(), previewFullVisuals_ ? "FULL" : "BASIC", previewFullVisuals_);
+        miniBtn(previewBtnScroll(), previewDownscroll_ ? "DOWN" : "UP", previewDownscroll_);
+
+        const Rectangle content{box.x + 2.0f, box.y + 24.0f, box.width - 4.0f, box.height - 26.0f};
         const Vector2 o = gfx::canvasOrigin();
         const float cs = gfx::canvasScale();
-        BeginScissorMode(int(o.x + box.x * cs), int(o.y + box.y * cs), int(box.width * cs), int(box.height * cs));
-        for (int c = 0; c < cols; ++c)
-            gfx::drawReceptor(gfx::laneDir(keys_, c % keys_), {x0 + (c + 0.5f) * lw, recY}, lw * 0.9f, Color{200, 190, 230, 150});
-        float lastY[2 * kMaxKeys];
-        std::fill(std::begin(lastY), std::end(lastY), -1e9f);
-        const Stats& st = stats();
-        auto r = notesIn(tTop - st.maxLen, tBot);
-        for (auto it = r.first; it != r.second; ++it) {
-            const EdNote& n = *it;
-            if (n.col >= 2 * kMaxKeys) continue;
-            const float y = recY + float((n.t - cur_) * pp);
-            const float cx = x0 + (n.col + 0.5f) * lw;
-            const int dir = gfx::laneDir(keys_, n.col % keys_);
-            if (n.len > 0) {
-                const float yEnd = recY + float((n.t + n.len - cur_) * pp);
-                if (yEnd >= box.y) gfx::drawSustain(dir == gfx::kCenter ? gfx::kUp : dir, cx, std::max(y, recY), yEnd, lw * 0.3f, 0.8f, true);
+        BeginScissorMode(int(o.x + content.x * cs), int(o.y + content.y * cs), int(content.width * cs), int(content.height * cs));
+        if (previewFullVisuals_ && livePreview_.loaded()) {
+            livePreview_.drawTo(content);
+        } else {
+            const int cols = 2 * keys_;
+            const float lw = std::min(56.0f, (content.width - 14.0f) / float(cols));
+            const float x0 = content.x + (content.width - lw * cols) * 0.5f;
+            const float recY = previewDownscroll_ ? (content.y + content.height - std::max(22.0f, lw * 0.7f))
+                                                  : (content.y + std::max(22.0f, lw * 0.7f));
+            const float dirSign = previewDownscroll_ ? -1.0f : 1.0f;
+            const double pp = 0.45 * speed_ * (lw / 112.0) * 1.6;  // pixels per ms, scaled to the box
+            const double maxSpan = content.height / std::max(0.01, pp);
+            const double tLo = cur_ - maxSpan, tHi = cur_ + maxSpan;
+            const PsychUi& pui = psychUi();
+            const bool usePsych = pui.active() && keys_ == 4;
+            for (int c = 0; c < cols; ++c) {
+                const int dir = gfx::laneDir(keys_, c % keys_);
+                const Vector2 pos{x0 + (c + 0.5f) * lw, recY};
+                if (!usePsych || !pui.strum(dir, pos, lw * 0.9f, 0, 0.85f, 0, 0))
+                    gfx::drawReceptor(dir, pos, lw * 0.9f, Color{200, 190, 230, 165});
             }
-            if (n.t < cur_ - 1 || std::fabs(y - lastY[n.col]) < 2.0f) continue;  // played already / same pixel row
-            lastY[n.col] = y;
-            VisNote v;
-            v.cx = cx;
-            v.y = y;
-            v.dir = dir;
-            v.mine = n.type < typeHurt_.size() && typeHurt_[n.type];
-            vis_.push_back(v);
-            if (vis_.size() > 20000) break;
-        }
-        for (int d = 0; d <= gfx::kCenter; ++d)
+            float lastY[2 * kMaxKeys];
+            std::fill(std::begin(lastY), std::end(lastY), -1e9f);
+            const Stats& st = stats();
+            auto r = notesIn(tLo - st.maxLen, tHi);
+            for (auto it = r.first; it != r.second; ++it) {
+                const EdNote& n = *it;
+                if (n.col >= 2 * kMaxKeys) continue;
+                const float y = recY + dirSign * float((n.t - cur_) * pp);
+                const float cx = x0 + (n.col + 0.5f) * lw;
+                const int dir = gfx::laneDir(keys_, n.col % keys_);
+                if (n.len > 0 && n.t + n.len >= cur_ - 1.0) {
+                    const float yStart = recY + dirSign * float(std::max(0.0, n.t - cur_) * pp);
+                    const float yEnd = recY + dirSign * float((n.t + n.len - cur_) * pp);
+                    const int sdir = dir == gfx::kCenter ? gfx::kUp : dir;
+                    if (!usePsych) {
+                        gfx::drawSustain(sdir, cx, std::min(yStart, yEnd), std::max(yStart, yEnd), lw * 0.3f, 0.8f, !previewDownscroll_);
+                    } else {
+                        pui.beginDir(sdir);
+                        if (!pui.hold(sdir, cx, yStart, yEnd, lw * 0.3f, 0.8f))
+                            gfx::drawSustain(sdir, cx, std::min(yStart, yEnd), std::max(yStart, yEnd), lw * 0.3f, 0.8f, !previewDownscroll_);
+                        pui.endDir();
+                    }
+                }
+                if (n.t < cur_ - 1 || std::fabs(y - lastY[n.col]) < 2.0f) continue;  // played already / same pixel row
+                lastY[n.col] = y;
+                VisNote v;
+                v.cx = cx;
+                v.y = y;
+                v.dir = dir;
+                v.mine = n.type < typeHurt_.size() && typeHurt_[n.type];
+                vis_.push_back(v);
+                if (vis_.size() > 20000) break;
+            }
+            for (int d = 0; d <= gfx::kCenter; ++d) {
+                if (usePsych && d < 4) pui.beginDir(d);
+                for (const VisNote& v : vis_) {
+                    if (v.mine || v.dir != d) continue;
+                    if (!usePsych || d >= 4 || !pui.note(d, {v.cx, v.y}, lw * 0.9f, 1.0f, 0))
+                        gfx::drawNote(d, {v.cx, v.y}, lw * 0.9f, 1.0f);
+                }
+                if (usePsych && d < 4) pui.endDir();
+            }
             for (const VisNote& v : vis_)
-                if (!v.mine && v.dir == d) gfx::drawNote(d, {v.cx, v.y}, lw * 0.9f, 1.0f);
-        for (const VisNote& v : vis_)
-            if (v.mine) DrawCircleV({v.cx, v.y}, lw * 0.3f, Color{220, 40, 60, 255});
-        vis_.clear();
+                if (v.mine) DrawCircleV({v.cx, v.y}, lw * 0.3f, Color{220, 40, 60, 255});
+            vis_.clear();
+        }
         EndScissorMode();
-        gfx::text(FontId::Ui, "PREVIEW", box.x + 8, box.y + box.height - 22, 14, gfx::fade(WHITE, 0.45f));
+        // Resize grip triangle in bottom-right corner
+        const float gx = box.x + box.width, gy = box.y + box.height;
+        DrawTriangle({gx - 14, gy - 2}, {gx - 2, gy - 2}, {gx - 2, gy - 14}, Color{180, 160, 225, 190});
     }
 
     void drawInfo() {
@@ -1843,7 +2036,18 @@ private:
                 ui_.check(row(), "Hit sounds: opponent", hitOpponent_);
                 ui_.stepper(row(), "Opponent hitsound volume", hitVolOpponent_, 0.05, 0, 1, "%.2f");
                 ui_.check(row(), "Exact placement (section starts)", exactPlace_);
-                ui_.check(row(), "Chart preview (bottom left)", preview_);
+                ui_.check(row(), "Chart preview", preview_);
+                if (ui_.check(row(), "Preview: full visuals (Lua/events)", previewFullVisuals_)) {
+                    if (previewFullVisuals_) loadFullPreview();
+                    else livePreview_.unload();
+                }
+                if (ui_.check(row(), "Preview: downscroll", previewDownscroll_)) livePreview_.setDownscroll(previewDownscroll_);
+                if (ui_.button(half(0), "Reset preview box")) previewRect_ = {12, 420, 280, 230};
+                if (ui_.button(half(1), "Reload preview")) {
+                    if (previewFullVisuals_) loadFullPreview();
+                    else flash("Enable full visuals to reload scripts/events");
+                }
+                y += 38;
                 ui_.check(row(), "Metronome", metronome_);
                 double snap = snapIdx_;
                 if (ui_.stepper(row(), "Snap (1/N)", snap, 1, 0, double(std::size(kSnaps) - 1), "%.0f")) snapIdx_ = int(snap);
@@ -2074,6 +2278,13 @@ private:
     size_t statsSize_ = size_t(-1);
     bool statsDirty_ = true;
     bool exactPlace_ = false;  // Charting tab: notes only selected in their own cell
+    Rectangle previewRect_{12, 420, 280, 230};
+    bool previewDownscroll_ = false, previewFullVisuals_ = false;
+    bool previewDrag_ = false, previewResize_ = false;
+    Vector2 previewDragOff_{};
+    ChartPreview livePreview_;
+    std::vector<PreviewSection> previewSections_;
+    std::vector<PreviewNote> previewWindowNotes_;
     PcmPtr inst_, voiceP_, voiceO_;
 };
 

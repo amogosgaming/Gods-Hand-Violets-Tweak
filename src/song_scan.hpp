@@ -28,7 +28,8 @@ struct SongEntry {
     std::string metaPath;                 // V-Slice metadata
     std::string inst, voices, voicesP, voicesO;
     uint32_t color = 0xB48CDC;
-    std::string opponent;  // built-in character id, "" for custom
+    std::string opponent;       // built-in character id, "" for custom
+    std::string chartOpponent;  // player2 / opponent from the chart file (for Freeplay icons)
     // Psych content: the mod folder (or the song folder for songs/), the
     // chart folder and the song's folder name (data/<songKey>/).
     std::string modRoot, dataDir, songKey;

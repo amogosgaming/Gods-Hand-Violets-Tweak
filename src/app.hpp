@@ -148,6 +148,8 @@ public:
     // first (fonts, health bar, notes, ratings, sounds); {} goes back.
     void psychUiForSong(const std::vector<std::string>& modRoots);
     bool psychAutomatic = false;   // no folder chosen: the best copy found on disk
+    // Whether the Psych Engine visual style applies to menus across the engine.
+    bool psychMenusActive() const { return settings.psychUi && settings.psychMenus; }
 
     // Rendering mode (render_mode.hpp): the song being played is recorded to a
     // video. While it records, the game's time moves one video frame per loop.
@@ -241,7 +243,8 @@ std::unique_ptr<State> makeChartConverter();
 void waitForBackgroundJobs();
 
 // Shared menu visuals
-void drawMenuBackground(double now, unsigned tintHex, float pulse);
+void drawMenuBackground(double now, unsigned tintHex, float pulse, bool allowBlur = false);
+void drawPsychMenuBackground(int variant, Color tint, float scrollY, bool allowBlur, double now, unsigned fallbackHex, float pulse);
 float menuPulse();  // 1 on each menu-music beat, decaying
 
 }  // namespace gh

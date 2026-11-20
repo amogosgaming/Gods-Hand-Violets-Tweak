@@ -167,6 +167,84 @@ bool chartContent(const fs::path& f) {
     return found;
 }
 
+// Fast bounded extraction of a string field ("player2" / "opponent") from a
+// JSON chunk without parsing giant note arrays.
+std::string extractJsonStringField(std::string_view sv, std::string_view key) {
+    std::string pat = "\"" + std::string(key) + "\"";
+    size_t pos = 0;
+    while ((pos = sv.find(pat, pos)) != std::string_view::npos) {
+        size_t i = pos + pat.size();
+        while (i < sv.size() && (sv[i] == ' ' || sv[i] == '\t' || sv[i] == '\r' || sv[i] == '\n')) ++i;
+        if (i >= sv.size() || sv[i] != ':') { pos += pat.size(); continue; }
+        ++i;
+        while (i < sv.size() && (sv[i] == ' ' || sv[i] == '\t' || sv[i] == '\r' || sv[i] == '\n')) ++i;
+        if (i >= sv.size() || sv[i] != '"') { pos += pat.size(); continue; }
+        ++i;
+        std::string out;
+        while (i < sv.size() && sv[i] != '"') {
+            if (sv[i] == '\\' && i + 1 < sv.size()) {
+                ++i;
+                out += sv[i];
+            } else {
+                out += sv[i];
+            }
+            ++i;
+            if (out.size() > 128) break;
+        }
+        if (i < sv.size() && sv[i] == '"' && !out.empty()) return trim(out);
+        pos = i;
+    }
+    return {};
+}
+
+std::string peekChartOpponent(const std::string& chartPath, const std::string& metaPath) {
+    if (!metaPath.empty()) {
+        std::string metaText;
+        if (readTextFile(metaPath, metaText)) {
+            json::Document d;
+            if (d.parse(metaText)) {
+                if (const json::Value* pd = d.get(d.root(), "playData"))
+                    if (const json::Value* ch = d.get(*pd, "characters")) {
+                        std::string opp(d.strOr(d.get(*ch, "opponent"), ""));
+                        if (!opp.empty()) return trim(opp);
+                    }
+            }
+        }
+    }
+    if (chartPath.empty()) return {};
+    if (endsWithI(chartPath, kBinaryChartExt)) {
+        std::string skel;
+        if (readBinarySkeleton(chartPath, skel)) {
+            std::string opp = extractJsonStringField(skel, "player2");
+            if (opp.empty()) opp = extractJsonStringField(skel, "opponent");
+            if (!opp.empty()) return opp;
+        }
+        return {};
+    }
+    if (!endsWithI(chartPath, ".json")) return {};
+    FILE* fp = std::fopen(chartPath.c_str(), "rb");
+    if (!fp) return {};
+    constexpr size_t kHead = 16384, kTail = 32768;
+    std::string buf(kHead, '\0');
+    buf.resize(std::fread(buf.data(), 1, buf.size(), fp));
+    std::string opp = extractJsonStringField(buf, "player2");
+    if (opp.empty()) opp = extractJsonStringField(buf, "opponent");
+    if (opp.empty() && buf.size() == kHead) {
+        const uint64_t sz = fileSize(chartPath);
+        if (sz > kHead) {
+            const uint64_t off = sz > kTail ? sz - kTail : kHead;
+            if (seekTo(fp, off)) {
+                std::string tail(size_t(std::min<uint64_t>(kTail, sz - off)), '\0');
+                tail.resize(std::fread(tail.data(), 1, tail.size(), fp));
+                opp = extractJsonStringField(tail, "player2");
+                if (opp.empty()) opp = extractJsonStringField(tail, "opponent");
+            }
+        }
+    }
+    std::fclose(fp);
+    return opp;
+}
+
 // A chart: Psych JSON, or a binary .ghc (which may be the only one there:
 // a chart of a billion notes kept without its JSON).
 bool hasChartFile(const fs::path& dir) {
@@ -554,6 +632,12 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
         for (const fs::path& f : listDir(toPath(audioDirS.empty() ? dirS : audioDirS), false))
             if (isAudioExt(toLower(pathStr(f.filename())))) { e.inst = pathStr(f); break; }
         if (e.inst.empty()) return;
+    }
+    if (!e.autoChart) {
+        for (const std::string& cp : e.chartPaths) {
+            e.chartOpponent = peekChartOpponent(cp, e.metaPath);
+            if (!e.chartOpponent.empty()) break;
+        }
     }
     songs.push_back(e);
 }
@@ -963,6 +1047,10 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
             if (e.inst.empty()) {
                 e.noAudio = true;
                 e.subtitle += " - no audio";
+            }
+            for (const std::string& cp : e.chartPaths) {
+                e.chartOpponent = peekChartOpponent(cp, e.metaPath);
+                if (!e.chartOpponent.empty()) break;
             }
             charted.insert(g.key);
             songs.push_back(e);

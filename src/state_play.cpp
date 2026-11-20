@@ -245,7 +245,9 @@ void PlayState::update(double dt) {
     for (int side = 0; side < 2; ++side)
         for (int l = 0; l < chart_.keys; ++l)
             if (session_.isHolding(side, l)) {
-                confirm_[side][l] = std::max(confirm_[side][l], 0.7f);
+                StrumAnim& sa = strumAnim_[side][l];
+                if (sa.state != 2) setStrumState(side, l, 2, (side == 0 || cfg_.botplay) ? 0.06 : 0.0);
+                else if (side == 0 || cfg_.botplay) sa.resetTimer = std::max(sa.resetTimer, 0.06);
                 CharacterState& c = charOf(side);
                 c.singUntil = std::max(c.singUntil, now + 0.12);
             }
@@ -273,8 +275,22 @@ void PlayState::update(double dt) {
     updateVisualizer(dt);
     beatPulse_ = std::max(0.0f, beatPulse_ - float(dt) * 4.0f);
     minePulse_ = std::max(0.0f, minePulse_ - float(dt) * 3.0f);
-    for (auto& side : confirm_)
-        for (float& c : side) c = std::max(0.0f, c - float(dt) * 5.0f);
+    for (int side = 0; side < 2; ++side)
+        for (int l = 0; l < kMaxKeys; ++l) {
+            StrumAnim& sa = strumAnim_[side][l];
+            if (sa.resetTimer > 0.0) {
+                sa.resetTimer -= dt;
+                if (sa.resetTimer <= 0.0) {
+                    sa.resetTimer = 0.0;
+                    if (side == 1 && !cfg_.botplay && heldCount_[l] > 0) {
+                        sa.state = 1;
+                        sa.startedAt = now;
+                    } else {
+                        sa.state = 0;
+                    }
+                }
+            }
+        }
     healthShown_ = approach(healthShown_, float(session_.health), 10.0f, float(dt));
     if (speedTweenDur_ > 0) {
         speedTweenT_ = std::min(speedTweenDur_, speedTweenT_ + dt);
@@ -531,14 +547,29 @@ double PlayState::scrollSpeed() const {
     return base * speedMult_;
 }
 
+double PlayState::strumConfirmDuration() const {
+    // BPM-based confirm showtime: 1.25 steps at current BPM/rate, clamped so
+    // ultra-high BPMs stay visible and very low BPMs don't stick forever.
+    return clampv(chart_.stepMs(std::max(0.0, songMs_)) * 1.25 / 1000.0 / std::max(0.25, rate_), 0.08, 0.28);
+}
+
+void PlayState::setStrumState(int side, int lane, int state, double resetSec) {
+    if (side < 0 || side > 1 || lane < 0 || lane >= kMaxKeys) return;
+    StrumAnim& sa = strumAnim_[side][lane];
+    sa.state = state;
+    sa.startedAt = app().now;
+    sa.resetTimer = resetSec;
+}
+
 void PlayState::restart() {
     App& a = app();
     if (!sessionFresh_) session_.init(chart_, cfg_);  // the first time it was made before the scripts
     sessionFresh_ = false;
     popups_.clear();
     fx_.clear();
-    for (auto& s : confirm_)
-        for (float& c : s) c = 0;
+    for (auto& s : strumAnim_)
+        for (StrumAnim& sa : s) sa = StrumAnim{};
+    chordTie_ = 0;
     for (int& h : heldCount_) h = 0;
     for (bool& t : touchDown_) t = false;
     record_.events.clear();
@@ -643,12 +674,14 @@ void PlayState::handleInput() {
 }
 
 void PlayState::laneDown(int lane, double t) {
+    if (!cfg_.botplay) setStrumState(1, lane, 1, 0.0);
     session_.press(lane, t);
     if (!replaying_ && !cfg_.botplay) record_.events.push_back({t, uint8_t(lane), true});
     if (scripts_) scripts_->call("onKeyPress", {scene::Value(double(lane))});
 }
 
 void PlayState::laneUp(int lane, double t) {
+    if (!cfg_.botplay) setStrumState(1, lane, 0, 0.0);
     session_.release(lane, t);
     if (!replaying_ && !cfg_.botplay) record_.events.push_back({t, uint8_t(lane), false});
     if (scripts_) scripts_->call("onKeyRelease", {scene::Value(double(lane))});
@@ -769,14 +802,55 @@ void PlayState::handleNoteEvents() {
     const double now = a.now;
     std::vector<GameEvent> evs;
     evs.swap(session_.events);
-    for (const GameEvent& ev : evs) {
+    // Pick one pose-driving note per singer (0 opponent, 1 player, 2 gf) per
+    // frame: latest timestamp wins, rotating tie-breaks on simultaneous chords
+    // so lane 3 (singRIGHT) doesn't permanently dominate high-NPS chords.
+    int poseIdx[3] = {-1, -1, -1};
+    double bestTime[3] = {-1e18, -1e18, -1e18};
+    int chordCount[3] = {0, 0, 0};
+    for (size_t i = 0; i < evs.size(); ++i) {
+        const GameEvent& ev = evs[i];
+        if (ev.type != GameEvent::PlayerHit && ev.type != GameEvent::OpponentHit) continue;
+        if (ev.flags & kFlagNoAnim) continue;
+        const int slot = (ev.flags & kFlagGF) ? 2 : (ev.type == GameEvent::PlayerHit ? 1 : 0);
+        if (poseIdx[slot] < 0 || ev.time > bestTime[slot] + 0.5) {
+            bestTime[slot] = ev.time;
+            poseIdx[slot] = int(i);
+            chordCount[slot] = 1;
+        } else if (ev.time >= bestTime[slot] - 0.5) {
+            ++chordCount[slot];
+        }
+    }
+    for (int slot = 0; slot < 3; ++slot) {
+        if (chordCount[slot] <= 1) continue;
+        const int pick = int((chordTie_++) % unsigned(chordCount[slot]));
+        int seen = 0;
+        for (size_t i = 0; i < evs.size(); ++i) {
+            const GameEvent& ev = evs[i];
+            if (ev.type != GameEvent::PlayerHit && ev.type != GameEvent::OpponentHit) continue;
+            if (ev.flags & kFlagNoAnim) continue;
+            const int s = (ev.flags & kFlagGF) ? 2 : (ev.type == GameEvent::PlayerHit ? 1 : 0);
+            if (s == slot && std::fabs(ev.time - bestTime[slot]) <= 0.5) {
+                if (seen++ == pick) {
+                    poseIdx[slot] = int(i);
+                    break;
+                }
+            }
+        }
+    }
+    const double confDur = strumConfirmDuration();
+    for (size_t i = 0; i < evs.size(); ++i) {
+        const GameEvent& ev = evs[i];
         const int dir = singDir(chart_.keysOf(ev.type == GameEvent::OpponentHit ? 0 : 1), ev.lane);
         if (ev.type == GameEvent::PlayerHit || ev.type == GameEvent::OpponentHit) zoomingOn_ = true;
+        const int slot = (ev.flags & kFlagGF) ? 2 : (ev.type == GameEvent::PlayerHit ? 1 : 0);
+        const bool playPose = poseIdx[slot] == int(i);
         switch (ev.type) {
             case GameEvent::PlayerHit: {
-                confirm_[1][ev.lane] = 1.0f;
+                const bool autoReset = cfg_.botplay || heldCount_[ev.lane] == 0;
+                setStrumState(1, ev.lane, 2, autoReset ? confDur : 0.0);
                 vis_.hit(int(ev.rating));
-                if (!(ev.flags & kFlagNoAnim)) charOf(1).sing(dir, now, ev.length / 1000.0 / rate_);
+                if (playPose && !(ev.flags & kFlagNoAnim)) charOf(1).sing(dir, now, ev.length / 1000.0 / rate_);
                 a.mixer.setTrackVolume(Mixer::kVoicePlayer, 1.0f);
                 const RatingInfo& ri = ratingInfo(ev.rating);
                 if (!cfg_.botplay && (!cfg_.practice || replaying_)) scoreBopAt_ = now;  // Psych: the score text zooms
@@ -790,7 +864,7 @@ void PlayState::handleNoteEvents() {
                 // (the moment of the press; the note's own time for bots).
                 if (a.settings.hitsoundVol > 0)
                     a.mixer.hitAt((ev.time + ev.errMs * rate_) / 1000.0, 0, a.settings.hitsoundVol);
-                if (psych_) psychNoteHit(ev, false);
+                if (psych_) psychNoteHit(ev, false, playPose);
                 scoreDirty_ = true;
                 scoreDirtyMiss_ = false;
                 break;
@@ -818,10 +892,10 @@ void PlayState::handleNoteEvents() {
                 if (psych_) psychMiss(ev, false);
                 break;
             case GameEvent::OpponentHit:
-                confirm_[0][ev.lane] = 1.0f;
+                setStrumState(0, ev.lane, 2, confDur);
                 vis_.opponentHit();
-                if (!(ev.flags & kFlagNoAnim)) charOf(0).sing(dir, now, ev.length / 1000.0 / rate_);
-                if (psych_) psychNoteHit(ev, true);
+                if (playPose && !(ev.flags & kFlagNoAnim)) charOf(0).sing(dir, now, ev.length / 1000.0 / rate_);
+                if (psych_) psychNoteHit(ev, true, playPose);
                 break;
             default: break;
         }
@@ -1221,18 +1295,21 @@ void PlayState::drawLanes() {
             }
             if (st.visible && alphaStrum > 0.001f) {
                 keepOrder({c.x - size * 0.5f, c.y - size * 0.5f, size, size}, -1);
-                float conf = confirm_[side][lane];
-                if (side == 0 && !s.opponentStrums) conf = 0;
-                const bool pressed = side == 1 && heldCount_[lane] > 0 && !cfg_.botplay;
-                const int sstate = conf > 0.01f ? 2 : pressed ? 1 : 0;
+                const StrumAnim& sa = strumAnim_[side][lane];
+                int sstate = sa.state;
+                if (side == 0 && !s.opponentStrums) sstate = 0;
+                const double animAge = std::max(0.0, a.now - sa.startedAt);
+                const float conf = sstate == 2 ? saturate(1.0f - float(animAge / std::max(0.05, strumConfirmDuration()))) : 0.0f;
+                const bool pressed = sstate == 1;
                 if (sstate) ui.beginDir(dir);  // idle receptors stay grey
-                const bool drawn = ui.strum(dir, c, size, sstate, alphaStrum, st.angle, a.now);
+                const bool drawn = ui.strum(dir, c, size, sstate, alphaStrum, st.angle, animAge);
                 if (sstate) ui.endDir();
                 if (drawn) {
                     // the Psych Engine interface drew it
-                } else if (conf > 0.01f) {
-                    gfx::glow(c, size * 0.95f * conf, fade(col, 0.6f * alphaStrum));
-                    gfx::drawNote(dir, c, size, alphaStrum, 1.0f + 0.06f * conf, st.angle);
+                } else if (sstate == 2) {
+                    const float glowK = std::max(0.25f, conf);
+                    gfx::glow(c, size * 0.95f * glowK, fade(col, 0.6f * alphaStrum));
+                    gfx::drawNote(dir, c, size, alphaStrum, 1.0f + 0.06f * glowK, st.angle);
                 } else if (pressed) {
                     gfx::drawReceptor(dir, c, size, fade(gfx::mix(WHITE, col, 0.6f), alphaStrum), 0.9f, st.angle);
                 } else {
@@ -1890,7 +1967,7 @@ void PlayState::drawUnderNotes() {
 }
 
 void PlayState::drawPause() {
-    if (psychUi().active() && psychUi().font()) {
+    if (psychUi().active() || app().settings.psychUi) {
         drawPsychPause();
         return;
     }
@@ -1922,17 +1999,17 @@ void PlayState::drawPsychPause() {
     const std::string info[3] = {songNameShown_.empty() ? chart_.title : songNameShown_, diff, "Blueballed: " + std::to_string(a.blueballed)};
     for (int i = 0; i < 3; ++i) {
         const float k = quartInOut(saturate((t - 0.3f - 0.2f * float(i)) / 0.4f));
-        ui.text(info[i], gfx::W - 20, 15.0f + 32.0f * float(i) + 5.0f * k, 32, fade(WHITE, k), 1, 0);
+        ui.uiText(info[i], gfx::W - 20, 15.0f + 32.0f * float(i) + 5.0f * k, 32, fade(WHITE, k), 1, 0);
     }
-    if (cfg_.practice) ui.text("PRACTICE MODE", gfx::W - 20, 15.0f + 101.0f, 32, WHITE, 1, 0);
-    if (cfg_.botplay) ui.text("BOTPLAY", gfx::W - 20, 15.0f + (cfg_.practice ? 133.0f : 101.0f), 32, WHITE, 1, 0);
+    if (cfg_.practice) ui.uiText("PRACTICE MODE", gfx::W - 20, 15.0f + 101.0f, 32, WHITE, 1, 0);
+    if (cfg_.botplay) ui.uiText("BOTPLAY", gfx::W - 20, 15.0f + (cfg_.practice ? 133.0f : 101.0f), 32, WHITE, 1, 0);
     static const char* items[kPauseItems] = {"Resume", "Restart Song", "Options", "Exit to menu"};
     for (int i = 0; i < kPauseItems; ++i) {
         const float target = float(i) - pauseScroll_;
         const float x = 90 + target * 20, y = 320 + target * 156;
         if (y < -100 || y > gfx::H + 40) continue;
         const float al = i == pauseSel_ ? 1.0f : 0.6f;
-        if (ui.alphabet(items[i], x, y, 70, al) < 0) ui.text(items[i], x, y, 64, fade(WHITE, al), -1, 2.0f);
+        if (ui.alphabet(items[i], x, y, 70, al) < 0) ui.uiText(items[i], x, y, 64, fade(WHITE, al), -1, 2.0f);
     }
 }
 

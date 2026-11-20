@@ -72,15 +72,19 @@ public:
 
     void audioCallback(float* out, unsigned frames);  // audio thread
 
+    Mixer();
+
     // Hitsounds that follow the notes (issue #22): each one starts on the
-    // very sample of its note in the song, on a voice of its side that the
-    // next note cuts (a sampler set to cut itself). A fast spam becomes a
-    // tone at the rate of its notes (16 a step at 520 BPM: 554.67 Hz)
-    // instead of a louder pile that crackles, and a hitch of the game does
-    // not move them. side: 0 player, 1 opponent.
+    // very sample of its note in the song. Polyphony modes:
+    //   0: cut self (monophonic per side, fast spam becomes a clean tone)
+    //   1: polyphonic (64 voices per side, simultaneous hits stack)
+    //   2: unlimited (ring-buffer accumulation)
+    // Limiter soft-clips the combined output after hitsounds when enabled.
+    // side: 0 player, 1 opponent.
     void hitAt(double songSec, int side, float volume);
     void clearHits();
     void setHitSound(std::vector<float> mono);  // instead of the game's (or the mod's) hitsound
+    void setHitSoundMode(int polyphony, bool limiter);
 
     // Rendering mode: the device plays nothing and the game mixes the song
     // itself, one video frame at a time; the song clock is then exactly the
@@ -124,12 +128,26 @@ private:
     std::deque<Grain> hits_[2];
     std::shared_ptr<const std::vector<float>> hitPcm_, hitPcmAudio_;
     unsigned hitVersion_ = ~0u;
+    std::atomic<int> hitPolyphony_{0};   // 0 cut-self, 1 polyphonic (64), 2 unlimited
+    std::atomic<bool> hitLimiter_{true}; // soft-clip limiter after hitsounds
+    std::atomic<bool> hitReset_{false};  // clear active hit voices/ring on audio thread
     struct HitVoice {
         double pos = -1, oldPos = -1;  // in the sound; -1 silent
         float vol = 0, oldVol = 0;
         int fade = 0;  // frames left of the cut sound's fade-out
     };
     HitVoice voice_[2];
+    static constexpr int kHitVoices = 64;
+    struct PolyVoice {
+        size_t pos = 0;
+        float vol = 0;
+        bool active = false;
+    };
+    PolyVoice poly_[2][kHitVoices]{};
+    static constexpr size_t kHitRingSize = 65536;  // power of two (~1.48 s at 44.1 kHz)
+    std::vector<float> hitRing_;
+    size_t ringPos_ = 0;
+    size_t ringRemaining_ = 0;
     std::vector<Grain> due_[2];  // this buffer's (audio thread)
     // Mixes `frames` frames from `pos` into out (pos moves on); true when a
     // streamed track has not decoded that part yet (silence, pos kept).

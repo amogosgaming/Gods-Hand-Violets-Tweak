@@ -91,6 +91,7 @@ void App::applyVolumes() {
     platform::rememberVolume(effectiveVolume());
     if (!platform::inBackground()) SetMasterVolume(effectiveVolume());
     mixer.setVolume(settings.musicVol);
+    mixer.setHitSoundMode(settings.hitsoundPolyphony, settings.hitsoundLimiter);
     sfxSetVolume(settings.sfxVol);
 }
 
@@ -155,6 +156,7 @@ void App::psychUiForSong(const std::vector<std::string>& modRoots) {
     if (!ui.active() || psychFolderInUse.empty()) return;
     std::string rep;
     if (ui.load(psychFolderInUse, rep, modRoots) > 0) ui.setActive(true);
+    else if (!modRoots.empty() && ui.load(psychFolderInUse, rep) > 0) ui.setActive(true);
     ui.applySounds();
 }
 
@@ -868,7 +870,7 @@ constexpr Color rgb3(int r, int g, int b) { return Color{(unsigned char)r, (unsi
 // The menus' backdrop, retro: a night sky of twinkling stars over a striped
 // sun, a grid floor running at you on the beat, and glassy cubes turning in
 // the air, mirrored in the floor. tintHex colours the whole scene.
-void drawMenuBackground(double now, unsigned tintHex, float pulse) {
+static void drawMenuBackgroundScene(double now, unsigned tintHex, float pulse) {
     const Color tint = gfx::rgb(tintHex);
     const float t = float(now);
     constexpr float kHorizon = 468.0f;
@@ -929,6 +931,35 @@ void drawMenuBackground(double now, unsigned tintHex, float pulse) {
         gfx::cube({x, y}, size, ax, ay, c, 0.22f, true, kHorizon + 8.0f);
         gfx::cube({x, y}, size, ax, ay, c, 0.85f, false, kHorizon);
     }
+}
+
+void drawMenuBackground(double now, unsigned tintHex, float pulse, bool allowBlur) {
+    auto sceneDraw = [&] { drawMenuBackgroundScene(now, tintHex, pulse); };
+    if (allowBlur && app().settings.menuBlur && app().settings.shaders) gfx::drawBlurred(sceneDraw, 2.8f);
+    else sceneDraw();
+}
+
+void drawPsychMenuBackground(int variant, Color tint, float scrollY, bool allowBlur, double now, unsigned fallbackHex, float pulse) {
+    const PsychUi& ui = psychUi();
+    auto drawBg = [&] {
+        if (ui.drawMenuBg(variant, tint, scrollY, 1.12f)) return;
+        // Fallback when no Psych menuBG/menuDesat PNG is installed: a clean
+        // Psych-style tinted backdrop with subtle scrolling diagonal bands.
+        const Color base = variant == 0 ? Color{253, 232, 113, 255}
+                                        : (variant == 3 ? Color{234, 113, 253, 255}
+                                                        : (variant == 2 ? Color{85, 130, 240, 255} : tint));
+        const Color top = gfx::mix(base, WHITE, 0.18f);
+        const Color bot = gfx::mix(base, Color{20, 14, 34, 255}, 0.35f);
+        gfx::gradientRect({-20, -20, gfx::W + 40, gfx::H + 40}, top, bot);
+        const float shift = std::fmod(scrollY * 0.6f + float(now) * 14.0f, 96.0f);
+        for (int i = -2; i < 20; ++i) {
+            const float x = float(i) * 96.0f - shift;
+            DrawLineEx({x, -20}, {x - 240.0f, gfx::H + 20}, 30.0f, gfx::fade(WHITE, 0.06f + 0.03f * pulse));
+        }
+        (void)fallbackHex;
+    };
+    if (allowBlur && app().settings.menuBlur && app().settings.shaders) gfx::drawBlurred(drawBg, 2.8f);
+    else drawBg();
 }
 
 }  // namespace gh

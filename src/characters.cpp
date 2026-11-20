@@ -62,9 +62,9 @@ Color charColor(CharId id) {
 }
 
 void CharacterState::sing(int dir, double now, double holdSec) {
+    if (singDir != dir || now - singStart >= 0.045) singStart = now;
     singDir = dir;
-    singStart = now;
-    singUntil = now + std::max(0.32, holdSec + 0.18);
+    singUntil = std::max(singUntil, now + std::max(0.32, holdSec + 0.18));
     missUntil = -10;
 }
 void CharacterState::miss(int dir, double now) {
@@ -74,7 +74,7 @@ void CharacterState::miss(int dir, double now) {
     missUntil = now + 0.35;
 }
 void CharacterState::beat(double now) {
-    if (now > singUntil) beatAt = now;
+    if (now > singUntil && now - beatAt >= 0.12) beatAt = now;
 }
 
 namespace {

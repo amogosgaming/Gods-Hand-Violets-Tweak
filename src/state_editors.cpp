@@ -37,6 +37,7 @@
 #include "lua_host.hpp"
 #include "process.hpp"
 #include "psych.hpp"
+#include "psych_ui.hpp"
 #include "raylib.h"
 #include "scene.hpp"
 #include "scene_draw.hpp"
@@ -1029,7 +1030,38 @@ public:
     }
     void draw() override {
         App& a = app();
+        const bool psychStyle = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
+        if (psychStyle) {
+            drawPsychMenuBackground(1, Color{53, 53, 53, 255}, 0.0f, false, a.now, 0x353535, menuPulse());
+            static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",
+                                                "Chart Converter"};
+            static const char* about[kItems] = {"A song of this mod (the one chosen in Freeplay if it is here)",
+                                                "Animations, offsets, image, icon and colours of a character",
+                                                "Zoom, where the characters stand and what the camera sees",
+                                                "New events for charts: a description and a Lua script",
+                                                "The mod's Lua and HScript scripts and its shaders",
+                                                "The mod's charts to binary .ghc files: much smaller, loaded faster"};
+            for (int i = 0; i < kItems; ++i) {
+                const bool on = i == sel_;
+                const float y = 110.0f + float(i) * 82.0f;
+                const float al = on ? 1.0f : 0.55f;
+                if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y, on ? 56.0f : 44.0f, al) < 0)
+                    ui.uiText(items[i], gfx::W * 0.5f, y + 6, on ? 46.0f : 38.0f, fade(WHITE, al), 0, 2.0f);
+            }
+            const ModChoice m = currentMod();
+            DrawRectangleRec({0, gfx::H - 134, gfx::W, 94}, Color{0, 0, 0, 170});
+            ui.uiText(about[sel_], gfx::W * 0.5f, gfx::H - 124, 18, WHITE, 0, 1.0f);
+            ui.uiText("<  Current Mod Directory: " + modLabel(m) + "  >", gfx::W * 0.5f, gfx::H - 92, 22, kGold, 0, 1.25f);
+            ui.uiText("Saves into: " + m.roots[0], gfx::W * 0.5f, gfx::H - 64, 15, fade(WHITE, 0.72f), 0, 1.0f);
+            if (!a.touchMode) {
+                DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 195});
+                ui.uiText("UP/DOWN choose   LEFT/RIGHT mod   ENTER open   ESC back", gfx::W / 2, gfx::H - 31, 18, WHITE, 0, 1.0f);
+            }
+            gfx::endCanvas();
+            return;
+        }
         drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
         gfx::text(FontId::Title, "EDITORS", gfx::W / 2, 60, 64, kGold, Align::Center, 2.0f);
         static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",

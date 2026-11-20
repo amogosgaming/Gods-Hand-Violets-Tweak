@@ -71,9 +71,12 @@ static void streamCallback(void* buffer, unsigned int frames) {
     else std::memset(buffer, 0, size_t(frames) * 2 * sizeof(float));
 }
 
+Mixer::Mixer() : hitRing_(kHitRingSize, 0.0f) {}
+
 bool Mixer::init() {
     due_[0].reserve(16384);
     due_[1].reserve(16384);
+    if (hitRing_.size() != kHitRingSize) hitRing_.assign(kHitRingSize, 0.0f);
     g_mixer = this;
     startAudioDecoders();
     for (auto& v : trackVol_) v.store(1.0f);
@@ -350,6 +353,13 @@ void Mixer::scope(float* out, size_t n, size_t behind) const {
     }
 }
 
+void Mixer::setHitSoundMode(int polyphony, bool limiter) {
+    const int p = clampv(polyphony, 0, 2);
+    if (hitPolyphony_.exchange(p, std::memory_order_relaxed) != p)
+        hitReset_.store(true, std::memory_order_release);
+    hitLimiter_.store(limiter, std::memory_order_relaxed);
+}
+
 void Mixer::hitAt(double songSec, int side, float volume) {
     side = side ? 1 : 0;
     if (volume <= 0) return;
@@ -359,14 +369,25 @@ void Mixer::hitAt(double songSec, int side, float volume) {
         hitPcm_ = std::make_shared<const std::vector<float>>(sfxSamples(Sfx::Hit));
     }
     const double at = songSec * kRate;
+    const bool poly = hitPolyphony_.load(std::memory_order_relaxed) > 0;
     std::deque<Grain>& q = hits_[side];
-    // In order of time; one per sample at most (a note on the same sample
-    // as the last one would only cut it at once).
+    // In order of time. In cut-self mode, one grain per sample at most (a note
+    // on the same sample would only cut it at once). In polyphonic/unlimited
+    // modes, notes on the exact same sample accumulate their amplitude so they
+    // stack and get louder without wasting extra voices.
     if (!q.empty() && at < q.back().at) {
-        auto it = std::upper_bound(q.begin(), q.end(), at, [](double v, const Grain& g) { return v < g.at; });
-        q.insert(it, Grain{at, volume});
+        auto it = std::lower_bound(q.begin(), q.end(), at, [](const Grain& g, double v) { return g.at < v; });
+        if (poly && it != q.end() && std::fabs(it->at - at) < 1.0) {
+            it->vol += volume;
+        } else if (poly && it != q.begin() && std::fabs(std::prev(it)->at - at) < 1.0) {
+            std::prev(it)->vol += volume;
+        } else {
+            q.insert(it, Grain{at, volume});
+        }
     } else if (q.empty() || at - q.back().at >= 1.0) {
         q.push_back(Grain{at, volume});
+    } else if (poly) {
+        q.back().vol += volume;
     }
     if (q.size() > 200000) q.pop_front();  // never a backlog without end
 }
@@ -381,11 +402,21 @@ void Mixer::clearHits() {
     std::lock_guard<std::mutex> lk(hitMtx_);
     hits_[0].clear();
     hits_[1].clear();
+    hitReset_.store(true, std::memory_order_release);
 }
 
 void Mixer::mixHits(float* out, unsigned frames, double pos0, double rate) {
     constexpr double kLate = 0.25 * kRate;  // later than this: dropped
     constexpr int kFade = 48;               // the cut sound fades out in ~1 ms
+    if (hitReset_.exchange(false, std::memory_order_acq_rel)) {
+        for (int s = 0; s < 2; ++s) {
+            voice_[s] = HitVoice{};
+            for (PolyVoice& pv : poly_[s]) pv.active = false;
+        }
+        if (ringRemaining_ > 0) std::fill(hitRing_.begin(), hitRing_.end(), 0.0f);
+        ringPos_ = 0;
+        ringRemaining_ = 0;
+    }
     const double end = pos0 + double(frames) * rate;
     due_[0].clear();
     due_[1].clear();
@@ -406,47 +437,138 @@ void Mixer::mixHits(float* out, unsigned frames, double pos0, double rate) {
     const std::vector<float>* pcm = hitPcmAudio_.get();
     if (!pcm || pcm->empty()) return;
     const size_t n = pcm->size();
-    for (int s = 0; s < 2; ++s) {
-        HitVoice& v = voice_[s];
-        const std::vector<Grain>& due = due_[s];
-        if (v.pos < 0 && v.oldPos < 0 && due.empty()) continue;
-        size_t gi = 0;
+    const int mode = hitPolyphony_.load(std::memory_order_relaxed);
+    const bool limiter = hitLimiter_.load(std::memory_order_relaxed);
+    bool mixedAny = false;
+
+    if (mode == 0) {
+        // Monophonic cut-self per side (issue #22).
+        for (int s = 0; s < 2; ++s) {
+            HitVoice& v = voice_[s];
+            const std::vector<Grain>& due = due_[s];
+            if (v.pos < 0 && v.oldPos < 0 && due.empty()) continue;
+            mixedAny = true;
+            size_t gi = 0;
+            for (unsigned f = 0; f < frames; ++f) {
+                const double t = pos0 + double(f) * rate;
+                bool started = false;
+                float vol = 0;
+                while (gi < due.size() && due[gi].at < t + rate) {  // the last one starting here wins
+                    vol = due[gi].vol;
+                    started = true;
+                    ++gi;
+                }
+                if (started) {
+                    if (v.pos >= 0) {  // cut: the sound playing fades out under the new one
+                        v.oldPos = v.pos;
+                        v.oldVol = v.vol;
+                        v.fade = kFade;
+                    }
+                    v.pos = 0;
+                    v.vol = vol;
+                }
+                float smp = 0;
+                if (v.pos >= 0) {
+                    const size_t i = size_t(v.pos);
+                    if (i < n) {
+                        smp += (*pcm)[i] * v.vol;
+                        v.pos += 1;
+                    } else {
+                        v.pos = -1;
+                    }
+                }
+                if (v.oldPos >= 0 && v.fade > 0) {
+                    const size_t i = size_t(v.oldPos);
+                    if (i < n) smp += (*pcm)[i] * v.oldVol * float(v.fade) / float(kFade);
+                    v.oldPos += 1;
+                    if (--v.fade == 0 || i >= n) v.oldPos = -1;
+                }
+                out[2 * f] += smp;
+                out[2 * f + 1] += smp;
+            }
+        }
+    } else if (mode == 1) {
+        // Polyphonic: up to kHitVoices simultaneous hits per side, additive.
+        for (int s = 0; s < 2; ++s) {
+            const std::vector<Grain>& due = due_[s];
+            bool anyActive = !due.empty();
+            for (int k = 0; !anyActive && k < kHitVoices; ++k) anyActive = poly_[s][k].active;
+            if (!anyActive) continue;
+            mixedAny = true;
+            size_t gi = 0;
+            for (unsigned f = 0; f < frames; ++f) {
+                const double t = pos0 + double(f) * rate;
+                float startVol = 0;
+                while (gi < due.size() && due[gi].at < t + rate) {
+                    startVol += due[gi].vol;
+                    ++gi;
+                }
+                if (startVol > 0) {
+                    int slot = -1;
+                    size_t oldestPos = 0;
+                    int oldestIdx = 0;
+                    for (int k = 0; k < kHitVoices; ++k) {
+                        if (!poly_[s][k].active) { slot = k; break; }
+                        if (poly_[s][k].pos >= oldestPos) { oldestPos = poly_[s][k].pos; oldestIdx = k; }
+                    }
+                    if (slot < 0) slot = oldestIdx;
+                    poly_[s][slot] = PolyVoice{0, startVol, true};
+                }
+                float smp = 0;
+                for (int k = 0; k < kHitVoices; ++k) {
+                    PolyVoice& pv = poly_[s][k];
+                    if (!pv.active) continue;
+                    if (pv.pos < n) {
+                        smp += (*pcm)[pv.pos++] * pv.vol;
+                    } else {
+                        pv.active = false;
+                    }
+                }
+                out[2 * f] += smp;
+                out[2 * f + 1] += smp;
+            }
+        }
+    } else {
+        // Unlimited polyphony via pre-allocated circular accumulation buffer.
+        constexpr size_t kMask = kHitRingSize - 1;
+        const size_t maxStamp = kHitRingSize > frames + 1 ? std::min(n, kHitRingSize - frames - 1) : 0;
+        for (int s = 0; s < 2; ++s) {
+            const std::vector<Grain>& due = due_[s];
+            if (due.empty() || maxStamp == 0) continue;
+            size_t gi = 0;
+            for (unsigned f = 0; f < frames; ++f) {
+                const double t = pos0 + double(f) * rate;
+                float startVol = 0;
+                while (gi < due.size() && due[gi].at < t + rate) {
+                    startVol += due[gi].vol;
+                    ++gi;
+                }
+                if (startVol > 0) {
+                    const size_t base = ringPos_ + f;
+                    for (size_t i = 0; i < maxStamp; ++i)
+                        hitRing_[(base + i) & kMask] += (*pcm)[i] * startVol;
+                    ringRemaining_ = std::max(ringRemaining_, size_t(f) + maxStamp);
+                }
+            }
+        }
+        if (ringRemaining_ > 0) {
+            mixedAny = true;
+            for (unsigned f = 0; f < frames; ++f) {
+                const size_t idx = (ringPos_ + f) & kMask;
+                const float smp = hitRing_[idx];
+                hitRing_[idx] = 0.0f;
+                out[2 * f] += smp;
+                out[2 * f + 1] += smp;
+            }
+            ringPos_ = (ringPos_ + frames) & kMask;
+            ringRemaining_ = ringRemaining_ > frames ? ringRemaining_ - frames : 0;
+        }
+    }
+
+    if (mixedAny && limiter) {
         for (unsigned f = 0; f < frames; ++f) {
-            const double t = pos0 + double(f) * rate;
-            bool started = false;
-            float vol = 0;
-            while (gi < due.size() && due[gi].at < t + rate) {  // the last one starting here wins
-                vol = due[gi].vol;
-                started = true;
-                ++gi;
-            }
-            if (started) {
-                if (v.pos >= 0) {  // cut: the sound playing fades out under the new one
-                    v.oldPos = v.pos;
-                    v.oldVol = v.vol;
-                    v.fade = kFade;
-                }
-                v.pos = 0;
-                v.vol = vol;
-            }
-            float smp = 0;
-            if (v.pos >= 0) {
-                const size_t i = size_t(v.pos);
-                if (i < n) {
-                    smp += (*pcm)[i] * v.vol;
-                    v.pos += 1;
-                } else {
-                    v.pos = -1;
-                }
-            }
-            if (v.oldPos >= 0 && v.fade > 0) {
-                const size_t i = size_t(v.oldPos);
-                if (i < n) smp += (*pcm)[i] * v.oldVol * float(v.fade) / float(kFade);
-                v.oldPos += 1;
-                if (--v.fade == 0 || i >= n) v.oldPos = -1;
-            }
-            out[2 * f] += smp;
-            out[2 * f + 1] += smp;
+            out[2 * f] = softClip(out[2 * f]);
+            out[2 * f + 1] = softClip(out[2 * f + 1]);
         }
     }
 }

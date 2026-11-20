@@ -119,6 +119,8 @@ private:
     Vector2 strumCenter(int side, int lane) const;
     scene::Strum& strum(int side, int lane);
     const scene::Strum& strum(int side, int lane) const;
+    double strumConfirmDuration() const;
+    void setStrumState(int side, int lane, int state, double resetSec = 0.0);
     void drawMine(Vector2 c, float size, float alpha, float rot);
     void drawLanes();
     void adaptNoteGap();  // Note detail "Adaptive": see noteGap_
@@ -170,7 +172,7 @@ private:
     void updateStatGlobals();
     void psychUpdate(double dt);
     void psychDraw();
-    void psychNoteHit(const GameEvent& ev, bool opponent);
+    void psychNoteHit(const GameEvent& ev, bool opponent, bool playPose = true);
     void psychMiss(const GameEvent& ev, bool ghost);
     void psychBeat(int b);
     void psychFocus(int side);
@@ -260,7 +262,13 @@ private:
     void findGfSections();
     float camZoom_ = 1, hudZoom_ = 1, beatPulse_ = 0, minePulse_ = 0, healthShown_ = 1;
     Vector2 camFocus_{640, 370};
-    float confirm_[2][kMaxKeys] = {};
+    struct StrumAnim {
+        int state = 0;         // 0 static, 1 pressed, 2 confirm
+        double startedAt = 0;
+        double resetTimer = 0;  // > 0: auto-return to static when <= 0
+    };
+    StrumAnim strumAnim_[2][kMaxKeys]{};
+    unsigned chordTie_ = 0;  // rotates tie-breaking on exact-timestamp chords
     int heldCount_[kMaxKeys] = {};
     std::vector<int> keyLane_ = std::vector<int>(Input::kMaxCodes, -1);
     std::vector<Popup> popups_;

@@ -79,6 +79,10 @@ bool Settings::load(const std::string& path) {
         else if (k == "luaErrors") luaErrors = clampv(int(d), 0, 2);
         else if (k == "luaWarnings") luaWarnings = clampv(int(d), 0, 2);
         else if (k == "psychUi") psychUi = b;
+        else if (k == "psychMenus") psychMenus = b;
+        else if (k == "menuBlur") menuBlur = b;
+        else if (k == "hitsoundPolyphony") hitsoundPolyphony = clampv(int(d), 0, 2);
+        else if (k == "hitsoundLimiter") hitsoundLimiter = b;
         else if (k == "hitPopups") hitPopups = b;
         else if (k == "timeBar") timeBar = clampv(int(d), 0, 3);
         else if (k == "healthBarAlpha") healthBarAlpha = clampv(float(d), 0.0f, 1.0f);
@@ -173,7 +177,10 @@ bool Settings::save(const std::string& path) const {
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
       << "\nhitsoundVol=" << hitsoundVol << "\nmuted=" << muted << "\nmodRate=" << modRate << "\nmodBotplay=" << modBotplay << "\nmodPractice=" << modPractice
       << "\nmodMirror=" << modMirror << "\nmodScrollType=" << modScrollType << "\nmodScrollValue=" << modScrollValue
-      << "\nfreeplaySong=" << freeplaySong << "\nfreeplayDiff=" << freeplayDiff << "\npsychUi=" << psychUi << "\npsychFolder=" << psychFolder << "\n";
+      << "\nfreeplaySong=" << freeplaySong << "\nfreeplayDiff=" << freeplayDiff << "\npsychUi=" << psychUi
+      << "\npsychMenus=" << psychMenus << "\nmenuBlur=" << menuBlur
+      << "\nhitsoundPolyphony=" << hitsoundPolyphony << "\nhitsoundLimiter=" << hitsoundLimiter
+      << "\npsychFolder=" << psychFolder << "\n";
     return bool(f);
 }
 

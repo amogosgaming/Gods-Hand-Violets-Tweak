@@ -646,7 +646,7 @@ void Character::updateChar(double dt, double stepMs, bool playerHolding) {
     const bool singing = an.rfind("sing", 0) == 0;
     if (singing) holdTimer += dt;
     else if (isPlayer) holdTimer = 0;
-    const double limit = stepMs * 0.0011 * singDuration;
+    const double limit = std::max(0.15, stepMs * 0.0011 * singDuration);
     if (singing && holdTimer >= limit) {
         const bool missAnim = an.size() >= 4 && an.compare(an.size() - 4, 4, "miss") == 0;
         if (!isPlayer || (!playerHolding && !missAnim)) {

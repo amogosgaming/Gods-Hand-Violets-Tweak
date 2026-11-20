@@ -336,6 +336,69 @@ void testHitsounds() {
     ACHECK(std::all_of(after.begin(), after.end(), [](float x) { return x == 0; }));
 }
 
+// Hitsound polyphony & limiter (issue #34): multiple hits on the same tick stack
+// in polyphonic and unlimited modes, and the limiter soft-clips peaks below 1.0.
+void testHitsoundPolyphony() {
+    Mixer m;
+    m.setOffline(true);
+    auto silent = std::make_shared<Pcm>();
+    silent->channels = 2;
+    silent->data.assign(size_t(2) * 44100 * 2, 0);
+    m.setTracks(silent, nullptr, nullptr);
+
+    auto makeClick = [](float amp) {
+        std::vector<float> c(200);
+        for (size_t i = 0; i < c.size(); ++i)
+            c[i] = float(amp * std::sin(2 * 3.14159265358979 * 2000.0 * double(i + 1) / 44100.0) * std::exp(-double(i) / 70.0));
+        return c;
+    };
+    auto renderPeak = [&]() {
+        std::vector<float> out(size_t(44100) * 2);
+        for (size_t at = 0; at < out.size() / 2; at += 512) {
+            const unsigned n = unsigned(std::min<size_t>(512, out.size() / 2 - at));
+            m.mixOffline(out.data() + at * 2, n);
+        }
+        float top = 0;
+        for (size_t i = 0; i < out.size(); i += 2) top = std::max(top, std::fabs(out[i]));
+        return top;
+    };
+
+    // Polyphonic (64-voice), limiter OFF: 4 simultaneous hits stack to ~4x.
+    m.setHitSound(makeClick(0.15f));
+    m.setHitSoundMode(1, false);
+    m.play(0);
+    m.hitAt(0.25, 0, 1.0f);
+    const float peak1 = renderPeak();
+    ACHECK(peak1 > 0.05f);
+
+    m.play(0);
+    for (int i = 0; i < 4; ++i) m.hitAt(0.25, i, 1.0f);
+    const float peak4 = renderPeak();
+    ACHECK(std::fabs(peak4 - peak1 * 4.0f) < peak1 * 0.1f);
+
+    // Polyphonic (64-voice), limiter ON: 8 loud hits stay below 1.0 while louder than 1 hit.
+    m.setHitSound(makeClick(0.45f));
+    m.setHitSoundMode(1, true);
+    m.play(0);
+    m.hitAt(0.25, 0, 1.0f);
+    const float loud1 = renderPeak();
+    m.play(0);
+    for (int i = 0; i < 8; ++i) m.hitAt(0.25, i, 1.0f);
+    const float loud8 = renderPeak();
+    ACHECK(loud8 > loud1 && loud8 <= 1.0f);
+
+    // Unlimited polyphony (ring buffer), limiter OFF: 80 simultaneous hits stack past 64 voices.
+    m.setHitSound(makeClick(0.05f));
+    m.setHitSoundMode(2, false);
+    m.play(0);
+    m.hitAt(0.25, 0, 1.0f);
+    const float small1 = renderPeak();
+    m.play(0);
+    for (int i = 0; i < 80; ++i) m.hitAt(0.25, i % 4, 1.0f);
+    const float small80 = renderPeak();
+    ACHECK(small80 > small1 * 75.0f && small80 < small1 * 85.0f);
+}
+
 void runAudioTests() {
     const fs::path dir = fs::temp_directory_path() / "gh_audio_tests";
     std::error_code ec;
@@ -350,6 +413,7 @@ void runAudioTests() {
     testNotAudio(d);
     testRenderMode(d);
     testHitsounds();
+    testHitsoundPolyphony();
     stopAudioDecoders();
     ACHECK(liveAudioDecoders() == 0);
     fs::remove_all(dir, ec);

@@ -723,7 +723,7 @@ void PlayState::psychUpdate(double dt) {
     bool holding = false;
     for (int l = 0; l < chart_.keys; ++l)
         holding |= heldCount_[l] > 0 || (session_.botplay() && session_.isHolding(1, l));
-    sc.update(dt, chart_.stepMs(std::max(0.0, songMs_)), holding);
+    sc.update(dt, chart_.stepMs(std::max(0.0, songMs_)) / std::max(0.25, rate_), holding);
     if (zoomEventBoost_ && std::none_of(sc.tweens.begin(), sc.tweens.end(),
                                         [](const scene::Tween& t) { return t.tag == "__camZoomEvent"; })) {
         sc.camZoomingDecay = 1;
@@ -743,7 +743,7 @@ void PlayState::psychUpdate(double dt) {
 
 void PlayState::psychHoldRefresh() {
     const double now = app().now;
-    const double stepSec = chart_.stepMs(std::max(0.0, songMs_)) / 1000.0 / rate_;
+    const double stepSec = std::max(0.08, chart_.stepMs(std::max(0.0, songMs_)) / 1000.0 / std::max(0.25, rate_));
     for (int side = 0; side < 2; ++side)
         for (int l = 0; l < chart_.keys; ++l) {
             const long long h = session_.activeHold(side, l);
@@ -755,7 +755,8 @@ void PlayState::psychHoldRefresh() {
             if (ch && !(n.flags & kFlagNoAnim)) {
                 std::string anim = singAnim(side, l, n.flags);
                 if ((n.flags & kFlagAlt) && !ch->builtin && !ch->hasAnim(anim)) anim = singAnim(side, l, 0);
-                ch->playAnim(anim, true);
+                const bool rapidSame = ch->lastAnim == anim && ch->now - ch->lastAnimAt < 0.045;
+                if (!rapidSame) ch->playAnim(anim, true);
                 ch->holdTimer = 0;
             }
             const char* fn = side == 1 ? "goodNoteHit" : "opponentNoteHit";
@@ -764,14 +765,15 @@ void PlayState::psychHoldRefresh() {
         }
 }
 
-void PlayState::psychNoteHit(const GameEvent& ev, bool opponent) {
+void PlayState::psychNoteHit(const GameEvent& ev, bool opponent, bool playPose) {
     scene::Scene& sc = *scene_;
     const int side = opponent ? 0 : 1;
     Character* ch = (ev.flags & kFlagGF) && sc.gf ? sc.gf.get() : charForSide(side);
-    if (ch && !(ev.flags & kFlagNoAnim)) {
+    if (playPose && ch && !(ev.flags & kFlagNoAnim)) {
         std::string anim = singAnim(side, ev.lane, ev.flags);
         if ((ev.flags & kFlagAlt) && !ch->builtin && !ch->hasAnim(anim)) anim = singAnim(side, ev.lane, 0);
-        ch->playAnim(anim, true);
+        const bool rapidSame = ch->lastAnim == anim && ch->now - ch->lastAnimAt < 0.045;
+        if (!rapidSame) ch->playAnim(anim, true);
         ch->holdTimer = 0;
         if (ev.flags & kFlagHey) {
             const char* chk = ch == sc.gf.get() ? "cheer" : "hey";
@@ -837,7 +839,8 @@ void PlayState::psychBeat(int b) {
         if (!c) continue;
         const int every = c == sc.gf.get() ? std::max(1, int(std::lround(sc.gfSpeed * c->danceEvery))) : std::max(1, c->danceEvery);
         const std::string an = c->builtin ? c->lastAnim : c->curAnimName();
-        if (((b % every) + every) % every == 0 && an.rfind("sing", 0) != 0 && !c->stunned) c->dance();
+        if (((b % every) + every) % every == 0 && an.rfind("sing", 0) != 0 && !c->stunned && (c->now - c->lastDanceAt >= 0.12))
+            c->dance();
     }
     if (b >= 0 && bopEvery_ > 0 && std::fmod(double(b), bopEvery_) == 0 && sc.camZooming && sc.camGame.zoom < 1.35f &&
         a.settings.camZoom) {

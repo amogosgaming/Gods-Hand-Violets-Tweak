@@ -5,6 +5,7 @@
 // particles and a few shape primitives that are robust to vertex order.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,6 +37,9 @@ int targetWidth();   // pixels of what is drawn into now (window or frame target
 int targetHeight();
 void beginCanvas(float zoom = 1.0f, Vector2 focus = {W / 2, H / 2}, float rotationDeg = 0.0f);
 void endCanvas();
+// Draws a full-canvas scene blurred via a 2-pass half-res Gaussian filter.
+// Must be called while inside beginCanvas(); restores beginCanvas() on return.
+void drawBlurred(const std::function<void()>& drawScene, float radius = 2.6f);
 void drawLetterbox();
 // The part of the canvas shown in the window: x from 0 to viewWidth(), like
 // Flixel's FlxG.width (a script can narrow it to 960 for a 4:3 picture).

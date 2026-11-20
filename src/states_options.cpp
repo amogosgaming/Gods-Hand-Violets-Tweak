@@ -142,6 +142,9 @@ public:
              nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
             {Row::Bool, "Psych Engine interface", "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds, from your own copy.",
              &s.psychUi},
+            {Row::Bool, "Psych Engine menus", "Apply the Psych Engine look to the title, main menu, freeplay, options and other menus too.",
+             &s.psychMenus},
+            {Row::Bool, "Menu background blur", "Blur the background on the main menu and Freeplay.", &s.menuBlur},
             {Row::Bool, "Hit popups", "Rating pictures and combo numbers that pop up on each hit.", &s.hitPopups},
             {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
              {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
@@ -187,8 +190,11 @@ public:
             {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
             {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
             {Row::Number, "Sound effects", "", nullptr, &s.sfxVol, 0, 1, 0.05f},
-            {Row::Number, "Hit sounds", "A tick on every note you hit, on the note's own sample of the song: a fast spam becomes a "
-             "tone at the rate of its notes instead of a louder, crackling pile.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
+            {Row::Number, "Hit sounds", "A tick on every note you hit, placed on the note's exact sample.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
+            {Row::Choice, "Hitsound polyphony",
+             "Off: each hit cuts the last (clean tone on spam). Polyphonic: up to 64 stacked hits per side. Unlimited: every hit stacks.",
+             nullptr, nullptr, 0, 0, 0, &s.hitsoundPolyphony, {0, 1, 2}, {"Off (cut self)", "Polyphonic", "Unlimited"}},
+            {Row::Bool, "Hitsound limiter", "Soft-clips stacked hitsounds so loud chords do not distort harshly.", &s.hitsoundLimiter},
             {Row::Header, "DEBUG", ""},
             {Row::Choice, "Lua errors", "Errors of mod scripts on screen. Psych shows them only for scripts that set luaDebugMode.",
              nullptr, nullptr, 0, 0, 0, &s.luaErrors, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
@@ -338,22 +344,40 @@ public:
 
     void draw() override {
         App& a = app();
+        const bool psych = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
-        gfx::text(FontId::Title, "OPTIONS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        if (psych) {
+            drawPsychMenuBackground(1, Color{234, 113, 253, 255}, anim_ * 8.0f, false, a.now, 0xEA71FD, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+            if (ui.alphabet("OPTIONS", 56.0f, 16.0f, 52.0f, 1.0f) < 0) ui.uiText("OPTIONS", 56.0f, 18.0f, 44.0f, WHITE, -1, 2.5f);
+        } else {
+            drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
+            gfx::text(FontId::Title, "OPTIONS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        }
         for (int i = 0; i < int(rows_.size()); ++i) {
             const float y = 330 + (float(i) - anim_) * 48;
-            if (y < 80 || y > 640) continue;
+            if (y < 80 || y > 625) continue;
             const Row& r = rows_[size_t(i)];
             const bool on = i == sel_;
             const float alpha = saturate(1.0f - std::fabs(float(i) - anim_) * 0.1f);
             if (r.kind == Row::Header) {
-                gfx::text(FontId::Title, r.label, 140, y + 2, 28, fade(kGold, alpha), Align::Left, 1.5f);
-                DrawRectangleRec({140, y + 38, 1000, 2}, fade(kGold, 0.4f * alpha));
+                if (psych) {
+                    if (ui.alphabet(r.label, 140.0f, y + 4.0f, 30.0f, alpha) < 0)
+                        ui.uiText(r.label, 140.0f, y + 4.0f, 26.0f, fade(kGold, alpha), -1, 2.0f);
+                    DrawRectangleRec({140, y + 40, 1000, 2}, fade(WHITE, 0.35f * alpha));
+                } else {
+                    gfx::text(FontId::Title, r.label, 140, y + 2, 28, fade(kGold, alpha), Align::Left, 1.5f);
+                    DrawRectangleRec({140, y + 38, 1000, 2}, fade(kGold, 0.4f * alpha));
+                }
                 continue;
             }
-            if (on) DrawRectangleRounded({150, y - 4, 980, 44}, 0.3f, 8, Color{255, 214, 120, 40});
-            gfx::text(FontId::Ui, r.label, 180, y, 34, fade(on ? WHITE : kIvory, alpha), Align::Left, 1.5f);
+            if (on) {
+                if (psych) DrawRectangleRec({150, y - 4, 980, 44}, Color{255, 255, 255, 36});
+                else DrawRectangleRounded({150, y - 4, 980, 44}, 0.3f, 8, Color{255, 214, 120, 40});
+            }
+            if (psych) ui.uiText(r.label, 180.0f, y + 4.0f, 26.0f, fade(on ? WHITE : kIvory, alpha), -1, 2.0f);
+            else gfx::text(FontId::Ui, r.label, 180, y, 34, fade(on ? WHITE : kIvory, alpha), Align::Left, 1.5f);
             std::string val;
             switch (r.kind) {
                 case Row::Bool: val = (r.label == "Fullscreen" ? a.settings.fullscreen : *r.b) ? "ON" : "OFF"; break;
@@ -372,24 +396,36 @@ public:
                         const bool hl = on && k == slot_;
                         std::string name = (hl && waiting_) ? "press a key..." : keyName(a.settings.keys4[r.lane][k]);
                         const float x = 820.0f + k * 170.0f;
-                        DrawRectangleRounded({x - 75, y - 2, 150, 40}, 0.3f, 8, hl ? Color{255, 214, 120, 90} : Color{0, 0, 0, 90});
-                        gfx::text(FontId::Ui, name, x, y + 2, 30, fade(hl ? WHITE : kIvory, alpha), Align::Center);
+                        if (psych) {
+                            DrawRectangleRec({x - 75, y - 2, 150, 40}, hl ? Color{255, 255, 255, 70} : Color{0, 0, 0, 125});
+                            ui.uiText(name, x, y + 6.0f, 22.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
+                        } else {
+                            DrawRectangleRounded({x - 75, y - 2, 150, 40}, 0.3f, 8, hl ? Color{255, 214, 120, 90} : Color{0, 0, 0, 90});
+                            gfx::text(FontId::Ui, name, x, y + 2, 30, fade(hl ? WHITE : kIvory, alpha), Align::Center);
+                        }
                     }
                     gfx::drawNote(r.lane, {700, y + 18}, 40, alpha);
                     continue;
                 }
                 default: break;
             }
-            gfx::text(FontId::Ui, (on && r.kind != Row::Action ? "<  " : "") + val + (on && r.kind != Row::Action ? "  >" : ""),
-                      1100, y, 34, fade(on ? kGold : kIvory, alpha), Align::Right, 1.5f);
+            const std::string shownVal = (on && r.kind != Row::Action ? "<  " : "") + val + (on && r.kind != Row::Action ? "  >" : "");
+            if (psych) ui.uiText(shownVal, 1100.0f, y + 4.0f, 26.0f, fade(on ? kGold : WHITE, alpha), 1, 2.0f);
+            else gfx::text(FontId::Ui, shownVal, 1100, y, 34, fade(on ? kGold : kIvory, alpha), Align::Right, 1.5f);
         }
         const Row& r = rows_[size_t(sel_)];
-        DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
-        gfx::text(FontId::Ui, r.help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
+        if (psych) {
+            DrawRectangleRec({60, gfx::H - 96, gfx::W - 120, 52}, Color{0, 0, 0, 185});
+            ui.uiText(r.help, gfx::W * 0.5f, gfx::H - 84.0f, 19.0f, WHITE, 0, 1.5f);
+        } else {
+            DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
+            gfx::text(FontId::Ui, r.help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
+        }
         if (!a.touchMode) {
-            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-            gfx::text(FontId::Ui, "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC save and back", gfx::W / 2, gfx::H - 33,
-                      22, Color{220, 214, 235, 255}, Align::Center);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            const char* hint = "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC save and back";
+            if (psych) ui.uiText(hint, gfx::W * 0.5f, gfx::H - 31.0f, 17.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+            else gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         }
         gfx::endCanvas();
     }
@@ -535,13 +571,23 @@ public:
     void draw() override {
         App& a = app();
         const Settings& s = a.settings;
+        const bool psych = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
-        gfx::text(FontId::Title, "KEY BINDINGS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        if (psych) {
+            drawPsychMenuBackground(1, Color{234, 113, 253, 255}, 0, false, a.now, 0xEA71FD, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+            if (ui.alphabet("KEY BINDINGS", 56.0f, 16.0f, 52.0f, 1.0f) < 0)
+                ui.uiText("KEY BINDINGS", 56.0f, 18.0f, 44.0f, WHITE, -1, 2.5f);
+        } else {
+            drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
+            gfx::text(FontId::Title, "KEY BINDINGS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        }
         const bool top = row_ == 0;
-        DrawRectangleRounded({440, 110, 400, 56}, 0.4f, 8, top ? Color{255, 214, 120, 60} : Color{0, 0, 0, 110});
-        gfx::text(FontId::Title, TextFormat("<   %d KEY%s   >", keys_, keys_ == 1 ? "" : "S"), 640, 116, 38, top ? kGold : kIvory,
-                  Align::Center, 2.0f);
+        DrawRectangleRounded({440, 110, 400, 56}, 0.4f, 8, top ? Color{255, 214, 120, 60} : Color{0, 0, 0, 130});
+        if (psych) ui.uiText(TextFormat("<   %d KEY%s   >", keys_, keys_ == 1 ? "" : "S"), 640.0f, 121.0f, 32.0f, top ? kGold : WHITE, 0, 2.0f);
+        else gfx::text(FontId::Title, TextFormat("<   %d KEY%s   >", keys_, keys_ == 1 ? "" : "S"), 640, 116, 38, top ? kGold : kIvory,
+                       Align::Center, 2.0f);
         const auto lanes = s.laneKeys(keys_);
         const auto defaults = Settings::defaultLaneKeys(keys_);
         const float size = std::min(96.0f, laneStep() * 0.9f);
@@ -650,13 +696,25 @@ public:
     }
     void draw() override {
         App& a = app();
+        const bool psych = a.psychMenusActive();
+        const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5CC8FF, 0);
-        gfx::text(FontId::Title, "CALIBRATE OFFSET", gfx::W / 2, 40, 48, kGold, Align::Center, 2.0f);
-        gfx::text(FontId::Ui,
-                  a.touchMode ? "Tap the screen on every beat you HEAR (not see). Keep going for a few bars."
-                              : "Tap any key on every beat you HEAR (not see). Keep going for a few bars.",
-                  gfx::W / 2, 110, 28, kIvory, Align::Center, 1.5f);
+        if (psych) {
+            drawPsychMenuBackground(1, Color{92, 200, 255, 255}, 0, false, a.now, 0x5CC8FF, 0);
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+            if (ui.alphabetCentered("CALIBRATE OFFSET", gfx::W * 0.5f, 28.0f, 52.0f, 1.0f) < 0)
+                ui.uiText("CALIBRATE OFFSET", gfx::W * 0.5f, 32.0f, 44.0f, WHITE, 0, 2.5f);
+            ui.uiText(a.touchMode ? "Tap the screen on every beat you HEAR (not see). Keep going for a few bars."
+                                  : "Tap any key on every beat you HEAR (not see). Keep going for a few bars.",
+                      gfx::W * 0.5f, 112.0f, 22.0f, WHITE, 0, 1.5f);
+        } else {
+            drawMenuBackground(a.now, 0x5CC8FF, 0);
+            gfx::text(FontId::Title, "CALIBRATE OFFSET", gfx::W / 2, 40, 48, kGold, Align::Center, 2.0f);
+            gfx::text(FontId::Ui,
+                      a.touchMode ? "Tap the screen on every beat you HEAR (not see). Keep going for a few bars."
+                                  : "Tap any key on every beat you HEAR (not see). Keep going for a few bars.",
+                      gfx::W / 2, 110, 28, kIvory, Align::Center, 1.5f);
+        }
         // visual metronome, compensated with the current offset
         const double vis = clock_ - a.settings.offsetMs;
         const double frac = std::fmod(vis / 500.0 + 1000.0, 1.0);
@@ -755,10 +813,18 @@ public:
     void draw() override {
         App& a = app();
         const PsychUi& ui = psychUi();
+        const bool psych = a.psychMenusActive();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.35f));
-        gfx::text(FontId::Title, "NOTE COLORS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        if (psych) {
+            drawPsychMenuBackground(1, Color{234, 113, 253, 255}, 0, false, a.now, 0xEA71FD, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 150});
+            if (ui.alphabet("NOTE COLORS", 56.0f, 16.0f, 52.0f, 1.0f) < 0)
+                ui.uiText("NOTE COLORS", 56.0f, 18.0f, 44.0f, WHITE, -1, 2.5f);
+        } else {
+            drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.35f));
+            gfx::text(FontId::Title, "NOTE COLORS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        }
         static const char* dirs[4] = {"LEFT", "DOWN", "UP", "RIGHT"};
         for (int d = 0; d < 4; ++d) {
             const Rectangle b = noteBox(d);
@@ -900,11 +966,20 @@ public:
     void draw() override {
         App& a = app();
         const PsychUi& ui = psychUi();
+        const bool psych = a.psychMenusActive();
         gfx::beginCanvas();
-        drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.3f));
-        gfx::text(FontId::Title, "NOTE SKIN", 60, 22, 48, kGold, Align::Left, 2.0f);
-        gfx::text(FontId::Ui, TextFormat("%d to choose from", rows()), 64, 82, 22, fade(kIvory, 0.8f), Align::Left, 1.0f);
+        if (psych) {
+            drawPsychMenuBackground(1, Color{234, 113, 253, 255}, 0, false, a.now, 0xEA71FD, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+            if (ui.alphabet("NOTE SKIN", 56.0f, 16.0f, 52.0f, 1.0f) < 0)
+                ui.uiText("NOTE SKIN", 56.0f, 18.0f, 44.0f, WHITE, -1, 2.5f);
+            ui.uiText(TextFormat("%d to choose from", rows()), 64.0f, 82.0f, 18.0f, fade(WHITE, 0.85f), -1, 1.25f);
+        } else {
+            drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
+            DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(BLACK, 0.3f));
+            gfx::text(FontId::Title, "NOTE SKIN", 60, 22, 48, kGold, Align::Left, 2.0f);
+            gfx::text(FontId::Ui, TextFormat("%d to choose from", rows()), 64, 82, 22, fade(kIvory, 0.8f), Align::Left, 1.0f);
+        }
 
         // The names.
         const float top = listTop(), bottom = listBottom(), mid = (top + bottom) * 0.5f - 22;
@@ -936,15 +1011,22 @@ public:
             const Vector2 c{p.x + p.width * 0.5f + (float(dir) - 1.5f) * gap, strumY};
             // The receptor lights up while a note of its lane is being hit.
             float conf = 0;
+            double ageSec = 0.0;
             for (const PreviewNote& n : kPattern) {
                 if (n.lane != dir) continue;
                 const double at = std::fmod(ms - n.t + loop * 4, loop);  // time since this note's last hit
-                const double lit = std::max(n.len, 140.0);
-                if (at < lit) conf = std::max(conf, float(n.len > 0 && at < n.len ? 1.0 : 1.0 - (at - std::max(0.0, n.len)) / 140.0));
+                const double lit = std::max(n.len, 156.0);
+                if (at < lit) {
+                    const float cVal = float(n.len > 0 && at < n.len ? 1.0 : 1.0 - (at - std::max(0.0, n.len)) / 156.0);
+                    if (cVal > conf) {
+                        conf = cVal;
+                        ageSec = at / 1000.0;
+                    }
+                }
             }
             const int state = conf > 0.01f ? 2 : 0;
             if (state) ui.beginDir(dir);  // idle receptors stay grey
-            const bool drawn = ui.strum(dir, c, size, state, alphaAll, 0, a.now);
+            const bool drawn = ui.strum(dir, c, size, state, alphaAll, 0, ageSec);
             if (state) ui.endDir();
             if (!drawn) {
                 if (conf > 0.01f) {

@@ -215,6 +215,7 @@ void Session::update(double songMs) {
     const double dt = lastMs_ > -1e17 ? std::max(0.0, songMs - lastMs_) : 0.0;
     lastMs_ = songMs;
     const double win = cfg_.windows[kSinful] * cfg_.rate;
+    const size_t evStart = events.size();
     for (int lane = 0; lane < keys_; ++lane) {
         // ---- player side
         std::vector<LaneNote>& v = lanes_[1][lane];
@@ -282,6 +283,10 @@ void Session::update(double songMs) {
             o[size_t(oh)].state = kHeldDone;
             oh = -1;
         }
+    }
+    if (events.size() - evStart > 1) {
+        std::stable_sort(events.begin() + std::ptrdiff_t(evStart), events.end(),
+                         [](const GameEvent& a, const GameEvent& b) { return a.time < b.time; });
     }
 }
 

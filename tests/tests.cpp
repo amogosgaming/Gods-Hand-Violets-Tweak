@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include "chart.hpp"
@@ -19,7 +20,9 @@
 #include "composer.hpp"
 #include "json.hpp"
 #include "keys.hpp"
+#include "scene.hpp"
 #include "session.hpp"
+#include "song_scan.hpp"
 #include "spectrum.hpp"
 
 using namespace gh;
@@ -628,6 +631,65 @@ static int benchCharts(int argc, char** argv, int first) {
     return bad == 0 ? 0 : 1;
 }
 
+static void testIssue34Fixes() {
+    // 1. High-BPM character hold timer floor: at 1000 BPM (stepMs = 15 ms), a sing
+    // pose must remain visible for at least 0.15 s instead of flickering to idle.
+    scene::Character ch;
+    scene::Anim idle;
+    idle.name = "idle";
+    idle.frames = {0};
+    scene::Anim singL;
+    singL.name = "singLEFT";
+    singL.frames = {1};
+    ch.addAnim(idle);
+    ch.addAnim(singL);
+    ch.singDuration = 4.0;
+    ch.playAnim("singLEFT", true);
+    ch.updateChar(0.10, 15.0, false);
+    CHECK(ch.curAnimName() == "singLEFT");
+    ch.updateChar(0.10, 15.0, false);
+    CHECK(ch.curAnimName() == "idle");
+
+    // 2. High-NPS Session::update emits events sorted chronologically so character
+    // poses resolve in true note order rather than lane-sweep order.
+    Chart c;
+    c.keys = 4;
+    for (int i = 0; i < 8; ++i) {
+        Note n;
+        n.time = 500.0 + double(i) * 2.0;
+        n.lane = uint8_t((3 - (i % 4)) & 3);
+        n.side = uint8_t(i & 1);
+        c.notes.push_back(n);
+    }
+    c.finalize(120.0);
+    Session s;
+    SessionConfig bot;
+    bot.botplay = true;
+    s.init(c, bot);
+    s.update(525.0);
+    CHECK(s.events.size() == 8);
+    bool sorted = true;
+    for (size_t i = 1; i < s.events.size(); ++i)
+        if (s.events[i - 1].time > s.events[i].time) sorted = false;
+    CHECK(sorted);
+
+    // 3. Freeplay scanner peeks the opponent (player2) from the song's chart file.
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "gh_issue34_scan_test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "pixel-song", ec);
+    if (FILE* f = std::fopen((root / "pixel-song" / "pixel-song-hard.json").string().c_str(), "wb")) {
+        const char* body = R"({"song":{"song":"Pixel Song","bpm":140,"player1":"bf","player2":"bf-pixel","notes":[]}})";
+        std::fwrite(body, 1, std::strlen(body), f);
+        std::fclose(f);
+    }
+    SongScan scan;
+    scanSongsDir(root.string(), scan);
+    CHECK(scan.songs.size() == 1 && scan.songs[0].chartOpponent == "bf-pixel");
+    fs::remove_all(root, ec);
+}
+
 int main(int argc, char** argv) {
     bool audio = false;
     const char* wav = nullptr;
@@ -671,6 +733,7 @@ int main(int argc, char** argv) {
     testSpectrum();
     testVSlice();
     testSession();
+    testIssue34Fixes();
     runPsychTests();
     runScanTests();
 #ifdef GH_AUDIO_TESTS

@@ -59,7 +59,11 @@ struct Settings {
     // that set luaDebugMode (as in Psych), 2 never.
     int luaErrors = 0;
     int luaWarnings = 1;
-    bool psychUi = false;      // "Psych Engine" interface (needs psychFolder)
+    bool psychUi = true;       // "Psych Engine" interface (needs psychFolder)
+    bool psychMenus = true;    // apply Psych Engine interface to menus as well as gameplay
+    bool menuBlur = false;     // blur the main menu and freeplay background
+    int hitsoundPolyphony = 1; // 0 off (cut self), 1 polyphonic (64 voices), 2 unlimited
+    bool hitsoundLimiter = true; // soft-clip limiter after hitsounds
     bool hitPopups = true;     // rating pictures and combo numbers on each hit
     int timeBar = 0;           // 0 time left, 1 time elapsed, 2 song name, 3 off (as in Psych)
     float healthBarAlpha = 1.0f;

@@ -90,13 +90,23 @@ public:
     // -1, right edge: 1), `size` as FlxText's (Flash's em size, not raylib's
     // line height). False without the font.
     bool text(const std::string& s, float x, float y, float size, Color c, int align = 0, float border = 1.25f) const;
+    // Always draws text: vcr.ttf when available, else the engine UI font with a black outline.
+    void uiText(const std::string& s, float x, float y, float size, Color c, int align = 0, float border = 1.25f) const;
     float textWidth(const std::string& s, float size) const;  // as text() draws it
     float lineHeight(float size) const;                       // a FlxText line (OpenFL's ascent + descent)
     // Alphabet's bold letters (images/alphabet.png), the pause menu's font;
     // `height` is a capital letter's height. Width of the drawn text, or -1
     // without the alphabet.
     float alphabet(const std::string& s, float x, float y, float height, float alpha) const;
+    float alphabetWidth(const std::string& s, float height) const;
+    float alphabetCentered(const std::string& s, float cx, float y, float height, float alpha) const;
     bool hasAlphabet() const { return alphabet_.id != 0; }
+    // Psych menu backgrounds: 0 menuBG (yellow), 1 menuDesat (tinted),
+    // 2 menuBGBlue, 3 menuBGMagenta. Falls back across variants if one is missing.
+    bool hasMenuBg() const { return menuBg_.id != 0 || menuDesat_.id != 0 || menuBgBlue_.id != 0 || menuBgMagenta_.id != 0; }
+    bool drawMenuBg(int variant, Color tint, float scrollY = 0.0f, float scale = 1.1f) const;
+    // Psych main menu button sprites (0 story_mode, 1 freeplay, 2 options, 3 credits).
+    bool drawMainMenuItem(int which, Vector2 center, bool selected, double now, float alpha = 1.0f) const;
     const Font* font() const { return font_.texture.id ? &font_ : nullptr; }
     const std::string& menuMusic() const { return menuMusic_; }
     // The pause menu's song: 0 none, 1 breakfast, 2 tea-time (the other one
@@ -138,6 +148,12 @@ private:
     float fontScale_ = 1.0f, fontAscent_ = 1.0f;
     Texture2D alphabet_{};
     std::vector<std::pair<std::string, Frame>> letters_;  // alphabet frames ("A bold0000"...)
+    Texture2D menuBg_{}, menuDesat_{}, menuBgBlue_{}, menuBgMagenta_{};
+    struct MenuSheet {
+        Texture2D tex{};
+        std::vector<Frame> basic, white;
+    };
+    MenuSheet menuItems_[4]{};  // story_mode, freeplay, options, credits
     const Frame* letter(char c) const;
     const Frame* findLetter(char c) const;
     // letter() for each character, found once: the pause menu draws its
