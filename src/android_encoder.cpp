@@ -104,7 +104,7 @@ namespace {
 
 constexpr int32_t kColorPlanar = 19, kColorSemiPlanar = 21;  // COLOR_FormatYUV420Planar / SemiPlanar
 
-void logLine(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, "GodsHand", "%s", s.c_str()); }
+void logLine(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, "Astralis", "%s", s.c_str()); }
 
 }  // namespace
 

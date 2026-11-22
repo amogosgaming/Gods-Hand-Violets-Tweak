@@ -1,21 +1,22 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
-// God's Hand binary charts (.ghc); see chart_binary.hpp.
+// Astralis binary charts (.ghc); see chart_binary.hpp.
 //
 //   "GHCB" u32 version
+//   [v3+: u32 flags  (bits 0..7 = GhcCompression algo, bits 8..15 = level)]
 //   u64 notes, u64 rawCount, i32 maxData, u32 blockNotes, u32 blocks, u32 types
 //   u64 dataCount[256] (version 1: [64])
 //   types: u32 length + bytes, each
-//   u64 skeleton bytes, u64 packed, packed bytes           (deflate)
-//   u64 ranges, u64 bytes, u64 packed, packed bytes        (varint gaps)
+//   u64 skeleton bytes, u64 packed, packed bytes           (algo)
+//   u64 ranges, u64 bytes, u64 packed, packed bytes        (varint gaps, algo)
 //   blocks: u32 bytes, u32 packed, each; then the packed blocks
 //
 // A block holds five columns, their lengths first (u32 each): times (the
 // change of the gap from the note before, in ns, zigzag varints), lengths
 // (us, zigzag varints), noteData bytes, stack bytes, types (varints; bit 15
 // the alt flag). Version 1 kept the alt flag in bit 7 of noteData (values
-// 0..63 only); it is still read.
+// 0..63 only); versions 1, 2 and 3 are all read.
 #include "chart_binary.hpp"
 
 #include <algorithm>
@@ -37,8 +38,7 @@ namespace gh {
 namespace {
 
 constexpr uint32_t kMagic = 0x42434847u;  // "GHCB"
-constexpr uint32_t kVersion = 2;  // 1 is still read
-constexpr uint32_t kBlockNotes = 1u << 18;  // 262144 notes: enough blocks for every core
+constexpr uint32_t kVersion = 3;          // 1, 2 and 3 are read
 
 void putU32(std::string& o, uint32_t v) {
     for (int i = 0; i < 4; ++i) o += char((v >> (8 * i)) & 0xFF);
@@ -82,7 +82,59 @@ bool readU64(FILE* f, uint64_t& v) {
     return true;
 }
 
-bool pack(const std::string& raw, std::string& out, int level) {
+// PackBits-style byte RLE pre-pass:
+//   ctrl < 128 : literal run of (ctrl + 1) bytes
+//   ctrl >= 128: repeat next byte (ctrl - 128 + 3) times (3..130)
+std::string rleEncode(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(raw.data());
+    const size_t n = raw.size();
+    size_t i = 0;
+    while (i < n) {
+        size_t run = 1;
+        while (i + run < n && p[i + run] == p[i] && run < 130) ++run;
+        if (run >= 3) {
+            out += char(uint8_t(128 + (run - 3)));
+            out += char(p[i]);
+            i += run;
+            continue;
+        }
+        const size_t litStart = i;
+        while (i < n && i - litStart < 128) {
+            size_t ahead = 1;
+            while (i + ahead < n && p[i + ahead] == p[i] && ahead < 3) ++ahead;
+            if (ahead >= 3) break;
+            ++i;
+        }
+        const size_t litLen = i - litStart;
+        out += char(uint8_t(litLen - 1));
+        out.append(raw.data() + litStart, litLen);
+    }
+    return out;
+}
+
+bool rleDecode(const uint8_t* src, size_t n, std::string& out, size_t expectedLen) {
+    out.clear();
+    out.reserve(expectedLen);
+    size_t i = 0;
+    while (i < n) {
+        const uint8_t ctrl = src[i++];
+        if (ctrl < 128) {
+            const size_t len = size_t(ctrl) + 1;
+            if (i + len > n || out.size() + len > expectedLen) return false;
+            out.append(reinterpret_cast<const char*>(src + i), len);
+            i += len;
+        } else {
+            const size_t len = size_t(ctrl - 128) + 3;
+            if (i >= n || out.size() + len > expectedLen) return false;
+            out.append(len, char(src[i++]));
+        }
+    }
+    return out.size() == expectedLen;
+}
+
+bool deflatePack(const std::string& raw, std::string& out, int level) {
     mz_ulong n = mz_compressBound(mz_ulong(raw.size()));
     out.resize(size_t(n));
     if (mz_compress2(reinterpret_cast<unsigned char*>(out.data()), &n, reinterpret_cast<const unsigned char*>(raw.data()),
@@ -91,11 +143,55 @@ bool pack(const std::string& raw, std::string& out, int level) {
     out.resize(size_t(n));
     return true;
 }
-bool unpack(const uint8_t* src, size_t n, std::string& out, size_t rawLen) {
+
+bool deflateUnpack(const uint8_t* src, size_t n, std::string& out, size_t rawLen) {
     out.resize(rawLen);
     if (rawLen == 0) return true;
     mz_ulong m = mz_ulong(rawLen);
     return mz_uncompress(reinterpret_cast<unsigned char*>(out.data()), &m, src, mz_ulong(n)) == MZ_OK && size_t(m) == rawLen;
+}
+
+bool pack(const std::string& raw, std::string& out, GhcCompression algo, int level) {
+    if (algo == GhcCompression::None) {
+        out = raw;
+        return true;
+    }
+    if (algo == GhcCompression::RleDeflate) {
+        if (raw.empty()) {
+            out.clear();
+            return true;
+        }
+        const std::string rle = rleEncode(raw);
+        std::string z;
+        if (!deflatePack(rle, z, level)) return false;
+        out.clear();
+        out.reserve(4 + z.size());
+        putU32(out, uint32_t(rle.size()));
+        out += z;
+        return true;
+    }
+    return deflatePack(raw, out, level);
+}
+
+bool unpack(const uint8_t* src, size_t n, std::string& out, size_t rawLen, GhcCompression algo) {
+    if (rawLen == 0) {
+        out.clear();
+        return true;
+    }
+    if (algo == GhcCompression::None) {
+        if (n != rawLen) return false;
+        out.assign(reinterpret_cast<const char*>(src), n);
+        return true;
+    }
+    if (algo == GhcCompression::RleDeflate) {
+        if (n < 4) return false;
+        const size_t rleLen = getU32(src);
+        if (rleLen > rawLen * 2 + 16) return false;
+        std::string rle;
+        if (!deflateUnpack(src + 4, n - 4, rle, rleLen)) return false;
+        return rleDecode(reinterpret_cast<const uint8_t*>(rle.data()), rle.size(), out, rawLen);
+    }
+    return deflateUnpack(src, n, out, rawLen);
 }
 
 // The columns of notes [0, count).
@@ -175,11 +271,13 @@ bool isBinaryChart(const std::string& path) {
     return ok;
 }
 
-bool writeBinaryChart(const std::string& path, const std::string& skeleton, const StreamedNotes& sn, int level,
-                      std::string& err) {
-    level = std::clamp(level, 1, 9);
+bool writeBinaryChart(const std::string& path, const std::string& skeleton, const StreamedNotes& sn,
+                      const GhcWriteOptions& optIn, std::string& err) {
+    GhcWriteOptions opt = optIn;
+    opt.level = std::clamp(opt.level, 1, 9);
+    const uint32_t blockNotes = std::clamp<uint32_t>(opt.blockNotes ? opt.blockNotes : kDefaultGhcBlockNotes, 1024u, 1u << 22);
     const size_t n = sn.notes.size();
-    const uint32_t blocks = uint32_t((n + kBlockNotes - 1) / kBlockNotes);
+    const uint32_t blocks = uint32_t((n + blockNotes - 1) / blockNotes);
     // The blocks, packed on every core.
     std::vector<std::string> packed(blocks);
     std::vector<uint32_t> rawLens(blocks);
@@ -189,10 +287,10 @@ bool writeBinaryChart(const std::string& path, const std::string& skeleton, cons
         for (int w = 0; w < workers; ++w)
             jobs.push_back(std::async(std::launch::async, [&, w] {
                 for (uint32_t b = uint32_t(w); b < blocks; b += uint32_t(workers)) {
-                    const size_t from = size_t(b) * kBlockNotes, cnt = std::min<size_t>(kBlockNotes, n - from);
+                    const size_t from = size_t(b) * blockNotes, cnt = std::min<size_t>(blockNotes, n - from);
                     const std::string raw = encodeBlock(sn.notes.data() + from, cnt);
                     rawLens[b] = uint32_t(raw.size());
-                    if (!pack(raw, packed[b], level)) return false;
+                    if (!pack(raw, packed[b], opt.algo, opt.level)) return false;
                 }
                 return true;
             }));
@@ -206,10 +304,12 @@ bool writeBinaryChart(const std::string& path, const std::string& skeleton, cons
     std::string head;
     putU32(head, kMagic);
     putU32(head, kVersion);
+    const uint32_t flags = uint32_t(uint8_t(opt.algo)) | (uint32_t(uint8_t(opt.level)) << 8);
+    putU32(head, flags);
     putU64(head, n);
     putU64(head, sn.rawCount);
     putU32(head, uint32_t(int32_t(sn.maxData)));
-    putU32(head, kBlockNotes);
+    putU32(head, blockNotes);
     putU32(head, blocks);
     putU32(head, uint32_t(sn.types.size()));
     for (uint64_t c : sn.dataCount) putU64(head, c);
@@ -218,7 +318,7 @@ bool writeBinaryChart(const std::string& path, const std::string& skeleton, cons
         head += t;
     }
     std::string skel;
-    if (!pack(skeleton, skel, level)) {
+    if (!pack(skeleton, skel, opt.algo, opt.level)) {
         err = "could not pack the chart's data";
         return false;
     }
@@ -231,7 +331,7 @@ bool writeBinaryChart(const std::string& path, const std::string& skeleton, cons
         putVar(ranges, r - prev);
         prev = r;
     }
-    if (!pack(ranges, rangesPacked, level)) {
+    if (!pack(ranges, rangesPacked, opt.algo, opt.level)) {
         err = "could not pack the sections";
         return false;
     }
@@ -264,11 +364,20 @@ bool writeBinaryChart(const std::string& path, const std::string& skeleton, cons
     return ok;
 }
 
+bool writeBinaryChart(const std::string& path, const std::string& skeleton, const StreamedNotes& sn, int level,
+                      std::string& err) {
+    GhcWriteOptions opt;
+    opt.algo = GhcCompression::Deflate;
+    opt.level = level;
+    return writeBinaryChart(path, skeleton, sn, opt, err);
+}
+
 namespace {
 
 // Everything before the note blocks.
 struct Head {
     uint32_t version = kVersion;
+    GhcCompression algo = GhcCompression::Deflate;
     uint64_t notes = 0, rawCount = 0;
     int32_t maxData = -1;
     uint32_t blockNotes = 0, blocks = 0, types = 0;
@@ -276,9 +385,17 @@ struct Head {
 
 bool readHead(FILE* f, Head& h, std::string& skeleton, StreamedNotes* sn, std::string& err) {
     uint32_t magic = 0, version = 0, maxData = 0;
-    if (!readU32(f, magic) || magic != kMagic) { err = "not a God's Hand binary chart"; return false; }
-    if (!readU32(f, version) || version < 1 || version > kVersion) { err = "a binary chart of a newer God's Hand"; return false; }
+    if (!readU32(f, magic) || magic != kMagic) { err = "not an Astralis binary chart"; return false; }
+    if (!readU32(f, version) || version < 1 || version > kVersion) { err = "a binary chart of a newer Astralis"; return false; }
     h.version = version;
+    h.algo = GhcCompression::Deflate;
+    if (version >= 3) {
+        uint32_t flags = 0;
+        if (!readU32(f, flags)) { err = "damaged binary chart"; return false; }
+        const uint8_t a = uint8_t(flags & 0xFFu);
+        if (a > uint8_t(GhcCompression::RleDeflate)) { err = "unsupported binary chart compression"; return false; }
+        h.algo = GhcCompression(a);
+    }
     if (!readU64(f, h.notes) || !readU64(f, h.rawCount) || !readU32(f, maxData) || !readU32(f, h.blockNotes) ||
         !readU32(f, h.blocks) || !readU32(f, h.types) || h.blockNotes == 0 ||
         uint64_t(h.blocks) != (h.notes + h.blockNotes - 1) / h.blockNotes) {
@@ -303,7 +420,7 @@ bool readHead(FILE* f, Head& h, std::string& skeleton, StreamedNotes* sn, std::s
     }
     std::string buf(size_t(packedLen), '\0');
     if ((packedLen && !readAll(f, buf.data(), buf.size())) ||
-        !unpack(reinterpret_cast<const uint8_t*>(buf.data()), buf.size(), skeleton, size_t(raw))) {
+        !unpack(reinterpret_cast<const uint8_t*>(buf.data()), buf.size(), skeleton, size_t(raw), h.algo)) {
         err = "damaged binary chart";
         return false;
     }
@@ -321,7 +438,7 @@ bool readHead(FILE* f, Head& h, std::string& skeleton, StreamedNotes* sn, std::s
     buf.assign(size_t(rangesPacked), '\0');
     std::string gaps;
     if ((rangesPacked && !readAll(f, buf.data(), buf.size())) ||
-        !unpack(reinterpret_cast<const uint8_t*>(buf.data()), buf.size(), gaps, size_t(rangesRaw))) {
+        !unpack(reinterpret_cast<const uint8_t*>(buf.data()), buf.size(), gaps, size_t(rangesRaw), h.algo)) {
         err = "damaged binary chart";
         return false;
     }
@@ -376,9 +493,10 @@ bool readBinaryChart(const std::string& path, std::string& skeleton, StreamedNot
             StreamedNote* dst = sn.notes.data() + from;
             const uint32_t rawLen = rawLens[b];
             const uint32_t version = h.version;
-            flight.push_back(std::async(std::launch::async, [packed, dst, cnt, rawLen, version] {
+            const GhcCompression algo = h.algo;
+            flight.push_back(std::async(std::launch::async, [packed, dst, cnt, rawLen, version, algo] {
                 std::string raw;
-                return unpack(reinterpret_cast<const uint8_t*>(packed->data()), packed->size(), raw, rawLen) &&
+                return unpack(reinterpret_cast<const uint8_t*>(packed->data()), packed->size(), raw, rawLen, algo) &&
                        decodeBlock(raw, dst, cnt, version);
             }));
             while (flight.size() >= window) {
@@ -397,7 +515,8 @@ bool readBinaryChart(const std::string& path, std::string& skeleton, StreamedNot
     return ok;
 }
 
-bool convertChartToBinary(const std::string& src, const std::string& dst, std::string& err, ConvertStats* stats, int level) {
+bool convertChartToBinary(const std::string& src, const std::string& dst, std::string& err, ConvertStats* stats,
+                          const GhcWriteOptions& opt) {
     const auto t0 = std::chrono::steady_clock::now();
     std::string skeleton;
     StreamedNotes sn;
@@ -406,7 +525,7 @@ bool convertChartToBinary(const std::string& src, const std::string& dst, std::s
     } else if (!streamChartSkeleton(src, skeleton, sn, err)) {
         return false;
     }
-    if (!writeBinaryChart(dst, skeleton, sn, level, err)) return false;
+    if (!writeBinaryChart(dst, skeleton, sn, opt, err)) return false;
     if (stats) {
         stats->inBytes = fileSize(src);
         stats->outBytes = fileSize(dst);
@@ -414,6 +533,13 @@ bool convertChartToBinary(const std::string& src, const std::string& dst, std::s
         stats->seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
     return true;
+}
+
+bool convertChartToBinary(const std::string& src, const std::string& dst, std::string& err, ConvertStats* stats, int level) {
+    GhcWriteOptions opt;
+    opt.algo = GhcCompression::Deflate;
+    opt.level = level;
+    return convertChartToBinary(src, dst, err, stats, opt);
 }
 
 }  // namespace gh

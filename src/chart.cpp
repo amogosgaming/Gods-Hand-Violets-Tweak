@@ -95,8 +95,17 @@ void Chart::finalize(double baseBpm) {
     }
 
     keys = clampv(keys, 1, kMaxKeys);
+    int maxAllowedKeys = keys;
+    for (const psych::ChartEvent& ev : events) {
+        if (equalsI(ev.name, "Change Key Count") || equalsI(ev.name, "Change Mania") || equalsI(ev.name, "Set Key Count")) {
+            const int v1 = std::atoi(ev.v1.c_str());
+            const int v2 = std::atoi(ev.v2.c_str());
+            if (v1 > maxAllowedKeys && v1 <= kMaxKeys) maxAllowedKeys = v1;
+            if (v2 > maxAllowedKeys && v2 <= kMaxKeys) maxAllowedKeys = v2;
+        }
+    }
     notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const Note& n) {
-        return !std::isfinite(n.time) || n.lane >= keys || n.side > 1;
+        return !std::isfinite(n.time) || n.lane >= maxAllowedKeys || n.side > 1;
     }), notes.end());
     const auto before = [](const Note& a, const Note& b) {
         if (a.time != b.time) return a.time < b.time;
@@ -120,11 +129,11 @@ void Chart::finalize(double baseBpm) {
     // Stacked notes (same side+lane within 1 ms) become one note that counts
     // as all of them: one press hits the whole stack, and the score, combo and
     // note counts include every note of the file.
-    std::vector<long long> lastKept(size_t(2 * keys), -1);
+    std::vector<long long> lastKept(size_t(2 * maxAllowedKeys), -1);
     std::vector<Note> clean;
     clean.reserve(notes.size());
     for (const Note& n : notes) {
-        long long& lk = lastKept[size_t(n.side * keys + n.lane)];
+        long long& lk = lastKept[size_t(n.side * maxAllowedKeys + n.lane)];
         if (lk >= 0 && std::fabs(clean[size_t(lk)].time - n.time) < 1.0 &&
             uint32_t(clean[size_t(lk)].stack) + n.stack <= kMaxStack) {
             Note& k = clean[size_t(lk)];

@@ -72,6 +72,21 @@ void testAsmMatchesC() {
         }
     }
     CHECK(mismatches == 0);
+    // The 3 CPU options: x86 SSE2 enabled on x86/x64, x86-64 SSE4 and AVX2 disabled.
+    CHECK(std::strlen(raster::cpuAsmLabel(raster::CpuAsmOption::X86Sse2)) > 0);
+    CHECK(std::strlen(raster::cpuAsmLabel(raster::CpuAsmOption::X64Sse4)) > 0);
+    CHECK(std::strlen(raster::cpuAsmLabel(raster::CpuAsmOption::Avx2)) > 0);
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    CHECK(raster::cpuAsmEnabled(raster::CpuAsmOption::X86Sse2));
+#endif
+    CHECK(!raster::cpuAsmEnabled(raster::CpuAsmOption::X64Sse4));
+    CHECK(!raster::cpuAsmEnabled(raster::CpuAsmOption::Avx2));
+    for (raster::CpuAsmOption opt : {raster::CpuAsmOption::X86Sse2, raster::CpuAsmOption::X64Sse4, raster::CpuAsmOption::Avx2}) {
+        std::vector<uint32_t> ref = a, got = a;
+        raster::blendRowC(ref.data(), src.data(), 32, 180);
+        raster::blendRowAsmOption(got.data(), src.data(), 32, 180, opt);
+        CHECK(std::memcmp(ref.data(), got.data(), ref.size() * 4) == 0);
+    }
     if (raster::haveAsm()) std::printf("  note renderer: %s assembly matches C++\n", raster::asmName());
     else std::printf("  note renderer: C++ only on this processor\n");
 }

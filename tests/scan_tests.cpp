@@ -249,12 +249,12 @@ void testModLayouts() {
     // Title screen and freeplay files in data/ are no songs.
     put(assets / "data" / "title" / "offsets.json", R"({"bpm":102,"song":"freakyMenu","x":0})");
 
-    // Songs without charts: AutoChart for songs, not for sound effects.
+    // Audio-only folders without charts are not auto-charted.
     const fs::path packC = mods / "packC" / "loose songs";
     putWav(packC / "Long Song_Inst.wav", 31);
     putWav(packC / "Long Song_Voices.wav", 31);
     putWav(packC / "whoosh.wav", 2);
-    putWav(packC / "Inst.wav", 40);  // named after its folder
+    putWav(packC / "Inst.wav", 40);
 
     SongScan s;
     scanModsDir(str(mods), s);
@@ -265,7 +265,7 @@ void testModLayouts() {
         }
 
     const SongEntry* foo = byTitle(s, "Foo");
-    SCHECK(foo && !foo->autoChart && foo->diffs.size() == 2);
+    SCHECK(foo && foo->diffs.size() == 2);
     SCHECK(countTitle(s, "Foo") == 1);
     if (foo) {
         SCHECK(foo->chartPaths.size() == 2 && foo->chartPaths[0].find("preload") != std::string::npos);
@@ -278,11 +278,11 @@ void testModLayouts() {
     }
     SCHECK(countTitle(s, "Qux") == 2);
     const SongEntry* qux = byTitle(s, "Qux");
-    SCHECK(qux && !qux->autoChart && endsWith(qux->inst, "Inst.ogg"));
+    SCHECK(qux && endsWith(qux->inst, "Inst.ogg"));
     if (const SongEntry* q2 = byTitle(s, "Qux", 1)) SCHECK(q2->subtitle != qux->subtitle);
     SCHECK(!byTitle(s, "Characters"));
     const SongEntry* bar = byTitle(s, "Bar");
-    SCHECK(bar && !bar->autoChart && endsWith(bar->inst, "assets/songs/bar/Inst.ogg"));
+    SCHECK(bar && endsWith(bar->inst, "assets/songs/bar/Inst.ogg"));
     const SongEntry* loose = byTitle(s, "Loose Song");
     SCHECK(loose && loose->chartPaths.size() == 1 && endsWith(loose->modRoot, "assets/"));
     SCHECK(byTitle(s, "Global") && byTitle(s, "Baz"));
@@ -303,10 +303,8 @@ void testModLayouts() {
         SCHECK(fc.notes.size() == 2 && fc.opponentNotes == 1 && fc.playerNotes == 1);
     }
 
-    const SongEntry* longSong = byTitle(s, "Long Song");
-    SCHECK(longSong && longSong->autoChart && endsWith(longSong->inst, "Long Song_Inst.wav") &&
-           endsWith(longSong->voices, "Long Song_Voices.wav"));
-    SCHECK(byTitle(s, "Loose Songs") && byTitle(s, "Loose Songs")->autoChart);
+    SCHECK(!byTitle(s, "Long Song"));
+    SCHECK(!byTitle(s, "Loose Songs"));
     SCHECK(!byTitle(s, "Whoosh"));
 
     std::vector<std::string> ids;
@@ -335,10 +333,10 @@ void testModLayouts() {
     SCHECK(files.list("characters", ".json").empty());  // scripts of other mods never run
 
     // A disabled mod is left out.
-    put(mods / "modsList.txt", "packC|0\n");
+    put(mods / "modsList.txt", "packB|0\n");
     SongScan off;
     scanModsDir(str(mods), off);
-    SCHECK(!byTitle(off, "Long Song") && byTitle(off, "Foo"));
+    SCHECK(!byTitle(off, "Fantrack") && byTitle(off, "Foo"));
     fs::remove_all(base);
 }
 
@@ -464,6 +462,35 @@ void testFlStudio() {
     const SongEntry* e = byTitle(s, "Forge Test");
     SCHECK(e && e->diffs.size() == 2 && e->diffs[0] == "Easy (FL Studio)" && e->diffs[1] == "Hard (FL Studio)");
     fs::remove_all(base);
+
+    // Multikey SNIFF conversion with custom Opponent & Player MIDI ranges.
+    SCHECK(midiNoteName(48) == "C3" && midiNoteName(60) == "C4" && midiNoteName(61) == "C#4");
+    FlpProject mk;
+    mk.ppqn = 96;
+    mk.bpm = 120.0;
+    mk.title = "MultiKey FLP";
+    mk.chartChannel = 0;
+    FlpPattern pat6;
+    pat6.number = 1;
+    pat6.name = "6k";
+    for (int i = 0; i < 6; ++i) pat6.notes.push_back({uint32_t(i * 48), 24, uint32_t(48 + i), 0, 100, 0});  // Player 6K: 48..53
+    for (int i = 0; i < 9; ++i) pat6.notes.push_back({uint32_t(384 + i * 48), 24, uint32_t(60 + i), 0, 100, 0});  // Opp 9K: 60..68
+    mk.patterns.push_back(pat6);
+
+    FlpConvertOptions opt;
+    opt.playerStartPitch = 48;
+    opt.playerKeys = 6;
+    opt.oppStartPitch = 60;
+    opt.oppKeys = 9;
+    opt.useMarkers = true;
+    Chart mkc;
+    SCHECK(flpToChart(mk, 1, opt, mkc, err));
+    SCHECK(mkc.keys == 9 && mkc.keysOf(0) == 9 && mkc.keysOf(1) == 6);
+    SCHECK(mkc.playerNotes == 6 && mkc.opponentNotes == 9 && mkc.notes.size() == 15);
+    if (mkc.notes.size() == 15) {
+        SCHECK(mkc.notes[5].side == 1 && mkc.notes[5].lane == 5);
+        SCHECK(mkc.notes[14].side == 0 && mkc.notes[14].lane == 8);
+    }
 }
 
 }  // namespace
@@ -519,7 +546,7 @@ void testBinaryChartsInMods() {
         if (e.songKey == "alone") alone = &e;
         if (e.songKey == "paired") paired = &e;
     }
-    SCHECK(alone && !alone->autoChart && alone->diffs.size() == 1 && alone->diffs[0] == "Normal" &&
+    SCHECK(alone && alone->diffs.size() == 1 && alone->diffs[0] == "Normal" &&
            endsWithI(alone->chartPaths[0], ".ghc"));
     SCHECK(paired && paired->diffs.size() == 2 && paired->diffs[0] == "Normal" && endsWithI(paired->chartPaths[0], ".ghc") &&
            paired->diffs[1] == "Hard" && endsWithI(paired->chartPaths[1], "paired-hard.json"));

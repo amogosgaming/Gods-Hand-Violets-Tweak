@@ -40,7 +40,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-void logInfo(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, "GodsHand", "%s", s.c_str()); }
+void logInfo(const std::string& s) { __android_log_print(ANDROID_LOG_INFO, "Astralis", "%s", s.c_str()); }
 
 std::atomic<bool> g_background{false}, g_resumed{false};
 std::atomic<float> g_volume{0.8f};
@@ -367,8 +367,17 @@ void prepareDataDir(const std::string& base) {
     for (const char* d : {"mods", "songs", "replays", "saves", "cache"}) fs::create_directories(base + d, ec);
     android_app* app = GetAndroidApp();
     if (!app || !app->activity || !app->activity->assetManager) return;
-    copyAssetDir(app->activity->assetManager, "assets/fonts", base + "assets/fonts/");
-    copyAssetDir(app->activity->assetManager, "songs", base + "songs/");
+    AAssetManager* mgr = app->activity->assetManager;
+    for (const char* d : {
+             "assets/fonts", "assets/shared/images", "assets/shared/images/mainmenu",
+             "assets/shared/images/noteSkins", "assets/shared/images/noteSplashes",
+             "assets/shared/images/characters", "assets/shared/images/icons",
+             "assets/shared/characters", "assets/shared/stages",
+             "assets/shared/sounds", "assets/shared/music",
+             "songs/tutorial", "songs/bopeebo", "songs/fresh", "songs/dad-battle",
+         }) {
+        copyAssetDir(mgr, d, base + d + "/");
+    }
 }
 
 void setVsync(bool on) {
@@ -471,7 +480,7 @@ bool download(const std::string& url, const std::string& dest, std::string& err)
         env->CallVoidMethod(conn, env->GetMethodID(connCls, "setReadTimeout", "(I)V"), 60000);
         env->CallVoidMethod(conn, env->GetMethodID(connCls, "setInstanceFollowRedirects", "(Z)V"), JNI_TRUE);
         env->CallVoidMethod(conn, env->GetMethodID(connCls, "setRequestProperty", "(Ljava/lang/String;Ljava/lang/String;)V"),
-                            env->NewStringUTF("User-Agent"), env->NewStringUTF("GodsHand"));
+                            env->NewStringUTF("User-Agent"), env->NewStringUTF("Astralis"));
         if (j.failed(err, "request setup")) break;
         const jint code = env->CallIntMethod(conn, env->GetMethodID(connCls, "getResponseCode", "()I"));
         if (j.failed(err, "no response")) break;
@@ -527,16 +536,16 @@ std::string userDir() {
 #if defined(_WIN32)
     const wchar_t* app = _wgetenv(L"APPDATA");
     if (!app || !*app) return "";
-    const std::u8string u = (fs::path(app) / L"GodsHand").u8string();
+    const std::u8string u = (fs::path(app) / L"Astralis").u8string();
     return std::string(u.begin(), u.end()) + "/";
 #elif defined(__APPLE__)
     const char* home = std::getenv("HOME");
-    return home && *home ? std::string(home) + "/Library/Application Support/GodsHand/" : std::string();
+    return home && *home ? std::string(home) + "/Library/Application Support/Astralis/" : std::string();
 #else
     const char* xdg = std::getenv("XDG_DATA_HOME");
-    if (xdg && *xdg == '/') return std::string(xdg) + "/GodsHand/";
+    if (xdg && *xdg == '/') return std::string(xdg) + "/Astralis/";
     const char* home = std::getenv("HOME");
-    return home && *home ? std::string(home) + "/.local/share/GodsHand/" : std::string();
+    return home && *home ? std::string(home) + "/.local/share/Astralis/" : std::string();
 #endif
 }
 void prepareDataDir(const std::string&) {}

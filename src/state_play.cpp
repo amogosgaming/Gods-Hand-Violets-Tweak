@@ -107,9 +107,8 @@ void PlayState::enter() {
     const SongEntry copy = *entry_;
     const std::string diff = req_.diff;
     const bool extraKeys = app().settings.extraKeys;
-    const bool autoChart = req_.autoChart;
-    job_ = std::async(std::launch::async, [copy, diff, mirror, extraKeys, autoChart] {
-        return app().library.prepare(copy, diff, mirror, extraKeys, autoChart);
+    job_ = std::async(std::launch::async, [copy, diff, mirror, extraKeys] {
+        return app().library.prepare(copy, diff, mirror, extraKeys);
     });
     loadStart_ = a.now;
     loadStartReal_ = nowSec();
@@ -119,6 +118,7 @@ void PlayState::update(double dt) {
     // Note renderer: pictures of the notes for the processor, made here where
     // no camera or render target is active.
     noteRaster_.setMode(app().settings.noteRenderer);
+    noteRaster_.setAsmCpu(app().settings.noteAsmCpu);
     noteRaster_.setSmooth(app().settings.antialiasing);
     noteRaster_.prepare();
     App& a = app();
@@ -420,18 +420,10 @@ void PlayState::setup() {
     leftColor_ = opp == CharId::Shade ? gfx::rgb(entry_->color) : charColor(opp);
     rightColor_ = charColor(CharId::Herald);
     stage_.init(entry_->builtin ? entry_->def->stage : 3, gfx::rgb(entry_->color), a.settings.lowDetail, a.settings.flashing);
-    keyLane_.assign(Input::kMaxCodes, -1);
-    const auto lk = a.settings.laneKeys(chart_.keysOf(1));  // the player's keys (Leather Engine: its own count)
-    for (int l = 0; l < int(lk.size()); ++l)
-        for (int code : lk[size_t(l)])
-            if (code > 0 && code < Input::kMaxCodes) keyLane_[size_t(code)] = l;
-    for (int l = 0; l < chart_.keysOf(1) && l < kMaxKeys; ++l) keyLane_[size_t(kTouchLane + l)] = l;  // on-screen lanes
-    // Lanes no key reaches (a chart of more keys than the keyboard has): the
-    // bot plays them, unless the lanes are touched (each one is a column then).
-    cfg_.keylessLanes.reset();
-    if (!a.touchMode && !a.settings.touchControls)
-        for (int l = 0; l < chart_.keysOf(1) && l < kMaxKeys; ++l)
-            if (size_t(l) >= lk.size() || lk[size_t(l)].empty()) cfg_.keylessLanes.set(size_t(l));
+    initKeys_ = chart_.keys;
+    initSideKeys_[0] = chart_.sideKeys[0];
+    initSideKeys_[1] = chart_.sideKeys[1];
+    rebuildLaneBindings();
 
     // The notes are ready before the scripts run: what onCreate and
     // onCreatePost change on them (noAnimation, noteType, hitCausesMiss...
@@ -443,7 +435,7 @@ void PlayState::setup() {
     {
         std::vector<NoteRef> refs(chart_.notes.size(), NoteRef{0, 0, 0});
         for (int side = 0; side < 2; ++side)
-            for (int l = 0; l < chart_.keys; ++l) {
+            for (int l = 0; l < kMaxKeys; ++l) {
                 const auto& v = session_.lane(side, l);
                 for (size_t i = 0; i < v.size(); ++i)
                     if (v[i].id < refs.size()) refs[v[i].id] = NoteRef{uint8_t(side), uint8_t(l), uint32_t(i)};
@@ -463,6 +455,68 @@ void PlayState::setup() {
     a.mixer.setTracks(prep_.inst, prep_.voiceP, prep_.voiceO);
     a.mixer.setRate(rate_);
     restart();
+}
+
+void PlayState::rebuildLaneBindings() {
+    App& a = app();
+    const int pk = chart_.keysOf(1);
+    keyLane_.assign(Input::kMaxCodes, -1);
+    const auto lk = a.settings.laneKeys(pk);  // the player's keys (supports asymmetric side key counts)
+    for (int l = 0; l < int(lk.size()); ++l)
+        for (int code : lk[size_t(l)])
+            if (code > 0 && code < Input::kMaxCodes) keyLane_[size_t(code)] = l;
+    for (int l = 0; l < pk && l < kMaxKeys; ++l) keyLane_[size_t(kTouchLane + l)] = l;  // on-screen lanes
+    // Lanes no key reaches (a chart of more keys than the keyboard has): the
+    // bot plays them, unless the lanes are touched (each one is a column then).
+    cfg_.keylessLanes.reset();
+    if (!a.touchMode && !a.settings.touchControls)
+        for (int l = 0; l < pk && l < kMaxKeys; ++l)
+            if (size_t(l) >= lk.size() || lk[size_t(l)].empty()) cfg_.keylessLanes.set(size_t(l));
+}
+
+void PlayState::changeKeyCount(int oppKeys, int playerKeys) {
+    App& a = app();
+    if (!a.settings.extraKeys) {
+        oppKeys = 4;
+        playerKeys = 4;
+    } else {
+        oppKeys = std::clamp(oppKeys, 1, kMaxKeys);
+        playerKeys = std::clamp(playerKeys, 1, kMaxKeys);
+    }
+    const int newK = std::max(oppKeys, playerKeys);
+    if (chart_.keys == newK && chart_.keysOf(0) == oppKeys && chart_.keysOf(1) == playerKeys) return;
+    chart_.keys = newK;
+    chart_.sideKeys[0] = (oppKeys == newK && playerKeys == newK) ? 0 : oppKeys;
+    chart_.sideKeys[1] = (oppKeys == newK && playerKeys == newK) ? 0 : playerKeys;
+    rebuildLaneBindings();
+    session_.setKeys(chart_.keys, cfg_.keylessLanes);
+    for (int l = chart_.keysOf(1); l < kMaxKeys; ++l) {
+        heldCount_[l] = 0;
+        touchDown_[l] = false;
+    }
+    for (int s = 0; s < 2; ++s)
+        for (int l = chart_.keysOf(s); l < kMaxKeys; ++l) strumAnim_[s][l] = StrumAnim{};
+    layoutStrums();
+    if (scripts_) {
+        ScriptHost& h = *scripts_;
+        h.setGlobal("keyCount", double(chart_.keys));
+        h.setGlobal("playerKeyCount", double(chart_.keysOf(1)));
+        h.setGlobal("opponentKeyCount", double(chart_.keysOf(0)));
+        h.setGlobal("mania", double(chart_.keys));
+        for (int i = 0; i < chart_.keys && i < kMaxKeys; ++i) {
+            const scene::Strum& p = strum(1, i);
+            const scene::Strum& o = strum(0, i);
+            h.setGlobal(TextFormat("defaultPlayerStrumX%d", i), double(p.x));
+            h.setGlobal(TextFormat("defaultPlayerStrumY%d", i), double(p.y));
+            h.setGlobal(TextFormat("defaultOpponentStrumX%d", i), double(o.x));
+            h.setGlobal(TextFormat("defaultOpponentStrumY%d", i), double(o.y));
+        }
+        for (int i = 0; i < 2 * chart_.keys && i < 18; ++i) {
+            const scene::Strum& st = scene_->strums[size_t(i)];
+            h.setGlobal(TextFormat("defaultStrum%dX", i), double(st.x));
+            h.setGlobal(TextFormat("defaultStrum%dY", i), double(st.y));
+        }
+    }
 }
 
 void PlayState::layoutStrums() {
@@ -563,7 +617,16 @@ void PlayState::setStrumState(int side, int lane, int state, double resetSec) {
 
 void PlayState::restart() {
     App& a = app();
-    if (!sessionFresh_) session_.init(chart_, cfg_);  // the first time it was made before the scripts
+    if (!sessionFresh_) {
+        if (chart_.keys != initKeys_ || chart_.sideKeys[0] != initSideKeys_[0] || chart_.sideKeys[1] != initSideKeys_[1]) {
+            chart_.keys = initKeys_;
+            chart_.sideKeys[0] = initSideKeys_[0];
+            chart_.sideKeys[1] = initSideKeys_[1];
+            rebuildLaneBindings();
+            layoutStrums();
+        }
+        session_.init(chart_, cfg_);  // the first time it was made before the scripts
+    }
     sessionFresh_ = false;
     popups_.clear();
     fx_.clear();
@@ -1163,8 +1226,7 @@ void PlayState::finish() {
     const bool saveable = !cfg_.botplay && !cfg_.practice && !replaying_ && rate_ >= 1.0;
     if (saveable) {
         ScoreEntry e{r.score, r.acc, r.misses, r.rank, r.clear};
-        r.newBest = a.scores.submit(Scores::key(entry_->id + (playerLeft_ ? "#opponent" : "") + (req_.autoChart ? "#autochart" : ""),
-                                                req_.diff), e);
+        r.newBest = a.scores.submit(Scores::key(entry_->id + (playerLeft_ ? "#opponent" : ""), req_.diff), e);
     }
     if (!replaying_ && !cfg_.botplay && !record_.events.empty()) {
         record_.songId = entry_->id;
@@ -2069,8 +2131,7 @@ void PlayState::drawVisualizer() const {
 void PlayState::drawWatermark() {
     const Settings& s = app().settings;
     if (!s.watermark || s.hideHud) return;
-    // As the issue asked: "Gods Hand engine v.(version) (platform) edition".
-    static const std::string text = std::string("God's Hand Engine v." GH_VERSION " ") + platform::kName + " Slop Edition";
+    static const std::string text = std::string("Astralis v." GH_VERSION " ") + platform::kName;
     const PsychUi& ui = psychUi();
     if (psych_ && ui.active() && ui.font()) ui.text(text, 2, gfx::H - 22, 16, fade(WHITE, 0.85f), -1, 1.0f);
     else gfx::text(FontId::Ui, text, 8, gfx::H - 26, 18, fade(kIvory, 0.75f), Align::Left, 1.2f);

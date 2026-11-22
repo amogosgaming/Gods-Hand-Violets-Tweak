@@ -512,6 +512,28 @@ static void testSession() {
     CHECK(s.counts[kDivine] + s.counts[kGrace] + s.counts[kMortal] + s.counts[kSinful] == 0);
     s.update(1100);
     CHECK(s.misses == 1);
+
+    // Mid-song key count change: start at 4K with notes on lane 5 later in the song,
+    // expand to 6K mid-song and confirm lane 5 notes are playable, then shrink back to 4K.
+    Chart dyn;
+    dyn.keys = 4;
+    Note n0; n0.time = 500; n0.lane = 0; n0.side = 1; dyn.notes.push_back(n0);
+    Note n5; n5.time = 2000; n5.lane = 5; n5.side = 1; n5.length = 600; dyn.notes.push_back(n5);
+    dyn.events.push_back({1500.0, "Change Key Count", "6", ""});
+    dyn.finalize(120);
+    Session ds;
+    ds.init(dyn, SessionConfig{});
+    CHECK(ds.keys() == 4);
+    ds.press(0, 500);
+    ds.release(0, 520);
+    CHECK(ds.counts[kDivine] == 1);
+    ds.setKeys(6);
+    CHECK(ds.keys() == 6);
+    ds.press(5, 2000);
+    ds.update(2200);
+    CHECK(ds.counts[kDivine] == 2 && ds.isHolding(1, 5));
+    ds.setKeys(4);
+    CHECK(ds.keys() == 4 && !ds.isHolding(1, 5));
 }
 
 static void testComposer(bool audio, const char* wavDir) {

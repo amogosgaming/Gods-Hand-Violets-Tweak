@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "flp_import.hpp"
@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "common.hpp"
+#include "keys.hpp"
 
 namespace gh {
 
@@ -55,9 +56,16 @@ enum : uint8_t {
 constexpr size_t kNoteSize = 24;
 
 bool isSpecial(uint32_t pitch) { return pitch == 53 || pitch == 54 || pitch == 56 || pitch == 57 || pitch == 58; }
-bool isChartPitch(uint32_t pitch) { return (pitch >= 48 && pitch <= 51) || (pitch >= 60 && pitch <= 63); }
+bool isDefaultChartPitch(uint32_t pitch) { return (pitch >= 48 && pitch <= 51) || (pitch >= 60 && pitch <= 63); }
 
 }  // namespace
+
+std::string midiNoteName(int pitch) {
+    static const char* const kNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    pitch = std::clamp(pitch, 0, 127);
+    const int oct = pitch / 12 - 1;
+    return std::string(kNames[pitch % 12]) + std::to_string(oct);
+}
 
 bool readFlp(std::string_view bytes, FlpProject& out, std::string& err) {
     out = FlpProject();
@@ -160,8 +168,8 @@ std::vector<int> flpChartPatterns(const FlpProject& p, bool strict) {
         for (const FlpNote& n : pat.notes) {
             if (n.channel != p.chartChannel) continue;
             ++onChannel;
-            sniffKeys += isChartPitch(n.pitch) || isSpecial(n.pitch);
-            lanes += isChartPitch(n.pitch);
+            sniffKeys += isDefaultChartPitch(n.pitch) || isSpecial(n.pitch);
+            lanes += isDefaultChartPitch(n.pitch);
         }
         if (lanes > 0 && (!strict || sniffKeys * 10 >= onChannel * 9)) out.push_back(pat.number);
     }
@@ -174,28 +182,67 @@ std::string flpPatternLabel(const FlpProject& p, int number) {
     return "Pattern " + std::to_string(number);
 }
 
-bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, double bpmIn) {
+bool flpToChart(const FlpProject& p, int pattern, const FlpConvertOptions& optIn, Chart& out, std::string& err) {
     out = Chart();
+    FlpConvertOptions opt = optIn;
+    opt.oppKeys = std::clamp(opt.oppKeys, 1, kMaxKeys);
+    opt.playerKeys = std::clamp(opt.playerKeys, 1, kMaxKeys);
+    opt.oppStartPitch = std::clamp(opt.oppStartPitch, 0, 127);
+    opt.playerStartPitch = std::clamp(opt.playerStartPitch, 0, 127);
+    const int targetChannel = opt.channel == -1 ? p.chartChannel : opt.channel;  // -2 = all channels
+
+    auto inPlayer = [&](uint32_t pitch) -> bool {
+        return int(pitch) >= opt.playerStartPitch && int(pitch) < opt.playerStartPitch + opt.playerKeys;
+    };
+    auto inOpp = [&](uint32_t pitch) -> bool {
+        return int(pitch) >= opt.oppStartPitch && int(pitch) < opt.oppStartPitch + opt.oppKeys;
+    };
+    auto isMarker = [&](uint32_t pitch) -> bool {
+        return opt.useMarkers && !inPlayer(pitch) && !inOpp(pitch) && isSpecial(pitch);
+    };
+    auto rangeDesc = [&]() -> std::string {
+        return "Player " + midiNoteName(opt.playerStartPitch) + "-" + midiNoteName(opt.playerStartPitch + opt.playerKeys - 1) +
+               ", Opp " + midiNoteName(opt.oppStartPitch) + "-" + midiNoteName(opt.oppStartPitch + opt.oppKeys - 1);
+    };
+
     if (pattern < 0) {
-        std::vector<int> list = flpChartPatterns(p, true);
-        if (list.empty()) list = flpChartPatterns(p, false);  // asked for this file: any notes in the lanes
-        if (list.empty()) { err = "no notes in the chart lanes (C3-D#3, C4-D#4)"; return false; }
-        pattern = list.front();
+        if (opt.oppStartPitch == 60 && opt.oppKeys == 4 && opt.playerStartPitch == 48 && opt.playerKeys == 4 &&
+            targetChannel == p.chartChannel) {
+            std::vector<int> list = flpChartPatterns(p, true);
+            if (list.empty()) list = flpChartPatterns(p, false);
+            if (!list.empty()) pattern = list.front();
+        }
+        if (pattern < 0) {
+            for (const FlpPattern& pat : p.patterns) {
+                for (const FlpNote& n : pat.notes) {
+                    if (targetChannel >= 0 && int(n.channel) != targetChannel) continue;
+                    if (inPlayer(n.pitch) || inOpp(n.pitch)) {
+                        pattern = pat.number;
+                        break;
+                    }
+                }
+                if (pattern >= 0) break;
+            }
+        }
+        if (pattern < 0) {
+            err = "no notes in the chart lanes (" + rangeDesc() + ")";
+            return false;
+        }
     }
     const FlpPattern* pat = nullptr;
     for (const FlpPattern& q : p.patterns)
         if (q.number == pattern) pat = &q;
     if (!pat) { err = "no pattern " + std::to_string(pattern); return false; }
-    const double bpm = bpmIn > 0 ? bpmIn : p.bpm > 0 ? p.bpm : 120.0;
+    const double bpm = opt.bpmOverride > 0 ? opt.bpmOverride : p.bpm > 0 ? p.bpm : 120.0;
     const double msPerTick = 60000.0 / (bpm * p.ppqn);
 
     std::vector<FlpNote> notes;
     for (const FlpNote& n : pat->notes)
-        if (n.channel == p.chartChannel) notes.push_back(n);
+        if (targetChannel < 0 || int(n.channel) == targetChannel) notes.push_back(n);
     // By time; at the same time the section markers come first (SNIFF).
-    std::stable_sort(notes.begin(), notes.end(), [](const FlpNote& a, const FlpNote& b) {
+    std::stable_sort(notes.begin(), notes.end(), [&](const FlpNote& a, const FlpNote& b) {
         if (a.time != b.time) return a.time < b.time;
-        return isSpecial(a.pitch) && !isSpecial(b.pitch);
+        return isMarker(a.pitch) && !isMarker(b.pitch);
     });
 
     const uint32_t sectionTicks = uint32_t(p.ppqn) * 4;
@@ -215,24 +262,31 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
     std::vector<Pending> pending;
     for (const FlpNote& n : notes) {
         Sec& sec = secAt(n.time);
-        switch (n.pitch) {
-            case 53: mustHit = sec.mustHit = true; continue;   // camera on the player
-            case 54: mustHit = sec.mustHit = false; continue;  // camera on the opponent
-            case 57: sec.altOpp = true; continue;
-            case 58: sec.altPlayer = true; continue;
-            case 56: continue;  // a tempo change: SNIFF asks for the new tempo, the chart keeps one
-            default: break;
+        if (isMarker(n.pitch)) {
+            switch (n.pitch) {
+                case 53: mustHit = sec.mustHit = true; continue;   // camera on the player
+                case 54: mustHit = sec.mustHit = false; continue;  // camera on the opponent
+                case 57: sec.altOpp = true; continue;
+                case 58: sec.altPlayer = true; continue;
+                case 56: continue;  // tempo marker
+                default: break;
+            }
         }
-        if (!isChartPitch(n.pitch)) continue;
+        const bool isPl = inPlayer(n.pitch);
+        const bool isOp = !isPl && inOpp(n.pitch);
+        if (!isPl && !isOp) continue;
         Note note;
         note.time = n.time * msPerTick;
-        note.side = n.pitch <= 51 ? 1 : 0;
-        note.lane = uint8_t(n.pitch <= 51 ? n.pitch - 48 : n.pitch - 60);
+        note.side = isPl ? 1 : 0;
+        note.lane = uint8_t(isPl ? (int(n.pitch) - opt.playerStartPitch) : (int(n.pitch) - opt.oppStartPitch));
         if (n.velocity < 0x40 || n.duration >= uint32_t(p.ppqn))
             note.length = std::max(0.0, (double(n.duration) - p.ppqn / 4.0) * msPerTick);
         pending.push_back({note, n.time / sectionTicks});
     }
-    if (pending.empty()) { err = "no notes in the chart lanes (C3-D#3, C4-D#4)"; return false; }
+    if (pending.empty()) {
+        err = "no notes in the chart lanes (" + rangeDesc() + ")";
+        return false;
+    }
     for (Pending& pn : pending) {
         const Sec& sec = secs[pn.sec];
         if ((pn.n.side == 0 && sec.altOpp) || (pn.n.side == 1 && sec.altPlayer)) pn.n.flags |= kFlagAlt;
@@ -245,7 +299,13 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
         if (out.focus.empty() || out.focus.back().side != side) out.focus.push_back({double(s) * sectionMs, side});
     }
     out.title = p.title;
-    out.keys = 4;
+    out.keys = std::max(opt.oppKeys, opt.playerKeys);
+    if (opt.oppKeys != opt.playerKeys) {
+        out.sideKeys[0] = opt.oppKeys;
+        out.sideKeys[1] = opt.playerKeys;
+    } else {
+        out.sideKeys[0] = out.sideKeys[1] = 0;
+    }
     out.speed = clampv(bpm / 50.0, 0.5, 6.0);  // SNIFF's default scroll speed
     out.tempo.push_back({0, bpm, 0});
     out.rawNoteCount = out.notes.size();
@@ -253,6 +313,12 @@ bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, 
     for (Note& n : out.notes)
         if (n.length > 0 && n.length < out.stepMs(n.time) * 0.999) n.length = 0;
     return true;
+}
+
+bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, double bpmIn) {
+    FlpConvertOptions opt;
+    opt.bpmOverride = bpmIn;
+    return flpToChart(p, pattern, opt, out, err);
 }
 
 bool flpChartPath(const std::string& chartPath, std::string& file, int& pattern) {

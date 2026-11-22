@@ -20,7 +20,7 @@ sdk="${ANDROID_SDK:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/android-sdk}}}"
 ndk="${ANDROID_NDK:-$sdk/ndk/27.2.12479018}"
 bt="$sdk/build-tools/34.0.0"
 jar="$sdk/platforms/android-34/android.jar"
-out="${1:-$root/build/GodsHand-android.apk}"
+out="${1:-$root/build/Astralis-android.apk}"
 abis="${ABIS:-arm64-v8a armeabi-v7a x86_64}"
 keystore="${GH_KEYSTORE:-$here/godshand.keystore}"
 storepass="${GH_KEYSTORE_PASS:-godshand}"
@@ -32,13 +32,14 @@ for f in "$ndk/build/cmake/android.toolchain.cmake" "$bt/aapt2" "$bt/d8" "$bt/zi
 done
 strip="$(ls "$ndk"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -n1)"
 
-version="$(sed -n 's/^project(GodsHand VERSION \([0-9.]*\).*/\1/p' "$root/CMakeLists.txt")"
+version="$(sed -n 's/^project(Astralis VERSION \([0-9.]*\).*/\1/p' "$root/CMakeLists.txt")"
+[ -n "$version" ] || version="2.0.0"
 IFS=. read -r vmaj vmin vpat <<<"$version"
 code=$((vmaj * 10000 + vmin * 100 + vpat))
-echo "God's Hand $version (versionCode $code) for: $abis"
+echo "Astralis $version (versionCode $code) for: $abis"
 
 rm -rf "$work"
-mkdir -p "$work/lib" "$work/classes" "$work/dex" "$work/assets/assets/fonts" "$work/assets/songs"
+mkdir -p "$work/lib" "$work/classes" "$work/dex" "$work/assets/assets" "$work/assets/songs"
 
 # ---- native code
 for abi in $abis; do
@@ -48,9 +49,9 @@ for abi in $abis; do
     -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-24 -DANDROID_STL=c++_static \
     -DCMAKE_BUILD_TYPE=Release ${CMAKE_ARGS:-} >/dev/null
-  cmake --build "$bdir" --target godshand -j"$(nproc 2>/dev/null || echo 4)"
+  cmake --build "$bdir" --target astralis -j"$(nproc 2>/dev/null || echo 4)"
   mkdir -p "$work/lib/$abi"
-  "$strip" --strip-unneeded -o "$work/lib/$abi/libgodshand.so" "$bdir/libgodshand.so"
+  "$strip" --strip-unneeded -o "$work/lib/$abi/libgodshand.so" "$bdir/libastralis.so"
 done
 
 # ---- Java (fullscreen + mod zip import)
@@ -58,12 +59,12 @@ javac --release 8 -Xlint:-options -cp "$jar" -d "$work/classes" $(find "$here/ja
 "$bt/d8" --release --min-api 24 --lib "$jar" --output "$work/dex" $(find "$work/classes" -name '*.class')
 
 # ---- files the game copies out of the APK on first launch
-cp "$root"/assets/fonts/*.ttf "$root"/assets/fonts/*.txt "$work/assets/assets/fonts/"
+cp -r "$root"/assets/* "$work/assets/assets/"
 # The license and the third-party license texts travel with the game.
 mkdir -p "$work/assets/licenses"
 cp "$root/LICENSE" "$work/assets/"
 cp "$root"/licenses/*.txt "$work/assets/licenses/"
-cp "$root"/songs/* "$work/assets/songs/"
+cp -r "$root"/songs/* "$work/assets/songs/"
 
 # ---- resources, manifest and packaging
 "$bt/aapt2" compile --dir "$here/res" -o "$work/res.zip"

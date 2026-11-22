@@ -1,14 +1,14 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 // FL Studio projects (.flp) and scores (.fsc) as charts, read the way SNIFF
 // (SiIva Note Importer For FNF, https://github.com/JordanSantiagoYT/SNIFF)
-// reads them: the notes of one pattern of the FPC channel (the first channel
-// without one), with C3-D#3 (pitches 48-51) as the player's lanes and C4-D#4
-// (60-63) as the opponent's; F3 (53) and F#3 (54) point the camera at the
-// player or the opponent from that section on; A3 (57) and A#3 (58) give the
-// section's opponent or player notes their alt animation. A note held for a
-// beat or more, or played softly (velocity under 64), becomes a hold.
+// reads them, extended with configurable MIDI note ranges for multikey charts:
+// by default C3-D#3 (pitches 48-51) are the player's lanes and C4-D#4 (60-63)
+// are the opponent's; F3 (53) and F#3 (54) point the camera at the player or
+// the opponent from that section on; A3 (57) and A#3 (58) give the section's
+// opponent or player notes their alt animation. A note held for a beat or more,
+// or played softly (velocity under 64), becomes a hold.
 #pragma once
 
 #include <cstdint>
@@ -40,6 +40,20 @@ struct FlpProject {
     std::vector<FlpPattern> patterns;
 };
 
+// Configurable MIDI range and conversion options for SNIFF & multikey charts.
+struct FlpConvertOptions {
+    int oppStartPitch = 60;     // C4 (default 4K opponent start)
+    int oppKeys = 4;            // 1..kMaxKeys
+    int playerStartPitch = 48;  // C3 (default 4K player start)
+    int playerKeys = 4;         // 1..kMaxKeys
+    int channel = -1;           // -1 = project chartChannel (FPC/auto), -2 = all channels, >=0 = explicit channel
+    double bpmOverride = 0;     // <=0 = use project BPM (or 120 for .fsc)
+    bool useMarkers = true;     // F3/F#3 camera & A3/A#3 alt markers when not overlapping configured lane ranges
+};
+
+// MIDI pitch number to FL Studio note name (e.g. 48 -> "C3", 60 -> "C4").
+std::string midiNoteName(int pitch);
+
 bool readFlp(std::string_view bytes, FlpProject& out, std::string& err);
 bool readFlpFile(const std::string& path, FlpProject& out, std::string& err);
 
@@ -50,8 +64,11 @@ std::vector<int> flpChartPatterns(const FlpProject& p, bool strict = true);
 // A pattern's name for a difficulty list ("Hard", or "Pattern 3").
 std::string flpPatternLabel(const FlpProject& p, int number);
 
-// SNIFF's conversion of one pattern (-1: the first with chart notes). The
-// project's tempo is used unless `bpm` is given (scores have none: 120).
+// Multikey SNIFF conversion with custom opponent/player MIDI note ranges.
+bool flpToChart(const FlpProject& p, int pattern, const FlpConvertOptions& opt, Chart& out, std::string& err);
+
+// Default 4K SNIFF conversion of one pattern (-1: the first with chart notes).
+// The project's tempo is used unless `bpm` is given (scores have none: 120).
 bool flpToChart(const FlpProject& p, int pattern, Chart& out, std::string& err, double bpm = 0);
 
 // "song.flp#3" names pattern 3 of song.flp (the library lists each pattern

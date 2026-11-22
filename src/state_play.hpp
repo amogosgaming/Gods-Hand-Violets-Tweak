@@ -115,6 +115,8 @@ private:
     // ---- layout and drawing (state_play.cpp)
     float noteSize() const;
     float laneWidth(int keys = 0) const;  // 0: the chart's
+    void rebuildLaneBindings();
+    void changeKeyCount(int oppKeys, int playerKeys);
     void layoutStrums();
     Vector2 strumCenter(int side, int lane) const;
     scene::Strum& strum(int side, int lane);
@@ -270,6 +272,8 @@ private:
     StrumAnim strumAnim_[2][kMaxKeys]{};
     unsigned chordTie_ = 0;  // rotates tie-breaking on exact-timestamp chords
     int heldCount_[kMaxKeys] = {};
+    int initKeys_ = 4;
+    int initSideKeys_[2] = {0, 0};
     std::vector<int> keyLane_ = std::vector<int>(Input::kMaxCodes, -1);
     std::vector<Popup> popups_;
     // Notes per second for the note counter (JS Engine / H-Slice): hits in the last second.

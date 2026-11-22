@@ -1,7 +1,8 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
-// Options menu and audio offset calibration.
+// Psych Engine-style Options menu with subsections, key bindings, note colors,
+// note skins, and audio offset calibration.
 #include <array>
 #include <cmath>
 #include <functional>
@@ -26,7 +27,7 @@ const Color kGold{255, 222, 64, 255};   // the accent: a bright, cartoon yellow
 const Color kIvory{242, 244, 255, 255};  // text: a cool white
 
 struct Row {
-    enum Kind { Header, Bool, Number, Choice, Action, Key } kind;
+    enum Kind { Bool, Number, Choice, Action, Key, AsmCpu } kind;
     std::string label, help;
     bool* b = nullptr;
     float* f = nullptr;
@@ -39,7 +40,17 @@ struct Row {
     std::function<std::string()> value;  // Action rows: shown before the arrow
     int lane = 0;
 };
-// The row Options was on, to come back to it from a screen it opened.
+
+struct OptionCategory {
+    std::string title;
+    std::string subtitle;
+    std::function<void()> directAction;  // non-empty: opens a dedicated screen (Note Colors, etc.)
+    std::vector<Row> rows;
+};
+
+// Remember which subsection and row Options was on when returning from a sub-screen.
+int gLastCategory = 0;
+int gLastOpenSection = -1;  // -1 = hub
 std::string gLastOptionsRow;
 
 // The words of s on as many lines as it takes to stay within `width`.
@@ -68,206 +79,38 @@ std::vector<std::string> wrapWidth(FontId f, const std::string& s, float size, f
 class OptionsState : public State {
 public:
     void enter() override {
-        Settings& s = app().settings;
-        auto pct = [](float v) { return std::string(TextFormat("%d%%", int(std::lround(v * 100)))); };
-        rows_ = {
-            {Row::Header, "GAMEPLAY", ""},
-            {Row::Bool, "Downscroll", "Notes fall from the top towards receptors at the bottom.", &s.downscroll},
-            {Row::Bool, "Middlescroll", "Centre your lanes and dim the opponent's.", &s.middlescroll},
-            {Row::Bool, "Ghost tapping", "When ON, pressing with no note to hit is not punished.", &s.ghostTapping},
-            {Row::Bool, "Auto pause", "The song pauses when the game's window loses focus (Psych's Auto Pause).", &s.autoPause},
-            {Row::Bool, "Disable reset button", "OFF: R during a song makes you lose at once, as in Psych.", &s.noReset},
-            {Row::Number, "Rating offset", "How late or early you hit for a Sick!. Higher: you have to hit later (Psych's Rating Offset).",
-             nullptr, &s.ratingOffset, -30, 30, 1},
-            {Row::Number, "Sick! hit window", "The time you have for the best rating (SICK!), either side of the note.", nullptr,
-             &s.sickWindow, 15, 45, 1},
-            {Row::Number, "Good hit window", "The time you have for a GOOD.", nullptr, &s.goodWindow, 15, 90, 1},
-            {Row::Number, "Bad hit window", "The time you have for a BAD.", nullptr, &s.badWindow, 15, 135, 1},
-            {Row::Number, "Safe frames", "How many frames (of 1/60 s) early or late a note can still be hit (Psych's Safe Frames).",
-             nullptr, &s.safeFrames, 2, 10, 0.1f},
-            {Row::Number, "Scroll speed", "0 = use each chart's own speed.", nullptr, &s.scrollSpeed, 0, 6, 0.1f},
-            {Row::Number, "Audio offset", "Positive if you hear the music late. Hold SHIFT for steps of 10 ms.", nullptr,
-             &s.offsetMs, -300, 300, 1},
-            {Row::Action, "Calibrate offset...", "Tap along to a metronome to measure your offset."},
-            {Row::Choice, "Audio latency", "The sound card's buffer: smaller is heard sooner (hit sounds, the song). Raise it "
-             "if the sound crackles. Applied the next time the game starts.", nullptr, nullptr, 0, 0, 0, &s.audioLatency,
-             {0, 1, 2, 3}, {"Lowest (6 ms)", "Low (15 ms)", "Normal (30 ms)", "Safe (60 ms)"}},
-            {Row::Bool, "Show timing (ms)", "Shows how early or late each hit was.", &s.showTimings},
-            {Row::Bool, "Opponent notes", "OFF hides the opponent's receptors and notes, as Psych's Opponent Notes.", &s.opponentNotes},
-            {Row::Bool, "Opponent strums", "Light up the opponent's receptors when they sing.", &s.opponentStrums},
-            {Row::Bool, "Note splashes", "Bursts of light on SICK! hits.", &s.noteSplashes},
-            {Row::Bool, "Touch controls", "Tap the lanes on a touchscreen (a mouse click counts as a tap).", &s.touchControls},
-            {Row::Bool, "Extra keys", "Charts made for 1 to 18 keys keep them, as in Psych Extra Keys. OFF: every chart has 4 keys, like Psych and JS Engine.",
-             &s.extraKeys},
-            {Row::Header, "CONTROLS  (4 KEYS)", ""},
-            {Row::Key, "Left lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
-            {Row::Key, "Down lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
-            {Row::Key, "Up lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
-            {Row::Key, "Right lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
-            {Row::Action, "Reset controls", "Restore D F J K and the arrow keys."},
-            {Row::Action, "Key bindings (1 to 18 keys)...", "The key of every lane for charts of 1 to 18 keys, as their arrows show "
-             "in a song. Works with a Bluetooth keyboard on Android too."},
-            {Row::Header, "GRAPHICS", ""},
-            {Row::Bool, "Fullscreen", "Borderless fullscreen (F11 works anywhere).", &s.fullscreen},
-            {Row::Bool, "VSync", "Waits for the screen's refresh. OFF: the frame limit below decides (most precise input).", &s.vsync},
-            {Row::Bool, "Low latency", "With VSync: no frames waiting in the driver, and each one drawn just before the screen "
-             "shows it while the keys are read every millisecond. What you press shows a refresh or more sooner.",
-             &s.lowLatency},
-            {Row::Choice, "Frame limit", "Higher limits make notes smoother. Input is polled at ~1000 Hz regardless.",
-             nullptr, nullptr, 0, 0, 0, &s.fpsCap, {60, 120, 144, 165, 240, 360, 500, 0}},
-            {Row::Bool, "Show FPS", "The frame rate at the top left.", &s.showFps},
-            {Row::Bool, "FPS: memory", "Under the frame rate: the memory the game uses, and the most it has used.", &s.fpsMemory},
-            {Row::Bool, "FPS: frame times", "How long updating and drawing take, the slowest frame of the last second, and a graph.",
-             &s.fpsFrameTimes},
-            {Row::Bool, "FPS: CPU, GPU and RAM", "How much of the processor the game uses, how busy the graphics card is and its memory, and the system's memory in use.", &s.fpsUsage},
-            {Row::Bool, "FPS: hardware", "The processor, graphics card, OpenGL version and system the game runs on.", &s.fpsHardware},
-            {Row::Bool, "Low detail", "Fewer particles and effects for slower machines.", &s.lowDetail},
-            {Row::Bool, "Flashing lights", "Screen flashes on some beats.", &s.flashing},
-            {Row::Bool, "Camera zoom on beat", "Only the beat bops: zoom events from charts and scripts always work.", &s.camZoom},
-            {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on weak devices.", &s.shaders},
-            {Row::Bool, "Anti-aliasing", "Smooth scaling of mod pictures. OFF: sharp pixels and a little faster (Psych's Anti-Aliasing).",
-             &s.antialiasing},
-            {Row::Choice, "Note detail", "Spam charts: Adaptive draws notes stacked a few pixels apart once while the frame rate is "
-             "under 60 (every note is still played). Full: every pixel.", nullptr, nullptr, 0, 0, 0, &s.noteDetail, {0, 1},
-             {"Adaptive", "Full"}},
-            {Row::Choice, "Note renderer", "What draws the notes. Auto: the graphics card, or the processor's assembly when "
-             "OpenGL itself runs on the processor (llvmpipe, SwiftShader...), where that is faster. GPU: the graphics card. "
-             "CPU (ASM): the processor, with assembly (SSE2 on x86-64, NEON on ARM64 phones and Macs; other processors use "
-             "C++). CPU (C++): the processor, in C++. Turned notes and mines stay on the GPU. F3 in a song shows the time "
-             "it takes.", nullptr, nullptr, 0, 0, 0, &s.noteRenderer, {3, 0, 1, 2},
-             {"Auto", "GPU", std::string("CPU (") + (raster::haveAsm() ? (std::string(raster::asmName()).rfind("ARM", 0) == 0 ? "ARM64" : "x86") : "no") + " ASM)",
-              "CPU (C++)"}},
-            {Row::Header, "INTERFACE", ""},
-            {Row::Choice, "Note counter", "Notes hit so far, under the score: your side only, or both sides added up.", nullptr,
-             nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2}, {"Off", "Your side", "Both sides"}},
-            {Row::Bool, "Psych Engine interface", "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds, from your own copy.",
-             &s.psychUi},
-            {Row::Bool, "Psych Engine menus", "Apply the Psych Engine look to the title, main menu, freeplay, options and other menus too.",
-             &s.psychMenus},
-            {Row::Bool, "Menu background blur", "Blur the background on the main menu and Freeplay.", &s.menuBlur},
-            {Row::Bool, "Hit popups", "Rating pictures and combo numbers that pop up on each hit.", &s.hitPopups},
-            {Row::Choice, "Time bar", "The bar at the top of the screen, as in Psych.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
-             {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
-            {Row::Number, "Health bar opacity", "The health bar and the icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
-            {Row::Bool, "Hide HUD", "Hides the health bar, the icons, the score line and the ratings, as Psych's Hide HUD.", &s.hideHud},
-            {Row::Bool, "Watermark", "\"God's Hand Engine v.(version) (system) Slop Edition\" in the bottom-left corner of songs, as JS Engine shows its own.",
-             &s.watermark},
-            {Row::Bool, "Audio visualizer",
-             "Bars in the top-right corner of songs that move with the music. Their colour follows the chart: whose turn it "
-             "is, how thick the notes are, your hits and misses, and your health.",
-             &s.visualizer},
-            {Row::Bool, "Score text zoom on hit", "The score line grows a little on each note you hit, as in Psych.", &s.scoreZoom},
-            {Row::Bool, "Botplay text", "BOTPLAY (or REPLAY) on screen while the game plays by itself.", &s.botplayText},
-            {Row::Bool, "Combo stacking", "Ratings and combo numbers pile up. OFF: only the latest one, easier to read.",
-             &s.comboStacking},
-            {Row::Number, "Note splash opacity", "How see-through the bursts on your best hits are.", nullptr, &s.splashAlpha, 0, 1, 0.1f},
-            {Row::Action, "Note skin...", "The Psych interface's note skin, with its notes on show: Default and the noteSkins/ "
-             "pictures of your Psych copy and of every installed mod."},
-            {Row::Action, "Note colors...", "The Psych interface's note colours, as in Psych's Note Colors menu."},
-            {Row::Number, "Rating position X", "Where the ratings pop up (Psych's Adjust Combo).", nullptr, &s.comboOffset[0], -600, 600, 1},
-            {Row::Number, "Rating position Y", "", nullptr, &s.comboOffset[1], -400, 400, 1},
-            {Row::Number, "Combo position X", "Where the combo digits pop up.", nullptr, &s.comboOffset[2], -600, 600, 1},
-            {Row::Number, "Combo position Y", "", nullptr, &s.comboOffset[3], -400, 400, 1},
-            {Row::Choice, "Pause screen song", "The pause menu's music with the Psych Engine interface.", nullptr, nullptr, 0, 0, 0,
-             &s.pauseMusic, {0, 1, 2}, {"None", "Breakfast", "Tea Time"}},
-            {Row::Header, "RENDER MODE VIDEOS", ""},
-            {Row::Choice, "Video size", "For RENDER MODE on the main menu: the song plays by itself and is recorded to a video in "
-             "renders/, frame by frame, smooth even if the device cannot keep up. On a computer it needs ffmpeg (next to the game "
-             "or installed); on Android the phone's own encoder makes it and it goes to Movies/GodsHand.", nullptr, nullptr, 0, 0, 0,
-             &s.renderSize, {0, 1, 2, 3},
-             {"1280x720", "1920x1080", "2560x1440", "3840x2160"}},
-            {Row::Choice, "Video frame rate", "", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
-            {Row::Choice, "Video encoder", "Auto: the graphics card's own encoder when this computer has one that works (much faster), "
-             "else x264. x264 and x265 use the processor; the NVIDIA, AMD and Intel ones the graphics card.", nullptr, nullptr, 0, 0, 0,
-             &s.renderEncoder, {7, 0, 1, 2, 3, 4, 5, 6},
-             {"Auto", "H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
-            {Row::Choice, "Video bitrate", "Higher is sharper and bigger. Spam charts move a lot: 20 Mbps or more.", nullptr, nullptr, 0,
-             0, 0, &s.renderBitrate, {5, 10, 20, 40, 80}, {"5 Mbps", "10 Mbps", "20 Mbps", "40 Mbps", "80 Mbps"}},
-            {Row::Bool, "Video audio", "The song (instrumental and voices) in the video.", &s.renderAudio},
-            {Row::Header, "AUDIO", ""},
-            {Row::Number, "Master volume", "", nullptr, &s.masterVol, 0, 1, 0.05f},
-            {Row::Number, "Music volume", "", nullptr, &s.musicVol, 0, 1, 0.05f},
-            {Row::Number, "Sound effects", "", nullptr, &s.sfxVol, 0, 1, 0.05f},
-            {Row::Number, "Hit sounds", "A tick on every note you hit, placed on the note's exact sample.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
-            {Row::Choice, "Hitsound polyphony",
-             "Off: each hit cuts the last (clean tone on spam). Polyphonic: up to 64 stacked hits per side. Unlimited: every hit stacks.",
-             nullptr, nullptr, 0, 0, 0, &s.hitsoundPolyphony, {0, 1, 2}, {"Off (cut self)", "Polyphonic", "Unlimited"}},
-            {Row::Bool, "Hitsound limiter", "Soft-clips stacked hitsounds so loud chords do not distort harshly.", &s.hitsoundLimiter},
-            {Row::Header, "DEBUG", ""},
-            {Row::Choice, "Lua errors", "Errors of mod scripts on screen. Psych shows them only for scripts that set luaDebugMode.",
-             nullptr, nullptr, 0, 0, 0, &s.luaErrors, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
-            {Row::Choice, "Lua warnings", "Missing images, sounds and objects that mods ask for. Psych: only with luaDebugMode.",
-             nullptr, nullptr, 0, 0, 0, &s.luaWarnings, {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
-            {Row::Bool, "Lua note callbacks", "Scripts hear every hit and miss (goodNoteHit, noteMiss...). OFF is faster on spam "
-             "charts: plain notes are not passed on, but notes with a note type always are.", &s.luaNoteCallbacks},
-        };
-        for (Row& r : rows_) {
-            if (r.label == "Scroll speed") r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
-            else if (r.label == "Audio offset" || r.label == "Rating offset")
-                r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
-            else if (r.label.find("hit window") != std::string::npos)
-                r.fmt = [](float v) { return std::string(TextFormat("%d ms", int(std::lround(v)))); };
-            else if (r.label == "Safe frames") r.fmt = [](float v) { return std::string(TextFormat("%.1f", v)); };
-            else if (r.label.find("position") != std::string::npos)
-                r.fmt = [](float v) { return std::string(TextFormat("%+d", int(std::lround(v)))); };
-            else if (r.kind == Row::Number) r.fmt = pct;
-            if (r.label == "Calibrate offset...") r.action = [] { app().change(makeCalibration()); };
-            if (r.label == "Note colors...") r.action = [] { app().change(makeNoteColors()); };
-            if (r.label == "Key bindings (1 to 18 keys)...") r.action = [] { app().change(makeKeyBindings()); };
-            if (r.label == "Note skin...") {
-                r.action = [] { app().change(makeNoteSkins()); };
-                r.value = [&s] { return s.noteSkin.empty() ? std::string("Default") : s.noteSkin; };
-            }
-            if (r.label == "Reset controls")
-                r.action = [&s] {
-                    const Settings d;
-                    for (int l = 0; l < 4; ++l)
-                        for (int k = 0; k < 2; ++k) s.keys4[l][k] = d.keys4[l][k];
-                    app().saveSettings();
-                };
+        buildCategories();
+        catSel_ = clampv(gLastCategory, 0, int(cats_.size()) - 1);
+        catAnim_ = float(catSel_);
+        openSection_ = (gLastOpenSection >= 0 && gLastOpenSection < int(cats_.size()) && !cats_[size_t(gLastOpenSection)].rows.empty())
+                           ? gLastOpenSection
+                           : -1;
+        sel_ = 0;
+        if (openSection_ >= 0) {
+            const auto& rows = cats_[size_t(openSection_)].rows;
+            for (int i = 0; i < int(rows.size()); ++i)
+                if (rows[size_t(i)].label == gLastOptionsRow) sel_ = i;
         }
-        int lane = 0;
-        for (Row& r : rows_)
-            if (r.kind == Row::Key) r.lane = lane++;
-        if (platform::kAndroid) {
-            // No window to resize, the lanes are the screen itself, and Render
-            // Mode uses the phone's own H.264 encoder: no encoder to pick. The
-            // key bindings stay, for a Bluetooth keyboard.
-            std::vector<Row> kept;
-            for (Row& r : rows_) {
-                if (r.label == "Fullscreen" || r.label == "Touch controls" || r.label == "Video encoder") continue;
-                kept.push_back(std::move(r));
-            }
-            rows_ = std::move(kept);
-        }
-        sel_ = 1;
-        for (int i = 0; i < int(rows_.size()); ++i)
-            if (rows_[size_t(i)].kind != Row::Header && rows_[size_t(i)].label == gLastOptionsRow) sel_ = i;
         anim_ = float(sel_);
     }
 
     void update(double dt) override {
         App& a = app();
         Input& in = a.input;
-        anim_ = approach(anim_, float(sel_), 12.0f, float(dt));
-        // A folder dropped on the window, or the Android picker finishing.
-        if (IsFileDropped()) {
-            FilePathList dropped = LoadDroppedFiles();
-            if (dropped.count > 0 && DirectoryExists(dropped.paths[0])) setFolder(dropped.paths[0]);
-            UnloadDroppedFiles(dropped);
+        if (openSection_ < 0) {
+            updateHub(dt);
+            return;
         }
-        if (pickingFolder_) {
-            int n = 0;
-            const platform::Import st = platform::importStatus(&n);
-            if (st == platform::Import::Done || st == platform::Import::Nothing) {
-                pickingFolder_ = false;
-                platform::resetImport();
-                if (st == platform::Import::Done) setFolder(platform::dataDir() + "psych-ui/");
-                else if (a.settings.psychFolder.empty()) a.settings.psychUi = false;
-            }
+        auto& rows = cats_[size_t(openSection_)].rows;
+        if (rows.empty()) {
+            openSection_ = -1;
+            gLastOpenSection = -1;
+            return;
         }
-        refreshFolderHelp();
-        Row& r = rows_[size_t(sel_)];
+        sel_ = clampv(sel_, 0, int(rows.size()) - 1);
+        anim_ = approach(anim_, float(sel_), 14.0f, float(dt));
+        Row& r = rows[size_t(sel_)];
+
         if (waiting_) {
             const int code = in.firstPressed();
             if (code == KEY_ESCAPE) { waiting_ = false; sfxPlay(Sfx::Cancel); }
@@ -279,8 +122,18 @@ public:
             }
             return;
         }
-        if (in.up()) move(-1);
-        if (in.down()) move(1);
+
+        if (in.up()) {
+            sel_ = (sel_ + int(rows.size()) - 1) % int(rows.size());
+            gLastOptionsRow = rows[size_t(sel_)].label;
+            sfxPlay(Sfx::Scroll);
+        }
+        if (in.down()) {
+            sel_ = (sel_ + 1) % int(rows.size());
+            gLastOptionsRow = rows[size_t(sel_)].label;
+            sfxPlay(Sfx::Scroll);
+        }
+
         const int dir = in.left() ? -1 : (in.right() ? 1 : 0);
         const bool shift = in.isDown(KEY_LEFT_SHIFT) || in.isDown(KEY_RIGHT_SHIFT);
         bool changed = false;
@@ -290,8 +143,7 @@ public:
                     if (r.label == "Fullscreen") a.toggleFullscreen();
                     else *r.b = !*r.b;
                     if (r.label == "VSync") platform::setVsync(a.settings.vsync);
-                    if (r.b == &a.settings.antialiasing) psychUi().setSmooth(a.settings.antialiasing);  // the loaded pictures too
-                    if (r.label == "Psych Engine interface") a.applyPsychUi();  // the best copy found among the mods
+                    if (r.b == &a.settings.antialiasing) psychUi().setSmooth(a.settings.antialiasing);
                     changed = true;
                 }
                 break;
@@ -312,15 +164,37 @@ public:
                     changed = true;
                 }
                 break;
+            case Row::AsmCpu: {
+                // 3 CPU options: 0 = x86 SSE2 (enabled), 1 = x86-64 SSE4 (disabled), 2 = AVX2 (disabled).
+                if (dir || in.accept()) {
+                    const int cur = clampv(a.settings.noteAsmCpu, 0, 2);
+                    const int next = (cur + (dir ? dir : 1) + 3) % 3;
+                    const auto opt = static_cast<raster::CpuAsmOption>(next);
+                    if (raster::cpuAsmEnabled(opt)) {
+                        a.settings.noteAsmCpu = next;
+                        changed = true;
+                    } else {
+                        a.settings.noteAsmCpu = 0;
+                        sfxPlay(Sfx::Cancel);
+                        a.notify(std::string(raster::cpuAsmLabel(opt)) + " ASM option is currently disabled (using x86 SSE2)", 3.5);
+                    }
+                }
+                break;
+            }
             case Row::Action:
-                if (in.accept()) { sfxPlay(Sfx::Confirm); r.action(); }
+                if (in.accept()) {
+                    gLastCategory = openSection_;
+                    gLastOpenSection = openSection_;
+                    gLastOptionsRow = r.label;
+                    sfxPlay(Sfx::Confirm);
+                    r.action();
+                }
                 break;
             case Row::Key:
                 if (dir) { slot_ = 1 - slot_; sfxPlay(Sfx::Scroll); }
                 if (in.pressed(KEY_BACKSPACE)) { a.settings.keys4[r.lane][slot_] = 0; a.saveSettings(); }
                 else if (in.accept()) { waiting_ = true; sfxPlay(Sfx::Scroll); }
                 break;
-            default: break;
         }
         if (changed) {
             sfxPlay(Sfx::Scroll);
@@ -330,7 +204,47 @@ public:
         if (in.back() && !in.pressed(KEY_BACKSPACE)) {
             a.saveSettings();
             sfxPlay(Sfx::Cancel);
-            if (a.optionsReturn) {  // opened from a song's pause menu: back to that song
+            openSection_ = -1;
+            gLastOpenSection = -1;
+        }
+    }
+
+    void draw() override {
+        if (openSection_ < 0) drawHub();
+        else drawSection();
+    }
+
+    bool keyReserved(int) const override { return waiting_; }
+
+private:
+    void updateHub(double dt) {
+        App& a = app();
+        Input& in = a.input;
+        const int nc = int(cats_.size());
+        catAnim_ = approach(catAnim_, float(catSel_), 14.0f, float(dt));
+        if (in.up()) { catSel_ = (catSel_ + nc - 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
+        if (in.down()) { catSel_ = (catSel_ + 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
+        if (in.accept()) {
+            const OptionCategory& c = cats_[size_t(catSel_)];
+            gLastCategory = catSel_;
+            sfxPlay(Sfx::Confirm);
+            if (c.directAction) {
+                gLastOpenSection = -1;
+                c.directAction();
+            } else {
+                openSection_ = catSel_;
+                gLastOpenSection = openSection_;
+                sel_ = 0;
+                anim_ = 0;
+                if (!c.rows.empty()) gLastOptionsRow = c.rows[0].label;
+            }
+            return;
+        }
+        if (in.back() && !in.pressed(KEY_BACKSPACE)) {
+            a.saveSettings();
+            gLastOpenSection = -1;
+            sfxPlay(Sfx::Cancel);
+            if (a.optionsReturn) {
                 const PlayRequest req = *a.optionsReturn;
                 a.optionsReturn.reset();
                 a.change(makePlay(req));
@@ -340,42 +254,97 @@ public:
         }
     }
 
-    void draw() override {
+    void drawHub() {
         App& a = app();
-        const bool psych = a.psychMenusActive();
         const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        if (psych) {
-            drawPsychMenuBackground(1, Color{234, 113, 253, 255}, anim_ * 8.0f, false, a.now, 0xEA71FD, menuPulse());
-            DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
-            if (ui.alphabet("OPTIONS", 56.0f, 16.0f, 52.0f, 1.0f) < 0) ui.uiText("OPTIONS", 56.0f, 18.0f, 44.0f, WHITE, -1, 2.5f);
-        } else {
-            drawMenuBackground(a.now, 0x5C9CFF, menuPulse());
-            gfx::text(FontId::Title, "OPTIONS", 60, 22, 48, kGold, Align::Left, 2.0f);
+        drawPsychMenuBackground(1, Color{234, 113, 253, 255}, catAnim_ * 12.0f, false, a.now, 0xEA71FD, menuPulse());
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 125});
+        if (ui.alphabet("OPTIONS", 56.0f, 18.0f, 52.0f, 1.0f) < 0)
+            ui.uiText("OPTIONS", 56.0f, 20.0f, 44.0f, WHITE, -1, 2.5f);
+
+        const int nc = int(cats_.size());
+        for (int i = 0; i < nc; ++i) {
+            const bool on = i == catSel_;
+            const float y = 132.0f + float(i) * 62.0f;
+            const float alpha = on ? 1.0f : 0.6f;
+            const std::string title = cats_[size_t(i)].title;
+            const float h = on ? 50.0f : 42.0f;
+            if (on) {
+                DrawRectangleRec({170.0f, y - 4.0f, gfx::W - 340.0f, 56.0f}, Color{0, 0, 0, 115});
+                ui.uiText(">", 205.0f + std::sin(float(a.now) * 6.0f) * 5.0f, y + 6.0f, 34.0f, kGold, 0, 2.0f);
+                ui.uiText("<", gfx::W - 205.0f - std::sin(float(a.now) * 6.0f) * 5.0f, y + 6.0f, 34.0f, kGold, 0, 2.0f);
+            }
+            if (ui.alphabetCentered(title, gfx::W * 0.5f, y + (on ? 2.0f : 6.0f), h, alpha) < 0)
+                ui.uiText(title, gfx::W * 0.5f, y + 8.0f, on ? 38.0f : 32.0f, fade(on ? kGold : WHITE, alpha), 0, 2.0f);
         }
-        for (int i = 0; i < int(rows_.size()); ++i) {
-            const float y = 330 + (float(i) - anim_) * 48;
-            if (y < 80 || y > 625) continue;
-            const Row& r = rows_[size_t(i)];
+
+        const OptionCategory& cur = cats_[size_t(catSel_)];
+        DrawRectangleRec({60, gfx::H - 96, gfx::W - 120, 48}, Color{0, 0, 0, 185});
+        ui.uiText(cur.subtitle, gfx::W * 0.5f, gfx::H - 83.0f, 20.0f, WHITE, 0, 1.5f);
+        if (!a.touchMode) {
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            ui.uiText("UP/DOWN select category   ENTER open   ESC save and back", gfx::W * 0.5f, gfx::H - 31.0f, 17.0f,
+                      Color{220, 214, 235, 255}, 0, 1.25f);
+        }
+        gfx::endCanvas();
+    }
+
+    void drawSection() {
+        App& a = app();
+        const PsychUi& ui = psychUi();
+        const OptionCategory& cat = cats_[size_t(openSection_)];
+        const auto& rows = cat.rows;
+        gfx::beginCanvas();
+        drawPsychMenuBackground(1, Color{234, 113, 253, 255}, anim_ * 8.0f, false, a.now, 0xEA71FD, menuPulse());
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+
+        if (ui.alphabet(cat.title, 56.0f, 16.0f, 48.0f, 1.0f) < 0)
+            ui.uiText(cat.title, 56.0f, 18.0f, 42.0f, WHITE, -1, 2.5f);
+        ui.uiText("OPTIONS > " + cat.title, gfx::W - 56.0f, 30.0f, 18.0f, fade(WHITE, 0.7f), 1, 1.5f);
+
+        for (int i = 0; i < int(rows.size()); ++i) {
+            const float y = 320.0f + (float(i) - anim_) * 52.0f;
+            if (y < 86.0f || y > 610.0f) continue;
+            const Row& r = rows[size_t(i)];
             const bool on = i == sel_;
-            const float alpha = saturate(1.0f - std::fabs(float(i) - anim_) * 0.1f);
-            if (r.kind == Row::Header) {
-                if (psych) {
-                    if (ui.alphabet(r.label, 140.0f, y + 4.0f, 30.0f, alpha) < 0)
-                        ui.uiText(r.label, 140.0f, y + 4.0f, 26.0f, fade(kGold, alpha), -1, 2.0f);
-                    DrawRectangleRec({140, y + 40, 1000, 2}, fade(WHITE, 0.35f * alpha));
-                } else {
-                    gfx::text(FontId::Title, r.label, 140, y + 2, 28, fade(kGold, alpha), Align::Left, 1.5f);
-                    DrawRectangleRec({140, y + 38, 1000, 2}, fade(kGold, 0.4f * alpha));
+            const float alpha = saturate(1.0f - std::fabs(float(i) - anim_) * 0.12f);
+            if (on) DrawRectangleRec({110.0f, y - 5.0f, gfx::W - 220.0f, 46.0f}, Color{255, 255, 255, 38});
+            ui.uiText(r.label, 140.0f, y + 4.0f, 26.0f, fade(on ? WHITE : kIvory, alpha), -1, 2.0f);
+
+            if (r.kind == Row::Key) {
+                for (int k = 0; k < 2; ++k) {
+                    const bool hl = on && k == slot_;
+                    const std::string name = (hl && waiting_) ? "press a key..." : keyName(a.settings.keys4[r.lane][k]);
+                    const float x = 840.0f + k * 170.0f;
+                    DrawRectangleRec({x - 75, y - 2, 150, 40}, hl ? Color{255, 255, 255, 70} : Color{0, 0, 0, 130});
+                    ui.uiText(name, x, y + 6.0f, 22.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
+                }
+                gfx::drawNote(r.lane, {720, y + 18}, 40, alpha);
+                continue;
+            }
+            if (r.kind == Row::AsmCpu) {
+                // Draw all 3 CPU ASM targets; x86 SSE2 active, x86-64 SSE4 & AVX2 clearly disabled.
+                const int activeOpt = clampv(a.settings.noteAsmCpu, 0, 2);
+                const float x0 = 615.0f;
+                const float wChip = 170.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const auto opt = static_cast<raster::CpuAsmOption>(k);
+                    const bool enabled = raster::cpuAsmEnabled(opt);
+                    const bool chosen = enabled && (activeOpt == k);
+                    const float cx = x0 + float(k) * (wChip + 8.0f);
+                    Color bg = chosen ? Color{70, 115, 70, 200} : (enabled ? Color{30, 30, 42, 175} : Color{22, 22, 28, 160});
+                    DrawRectangleRec({cx, y - 2.0f, wChip, 38.0f}, bg);
+                    DrawRectangleLinesEx({cx, y - 2.0f, wChip, 38.0f}, chosen ? 2.0f : 1.0f,
+                                         chosen ? kGold : (enabled ? fade(WHITE, 0.45f) : fade(WHITE, 0.16f)));
+                    const std::string text = enabled ? std::string(raster::cpuAsmLabel(opt))
+                                                     : (std::string(raster::cpuAsmLabel(opt)) + " [OFF]");
+                    const Color tc = chosen ? kGold : (enabled ? WHITE : Color{135, 135, 148, 255});
+                    ui.uiText(text, cx + wChip * 0.5f, y + 8.0f, 16.0f, fade(tc, alpha), 0, 1.25f);
                 }
                 continue;
             }
-            if (on) {
-                if (psych) DrawRectangleRec({150, y - 4, 980, 44}, Color{255, 255, 255, 36});
-                else DrawRectangleRounded({150, y - 4, 980, 44}, 0.3f, 8, Color{255, 214, 120, 40});
-            }
-            if (psych) ui.uiText(r.label, 180.0f, y + 4.0f, 26.0f, fade(on ? WHITE : kIvory, alpha), -1, 2.0f);
-            else gfx::text(FontId::Ui, r.label, 180, y, 34, fade(on ? WHITE : kIvory, alpha), Align::Left, 1.5f);
+
             std::string val;
             switch (r.kind) {
                 case Row::Bool: val = (r.label == "Fullscreen" ? a.settings.fullscreen : *r.b) ? "ON" : "OFF"; break;
@@ -389,98 +358,232 @@ public:
                     }
                     break;
                 case Row::Action: val = r.value ? r.value() + "  >" : ">"; break;
-                case Row::Key: {
-                    for (int k = 0; k < 2; ++k) {
-                        const bool hl = on && k == slot_;
-                        std::string name = (hl && waiting_) ? "press a key..." : keyName(a.settings.keys4[r.lane][k]);
-                        const float x = 820.0f + k * 170.0f;
-                        if (psych) {
-                            DrawRectangleRec({x - 75, y - 2, 150, 40}, hl ? Color{255, 255, 255, 70} : Color{0, 0, 0, 125});
-                            ui.uiText(name, x, y + 6.0f, 22.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
-                        } else {
-                            DrawRectangleRounded({x - 75, y - 2, 150, 40}, 0.3f, 8, hl ? Color{255, 214, 120, 90} : Color{0, 0, 0, 90});
-                            gfx::text(FontId::Ui, name, x, y + 2, 30, fade(hl ? WHITE : kIvory, alpha), Align::Center);
-                        }
-                    }
-                    gfx::drawNote(r.lane, {700, y + 18}, 40, alpha);
-                    continue;
-                }
                 default: break;
             }
             const std::string shownVal = (on && r.kind != Row::Action ? "<  " : "") + val + (on && r.kind != Row::Action ? "  >" : "");
-            if (psych) ui.uiText(shownVal, 1100.0f, y + 4.0f, 26.0f, fade(on ? kGold : WHITE, alpha), 1, 2.0f);
-            else gfx::text(FontId::Ui, shownVal, 1100, y, 34, fade(on ? kGold : kIvory, alpha), Align::Right, 1.5f);
+            ui.uiText(shownVal, gfx::W - 140.0f, y + 4.0f, 26.0f, fade(on ? kGold : WHITE, alpha), 1, 2.0f);
         }
-        const Row& r = rows_[size_t(sel_)];
-        if (psych) {
-            DrawRectangleRec({60, gfx::H - 96, gfx::W - 120, 52}, Color{0, 0, 0, 185});
-            ui.uiText(r.help, gfx::W * 0.5f, gfx::H - 84.0f, 19.0f, WHITE, 0, 1.5f);
-        } else {
-            DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
-            gfx::text(FontId::Ui, r.help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
-        }
+
+        const Row& r = rows[size_t(sel_)];
+        DrawRectangleRec({60, gfx::H - 102, gfx::W - 120, 56}, Color{0, 0, 0, 190});
+        const std::vector<std::string> helpLines = wrapWidth(FontId::Ui, r.help, 18.0f, gfx::W - 160.0f);
+        for (size_t li = 0; li < std::min<size_t>(2, helpLines.size()); ++li)
+            ui.uiText(helpLines[li], gfx::W * 0.5f, gfx::H - 94.0f + float(li) * 22.0f, 18.0f, WHITE, 0, 1.25f);
         if (!a.touchMode) {
             DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
-            const char* hint = "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC save and back";
-            if (psych) ui.uiText(hint, gfx::W * 0.5f, gfx::H - 31.0f, 17.0f, Color{220, 214, 235, 255}, 0, 1.25f);
-            else gfx::text(FontId::Ui, hint, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+            ui.uiText("UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC back to categories", gfx::W * 0.5f, gfx::H - 31.0f,
+                      17.0f, Color{220, 214, 235, 255}, 0, 1.25f);
         }
         gfx::endCanvas();
     }
 
-private:
-    void chooseFolder() {
-        App& a = app();
-        if (platform::kAndroid) {
-            pickingFolder_ = true;
-            platform::pickFolder("Choose your Psych Engine or JS Engine folder");
-            return;
-        }
-        const std::string path = platform::pickFolder("Choose your Psych Engine or JS Engine folder");
-        if (!path.empty()) setFolder(path);
-        else if (a.settings.psychFolder.empty()) {
-            a.settings.psychUi = false;
-            a.psychReport = "No folder chosen (you can also drop the folder on this window)";
-        }
-    }
-    void setFolder(const std::string& path) {
-        App& a = app();
-        a.settings.psychFolder = path;
-        a.settings.psychUi = true;
-        a.applyPsychUi();
-        a.saveSettings();
-        sfxPlay(Sfx::Confirm);
-    }
-    // The interface's pictures and sounds come from the most complete Psych
-    // Engine / JS Engine copy among the mods (engine packs such as JS Engine or
-    // H-Slice): its row says which, or that there is none.
-    void refreshFolderHelp() {
-        const App& a = app();
-        for (Row& r : rows_)
-            if (r.label == "Psych Engine interface") {
-                const std::string base = "Psych's notes, ratings, health and time bars, fonts, pause menu and sounds.";
-                if (pickingFolder_) r.help = "Copying the interface files...";
-                else if (!a.psychFolderInUse.empty()) r.help = base + " From " + platform::displayPath(a.psychFolderInUse) + ".";
-                else if (a.settings.psychUi)
-                    r.help = base + " No copy among your mods yet: install an engine pack such as JS Engine or H-Slice (Freeplay > MOD PACKS).";
-                else r.help = base;
+    void buildCategories() {
+        Settings& s = app().settings;
+        auto pct = [](float v) { return std::string(TextFormat("%d%%", int(std::lround(v * 100)))); };
+        cats_.clear();
+
+        // 1. Note Colors (direct screen, just like Psych Engine)
+        cats_.push_back({"NOTE COLORS", "Customize the main, highlight and outline colors for each note direction.",
+                         [] { app().change(makeNoteColors()); }, {}});
+
+        // 2. Controls
+        {
+            OptionCategory c{"CONTROLS", "Rebind 4-key lanes or configure multi-key (1 to 18 keys) bindings.", {}, {}};
+            c.rows = {
+                {Row::Key, "Left lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
+                {Row::Key, "Down lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
+                {Row::Key, "Up lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
+                {Row::Key, "Right lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
+                {Row::Action, "Reset 4-key controls", "Restore D F J K and the arrow keys."},
+                {Row::Action, "Key bindings (1 to 18 keys)...", "Configure every lane key for 1 to 18 key charts."},
+            };
+            int lane = 0;
+            for (Row& r : c.rows) {
+                if (r.kind == Row::Key) r.lane = lane++;
+                if (r.label == "Reset 4-key controls")
+                    r.action = [&s] {
+                        const Settings d;
+                        for (int l = 0; l < 4; ++l)
+                            for (int k = 0; k < 2; ++k) s.keys4[l][k] = d.keys4[l][k];
+                        app().saveSettings();
+                    };
+                if (r.label == "Key bindings (1 to 18 keys)...") r.action = [] { app().change(makeKeyBindings()); };
             }
-    }
-    bool pickingFolder_ = false;
+            cats_.push_back(std::move(c));
+        }
 
-    void move(int d) {
-        const int n = int(rows_.size());
-        do { sel_ = (sel_ + d + n) % n; } while (rows_[size_t(sel_)].kind == Row::Header);
-        gLastOptionsRow = rows_[size_t(sel_)].label;
-        sfxPlay(Sfx::Scroll);
+        // 3. Adjust Delay and Combo
+        {
+            OptionCategory c{"ADJUST DELAY AND COMBO", "Calibrate audio offset, buffer latency, and rating/combo popup positions.", {}, {}};
+            c.rows = {
+                {Row::Action, "Calibrate offset...", "Tap along to a metronome to measure your audio/visual offset."},
+                {Row::Number, "Audio offset", "Positive if you hear the music late. Hold SHIFT for steps of 10 ms.", nullptr,
+                 &s.offsetMs, -300, 300, 1},
+                {Row::Choice, "Audio latency", "Audio buffer size: lower is faster; raise if sound crackles (next start).", nullptr, nullptr, 0, 0,
+                 0, &s.audioLatency, {0, 1, 2, 3}, {"Lowest (6 ms)", "Low (15 ms)", "Normal (30 ms)", "Safe (60 ms)"}},
+                {Row::Number, "Rating position X", "Horizontal offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[0], -600, 600, 1},
+                {Row::Number, "Rating position Y", "Vertical offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[1], -400, 400, 1},
+                {Row::Number, "Combo position X", "Horizontal offset for combo digit popups.", nullptr, &s.comboOffset[2], -600, 600, 1},
+                {Row::Number, "Combo position Y", "Vertical offset for combo digit popups.", nullptr, &s.comboOffset[3], -400, 400, 1},
+            };
+            for (Row& r : c.rows) {
+                if (r.label == "Calibrate offset...") r.action = [] { app().change(makeCalibration()); };
+                else if (r.label == "Audio offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
+                else if (r.kind == Row::Number) r.fmt = [](float v) { return std::string(TextFormat("%+d", int(std::lround(v)))); };
+            }
+            cats_.push_back(std::move(c));
+        }
+
+        // 4. Graphics
+        {
+            OptionCategory c{"GRAPHICS", "Display, framerate, ASM note renderer CPU target, shaders, and FPS overlay.", {}, {}};
+            c.rows = {
+                {Row::Bool, "Fullscreen", "Borderless fullscreen (F11 works anywhere).", &s.fullscreen},
+                {Row::Bool, "VSync", "Waits for display refresh. OFF uses Frame limit below for lowest input latency.", &s.vsync},
+                {Row::Bool, "Low latency", "With VSync: paces frame submission right before display refresh.", &s.lowLatency},
+                {Row::Choice, "Frame limit", "Higher limits make note scrolling smoother. Input is polled independently.", nullptr, nullptr,
+                 0, 0, 0, &s.fpsCap, {60, 120, 144, 165, 240, 360, 500, 0}},
+                {Row::Bool, "Anti-aliasing", "Smooth scaling of sprites. OFF uses sharp pixels and runs slightly faster.", &s.antialiasing},
+                {Row::Bool, "Shaders", "Mod shaders and screen effects. OFF is faster on older GPUs.", &s.shaders},
+                {Row::Bool, "Low detail", "Fewer particles and effects for slower machines.", &s.lowDetail},
+                {Row::Choice, "Note detail", "Spam charts: Adaptive collapses stacked notes when FPS drops; Full draws every pixel.", nullptr,
+                 nullptr, 0, 0, 0, &s.noteDetail, {0, 1}, {"Adaptive", "Full"}},
+                {Row::Choice, "Note renderer", "Auto picks GPU unless software OpenGL is detected. CPU (ASM) uses SIMD assembly blending.", nullptr,
+                 nullptr, 0, 0, 0, &s.noteRenderer, {3, 0, 1, 2}, {"Auto", "GPU", "CPU (ASM)", "CPU (C++)"}},
+                {Row::AsmCpu, "ASM CPU target",
+                 "ASM note renderer CPU target: x86 SSE2 (active), x86-64 SSE4 (disabled), AVX2 (disabled)."},
+                {Row::Bool, "Show FPS", "Display the frame rate counter in the top-left corner.", &s.showFps},
+                {Row::Bool, "FPS: memory", "Show process memory usage and peak under FPS.", &s.fpsMemory},
+                {Row::Bool, "FPS: frame times", "Show update/draw timings and frame-time graph under FPS.", &s.fpsFrameTimes},
+                {Row::Bool, "FPS: CPU, GPU and RAM", "Show CPU/GPU load and memory usage under FPS.", &s.fpsUsage},
+                {Row::Bool, "FPS: hardware", "Show CPU, GPU, OpenGL version and OS under FPS.", &s.fpsHardware},
+            };
+            if (platform::kAndroid) {
+                c.rows.erase(std::remove_if(c.rows.begin(), c.rows.end(), [](const Row& r) { return r.label == "Fullscreen"; }), c.rows.end());
+            }
+            cats_.push_back(std::move(c));
+        }
+
+        // 5. Visuals and UI (Psych UI toggles are intentionally hidden; bundled Psych assets are always active)
+        {
+            OptionCategory c{"VISUALS AND UI", "Note skins, HUD visibility, time bar, splashes, watermark, and pause music.", {}, {}};
+            c.rows = {
+                {Row::Action, "Note skin...", "Choose between Default and bundled/mod note skins."},
+                {Row::Bool, "Note splashes", "Bursts of light on SICK! hits.", &s.noteSplashes},
+                {Row::Number, "Note splash opacity", "Opacity of note splash bursts.", nullptr, &s.splashAlpha, 0, 1, 0.1f},
+                {Row::Bool, "Hide HUD", "Hides health bar, icons, score text and ratings during gameplay.", &s.hideHud},
+                {Row::Choice, "Time bar", "What the song progress bar at the top shows.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
+                 {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
+                {Row::Bool, "Flashing lights", "Enable flashing lights and bright beat flashes.", &s.flashing},
+                {Row::Bool, "Camera zoom on beat", "Beat camera bops (chart/script camera zooms always work).", &s.camZoom},
+                {Row::Bool, "Score text zoom on hit", "Bounce score text slightly on each note hit.", &s.scoreZoom},
+                {Row::Number, "Health bar opacity", "Opacity of the health bar and icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
+                {Row::Bool, "Hit popups", "Show rating images and combo numbers on each hit.", &s.hitPopups},
+                {Row::Bool, "Combo stacking", "Stack rating and combo popups instead of replacing the previous one.", &s.comboStacking},
+                {Row::Choice, "Note counter", "Show notes hit under the score line.", nullptr, nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2},
+                 {"Off", "Your side", "Both sides"}},
+                {Row::Bool, "Watermark", "Show \"Astralis Engine\" version watermark in the bottom-left corner of songs.", &s.watermark},
+                {Row::Bool, "Audio visualizer", "Show reactive audio spectrum bars in the top-right corner of songs.", &s.visualizer},
+                {Row::Bool, "Botplay text", "Show BOTPLAY / REPLAY indicator while auto-playing.", &s.botplayText},
+                {Row::Bool, "Menu background blur", "Blur menu backgrounds when shaders are enabled.", &s.menuBlur},
+                {Row::Choice, "Pause screen song", "Music played on the pause screen.", nullptr, nullptr, 0, 0, 0, &s.pauseMusic, {0, 1, 2},
+                 {"None", "Breakfast", "Tea Time"}},
+            };
+            for (Row& r : c.rows) {
+                if (r.kind == Row::Number) r.fmt = pct;
+                if (r.label == "Note skin...") {
+                    r.action = [] { app().change(makeNoteSkins()); };
+                    r.value = [&s] { return s.noteSkin.empty() ? std::string("Default") : s.noteSkin; };
+                }
+            }
+            cats_.push_back(std::move(c));
+        }
+
+        // 6. Gameplay
+        {
+            OptionCategory c{"GAMEPLAY", "Scroll direction, middlescroll, ghost tapping, hit windows, and extra keys.", {}, {}};
+            c.rows = {
+                {Row::Bool, "Downscroll", "Notes scroll downward toward receptors at the bottom.", &s.downscroll},
+                {Row::Bool, "Middlescroll", "Center player lanes and dim opponent lanes.", &s.middlescroll},
+                {Row::Bool, "Opponent notes", "Show opponent receptors and incoming notes.", &s.opponentNotes},
+                {Row::Bool, "Opponent strums", "Light up opponent receptors when the opponent hits notes.", &s.opponentStrums},
+                {Row::Bool, "Ghost tapping", "Pressing lanes with no note nearby does not count as a miss.", &s.ghostTapping},
+                {Row::Bool, "Auto pause", "Pause gameplay automatically when the window loses focus.", &s.autoPause},
+                {Row::Bool, "Disable reset button", "Prevent R from instantly triggering game over during a song.", &s.noReset},
+                {Row::Bool, "Extra keys", "Allow 1 to 18 key charts and mid-song key count changes (OFF forces 4K).", &s.extraKeys},
+                {Row::Bool, "Touch controls", "Enable on-screen touch lane buttons.", &s.touchControls},
+                {Row::Number, "Scroll speed", "Override chart scroll speed (0 = use chart speed).", nullptr, &s.scrollSpeed, 0, 6, 0.1f},
+                {Row::Bool, "Show timing (ms)", "Display hit error in milliseconds on each note.", &s.showTimings},
+                {Row::Number, "Rating offset", "Shifts the center of judgement windows in milliseconds.", nullptr, &s.ratingOffset, -30, 30, 1},
+                {Row::Number, "Sick! hit window", "Maximum timing error (ms) for a SICK! rating.", nullptr, &s.sickWindow, 15, 45, 1},
+                {Row::Number, "Good hit window", "Maximum timing error (ms) for a GOOD rating.", nullptr, &s.goodWindow, 15, 90, 1},
+                {Row::Number, "Bad hit window", "Maximum timing error (ms) for a BAD rating.", nullptr, &s.badWindow, 15, 135, 1},
+                {Row::Number, "Safe frames", "Maximum early/late hit window in 60 FPS frames.", nullptr, &s.safeFrames, 2, 10, 0.1f},
+            };
+            if (platform::kAndroid) {
+                c.rows.erase(std::remove_if(c.rows.begin(), c.rows.end(), [](const Row& r) { return r.label == "Touch controls"; }), c.rows.end());
+            }
+            for (Row& r : c.rows) {
+                if (r.label == "Scroll speed") r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
+                else if (r.label == "Rating offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
+                else if (r.label.find("hit window") != std::string::npos)
+                    r.fmt = [](float v) { return std::string(TextFormat("%d ms", int(std::lround(v)))); };
+                else if (r.label == "Safe frames") r.fmt = [](float v) { return std::string(TextFormat("%.1f", v)); };
+            }
+            cats_.push_back(std::move(c));
+        }
+
+        // 7. Audio
+        {
+            OptionCategory c{"AUDIO", "Master, music, SFX and hitsound volume plus hitsound polyphony.", {}, {}};
+            c.rows = {
+                {Row::Number, "Master volume", "Overall output volume.", nullptr, &s.masterVol, 0, 1, 0.05f},
+                {Row::Number, "Music volume", "Song and menu music volume.", nullptr, &s.musicVol, 0, 1, 0.05f},
+                {Row::Number, "Sound effects", "Menu and miss sound effects volume.", nullptr, &s.sfxVol, 0, 1, 0.05f},
+                {Row::Number, "Hit sounds", "Sample-accurate click on every hit note.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
+                {Row::Choice, "Hitsound polyphony", "How overlapping hitsounds behave on dense chords/spam.", nullptr, nullptr, 0, 0, 0,
+                 &s.hitsoundPolyphony, {0, 1, 2}, {"Off (cut self)", "Polyphonic", "Unlimited"}},
+                {Row::Bool, "Hitsound limiter", "Soft-clips stacked hitsounds to prevent harsh distortion.", &s.hitsoundLimiter},
+            };
+            for (Row& r : c.rows)
+                if (r.kind == Row::Number) r.fmt = pct;
+            cats_.push_back(std::move(c));
+        }
+
+        // 8. Debug & Video Render
+        {
+            OptionCategory c{"DEBUG", "Lua script diagnostics, note callbacks, and video render settings.", {}, {}};
+            c.rows = {
+                {Row::Choice, "Lua errors", "When to display mod script errors on screen.", nullptr, nullptr, 0, 0, 0, &s.luaErrors, {0, 1, 2},
+                 {"Always", "luaDebugMode", "Off"}},
+                {Row::Choice, "Lua warnings", "When to display missing asset warnings from scripts.", nullptr, nullptr, 0, 0, 0, &s.luaWarnings,
+                 {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
+                {Row::Bool, "Lua note callbacks", "Forward plain note hits/misses to Lua scripts (OFF is faster on spam charts).",
+                 &s.luaNoteCallbacks},
+                {Row::Choice, "Render video size", "Resolution when recording via --render (desktop renders/ or Android Movies/Astralis).",
+                 nullptr, nullptr, 0, 0, 0, &s.renderSize, {0, 1, 2, 3}, {"1280x720", "1920x1080", "2560x1440", "3840x2160"}},
+                {Row::Choice, "Render frame rate", "Target FPS when recording videos.", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
+                {Row::Choice, "Render encoder", "Video codec/hardware encoder for ffmpeg.", nullptr, nullptr, 0, 0, 0, &s.renderEncoder,
+                 {7, 0, 1, 2, 3, 4, 5, 6},
+                 {"Auto", "H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
+                {Row::Choice, "Render bitrate", "Video bitrate for recorded runs.", nullptr, nullptr, 0, 0, 0, &s.renderBitrate,
+                 {5, 10, 20, 40, 80}, {"5 Mbps", "10 Mbps", "20 Mbps", "40 Mbps", "80 Mbps"}},
+                {Row::Bool, "Render audio", "Include song audio in recorded videos.", &s.renderAudio},
+            };
+            if (platform::kAndroid) {
+                c.rows.erase(std::remove_if(c.rows.begin(), c.rows.end(), [](const Row& r) { return r.label == "Render encoder"; }), c.rows.end());
+            }
+            cats_.push_back(std::move(c));
+        }
     }
-    std::vector<Row> rows_;
-    int sel_ = 1, slot_ = 0;
-    float anim_ = 1;
+
+    std::vector<OptionCategory> cats_;
+    int catSel_ = 0;
+    float catAnim_ = 0;
+    int openSection_ = -1;  // -1 = Psych-style Options Hub
+    int sel_ = 0, slot_ = 0;
+    float anim_ = 0;
     bool waiting_ = false;
-
-public:
-    bool keyReserved(int) const override { return waiting_; }  // rebinding: the next key is the binding
 };
 
 // ----------------------------------------------------------- Key bindings --

@@ -35,7 +35,7 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
     totalPlayerNotes = totalOpponentNotes = 0;
     for (size_t i = 0; i < chart.notes.size(); ++i) {
         const Note& n = chart.notes[i];
-        if (n.lane >= keys_) continue;
+        if (n.lane >= kMaxKeys) continue;
         LaneNote ln;
         ln.type = n.type;
         ln.id = uint32_t(i);
@@ -291,9 +291,22 @@ void Session::update(double songMs) {
     }
 }
 
+void Session::setKeys(int keys, const LaneMask& keyless) {
+    keys_ = std::clamp(keys, 1, kMaxKeys);
+    cfg_.keylessLanes = keyless;
+    for (int l = keys_; l < kMaxKeys; ++l) {
+        held_[l] = false;
+        for (int s = 0; s < 2; ++s) {
+            long long& ah = activeHold_[s][l];
+            if (ah >= 0 && size_t(ah) < lanes_[s][l].size()) lanes_[s][l][size_t(ah)].state = kHeldDone;
+            ah = -1;
+        }
+    }
+}
+
 void Session::rewindTo(double songMs) {
     for (int s = 0; s < 2; ++s)
-        for (int l = 0; l < keys_; ++l) {
+        for (int l = 0; l < kMaxKeys; ++l) {
             std::vector<LaneNote>& v = lanes_[s][l];
             const size_t first = size_t(std::lower_bound(v.begin(), v.end(), songMs,
                                                          [](const LaneNote& n, double t) { return n.t < t; }) - v.begin());

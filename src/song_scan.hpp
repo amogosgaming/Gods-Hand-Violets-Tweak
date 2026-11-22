@@ -1,11 +1,10 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 // Finding songs on disk: the game's songs/ folder and every mod in mods/, in
 // whatever layout it came in. Psych mods, full game builds (charts in
 // assets/preload/data or assets/shared/data next to assets/songs, the mods/
-// folder of a build), chart libraries, loose charts and loose audio,
-// PulseForge charts.
+// folder of a build), chart libraries, loose charts, PulseForge charts.
 #pragma once
 
 #include <cstdint>
@@ -38,7 +37,6 @@ struct SongEntry {
     // assets/week1 and so on.
     std::vector<std::string> assetRoots;
     std::string pack;        // folder of the mod in mods/ ("" for songs/)
-    bool autoChart = false;  // no chart: generated from the audio
     bool noAudio = false;    // chart found but no audio for it anywhere
 };
 
@@ -51,7 +49,7 @@ struct SongScan {
     std::map<std::string, std::vector<std::string>> packRoots;
 };
 
-// The game's songs/ folder: loose audio (AutoChart) and song folders.
+// The game's songs/ folder: song folders with charts.
 void scanSongsDir(const std::string& songsDir, SongScan& out);
 // Every enabled mod folder in modsDir (zips are unpacked before this).
 void scanModsDir(const std::string& modsDir, SongScan& out);

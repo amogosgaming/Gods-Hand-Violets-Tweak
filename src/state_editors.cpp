@@ -32,8 +32,10 @@
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "editor_ui.hpp"
+#include "flp_import.hpp"
 #include "gfx.hpp"
 #include "json.hpp"
+#include "keys.hpp"
 #include "lua_host.hpp"
 #include "process.hpp"
 #include "psych.hpp"
@@ -510,9 +512,9 @@ struct Status {
 };
 
 // ======================================================= chart converter ==
-// Issue #22: a mod's charts to God's Hand's binary format (.ghc), each one
-// next to its JSON (kept: Psych and the other engines read that). When both
-// are there the game loads the .ghc: a fraction of the size, read faster.
+// Converts a mod's charts to Astralis's binary format (.ghc), each one next to
+// its JSON (kept: Psych and other engines read that). When both are there the
+// game loads the .ghc: a fraction of the size, read faster.
 
 class ChartConverterState : public State {
 public:
@@ -653,7 +655,7 @@ private:
         rows_.clear();
         std::set<std::string> seen;
         for (const SongEntry& e : app().library.songs()) {
-            if (e.builtin || e.autoChart || !e.metaPath.empty()) continue;
+            if (e.builtin || !e.metaPath.empty()) continue;
             if (!mod_.name.empty() && e.pack != mod_.name) continue;
             for (size_t i = 0; i < e.diffs.size() && i < e.chartPaths.size(); ++i) {
                 const std::string& p = e.chartPaths[i];
@@ -1288,25 +1290,27 @@ public:
         const bool touch = a.touchMode;
         const bool psychStyle = a.psychMenusActive();
         const PsychUi& ui = psychUi();
-        static const char* items[kItems] = {"Chart Editor", "Character Editor", "Stage Editor", "Event Editor", "Script Editor",
-                                            "Chart Converter"};
-        static const char* about[kItems] = {"A song of this mod (the one chosen in Freeplay if it is here)",
+        static const char* items[kItems] = {"Chart Editor",    "Modchart Editor", "SNIFF",         "Character Editor",
+                                            "Stage Editor",    "Event Editor",    "Script Editor", "Chart Converter"};
+        static const char* about[kItems] = {"Edit a song's notes, sections, events, and JSON/GHC save options",
+                                            "Build animated strum, camera, and wave modcharts (saves modchart.lua)",
+                                            "Open FL Studio (.flp/.fsc) charts with custom multikey MIDI ranges",
                                             "Animations, offsets, image, icon and colours of a character",
                                             "Zoom, where the characters stand and what the camera sees",
                                             "New events for charts: a description and a Lua script",
                                             "The mod's Lua and HScript scripts and its shaders",
-                                            "The mod's charts to binary .ghc files: much smaller, loaded faster"};
+                                            "Convert charts to binary .ghc files: much smaller, loaded faster"};
         gfx::beginCanvas();
         if (psychStyle) {
             drawPsychMenuBackground(1, Color{53, 53, 53, 255}, 0.0f, false, a.now, 0x353535, menuPulse());
             for (int i = 0; i < kItems; ++i) {
                 const bool on = i == sel_;
-                const float y = (touch ? 76.0f : 110.0f) + float(i) * (touch ? 78.0f : 82.0f);
+                const float y = (touch ? 56.0f : 44.0f) + float(i) * (touch ? 63.0f : 65.0f);
                 const float al = on ? 1.0f : 0.55f;
-                const Rectangle hit{gfx::W * 0.5f - 280.0f, y - 6.0f, 560.0f, 68.0f};
+                const Rectangle hit{gfx::W * 0.5f - 290.0f, y - 5.0f, 580.0f, 56.0f};
                 if (touch) DrawRectangleRounded(hit, 0.2f, 6, on ? Color{90, 66, 140, 140} : Color{20, 14, 34, 120});
-                if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y, on ? 56.0f : 44.0f, al) < 0)
-                    ui.uiText(items[i], gfx::W * 0.5f, y + 6, on ? 46.0f : 38.0f, fade(WHITE, al), 0, 2.0f);
+                if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y, on ? 48.0f : 38.0f, al) < 0)
+                    ui.uiText(items[i], gfx::W * 0.5f, y + 4, on ? 40.0f : 32.0f, fade(WHITE, al), 0, 2.0f);
                 if (touch && ui_.hover(hit) && ui_.tap()) {
                     sel_ = i;
                     launch(i);
@@ -1325,18 +1329,18 @@ public:
             }
         } else {
             drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
-            gfx::text(FontId::Title, "EDITORS", gfx::W / 2, touch ? 22.0f : 60.0f, touch ? 48.0f : 64.0f, kGold, Align::Center, 2.0f);
+            gfx::text(FontId::Title, "EDITORS", gfx::W / 2, touch ? 18.0f : 36.0f, touch ? 44.0f : 56.0f, kGold, Align::Center, 2.0f);
             for (int i = 0; i < kItems; ++i) {
                 const bool on = i == sel_;
-                const float y = (touch ? 92.0f : 140.0f) + i * 74.0f;
-                const Rectangle hit{gfx::W * 0.5f - 280.0f, y - 4.0f, 560.0f, 66.0f};
+                const float y = (touch ? 76.0f : 104.0f) + i * 56.0f;
+                const Rectangle hit{gfx::W * 0.5f - 290.0f, y - 4.0f, 580.0f, 50.0f};
                 if (touch) {
                     DrawRectangleRounded(hit, 0.22f, 6, on ? Color{90, 66, 140, 170} : Color{24, 18, 42, 165});
                     DrawRectangleRoundedLinesEx(hit, 0.22f, 6, 1.5f, on ? kGold : Color{110, 92, 150, 160});
                 }
-                gfx::text(FontId::Title, items[i], gfx::W / 2, y + (touch ? 6.0f : 0.0f), on ? 46.0f : 38.0f, on ? kGold : fade(kIvory, 0.75f),
+                gfx::text(FontId::Title, items[i], gfx::W / 2, y + (touch ? 4.0f : 0.0f), on ? 40.0f : 32.0f, on ? kGold : fade(kIvory, 0.75f),
                           Align::Center, 2.0f);
-                if (on && !touch) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 50, 18, fade(kIvory, 0.85f), Align::Center, 1.5f);
+                if (on && !touch) gfx::text(FontId::Ui, about[i], gfx::W / 2, y + 40, 16, fade(kIvory, 0.85f), Align::Center, 1.5f);
                 if (touch && ui_.hover(hit) && ui_.tap()) {
                     sel_ = i;
                     launch(i);
@@ -1379,7 +1383,7 @@ public:
     }
 
 private:
-    static constexpr int kItems = 6;
+    static constexpr int kItems = 8;
     int sel_ = 0;
     Ui ui_;
 
@@ -1388,10 +1392,12 @@ private:
         sfxPlay(Sfx::Confirm);
         switch (idx) {
             case 0: openChartEditor(); break;
-            case 1: a.change(makeCharacterEditor()); break;
-            case 2: a.change(makeStageEditor()); break;
-            case 3: a.change(makeEventEditor()); break;
-            case 4: a.change(makeScriptEditor()); break;
+            case 1: a.change(makeModchartEditor()); break;
+            case 2: a.change(makeSniffEditor()); break;
+            case 3: a.change(makeCharacterEditor()); break;
+            case 4: a.change(makeStageEditor()); break;
+            case 5: a.change(makeEventEditor()); break;
+            case 6: a.change(makeScriptEditor()); break;
             default: a.change(makeChartConverter()); break;
         }
     }
@@ -2983,6 +2989,1077 @@ private:
     }
 };
 
+// ======================================================= SNIFF converter ==
+// In-engine FL Studio (.flp / .fsc) chart converter with configurable MIDI
+// note ranges for both opponent and player, supporting multikey charts (1-18K).
+
+class SniffEditorState : public State {
+public:
+    bool keyReserved(int) const override { return !ui_.focus.empty(); }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
+
+    void enter() override {
+        mod_ = currentMod();
+        scanFiles();
+        if (!files_.empty()) loadFile(files_[0]);
+    }
+
+    void update(double) override {
+        App& a = app();
+        Input& in = a.input;
+        feedUi(ui_);
+        if (IsFileDropped()) {
+            FilePathList dropped = LoadDroppedFiles();
+            for (unsigned i = 0; i < dropped.count; ++i) {
+                const std::string f = dropped.paths[i];
+                if (endsWithI(f, ".flp") || endsWithI(f, ".fsc")) {
+                    loadFile(f);
+                    break;
+                }
+            }
+            UnloadDroppedFiles(dropped);
+        }
+        if (in.back() && ui_.focus.empty() && ui_.dropId.empty()) {
+            sfxPlay(Sfx::Cancel);
+            a.change(makeEditorMenu());
+            return;
+        }
+    }
+
+    void draw() override {
+        App& a = app();
+        const bool touch = a.touchMode;
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();
+        gfx::beginCanvas();
+        drawMenuBackground(a.now, 0x58B4FF, menuPulse());
+
+        // Top bar
+        const float topH = touch ? 50.0f : 46.0f;
+        DrawRectangleRec({0, 0, gfx::W, topH}, Color{8, 5, 16, 240});
+        DrawRectangleRec({0, topH - 1, gfx::W, 1}, Color{110, 92, 150, 150});
+        if (ui_.button({12, 7, 104, topH - 14}, "< BACK")) {
+            sfxPlay(Sfx::Cancel);
+            a.change(makeEditorMenu());
+            gfx::endCanvas();
+            return;
+        }
+        gfx::text(FontId::Title, "SNIFF  (FLP / FSC CONVERTER)", 132, 10, touch ? 26.0f : 28.0f, kGold);
+        if (ui_.button({gfx::W - 140, 7, 126, topH - 14}, "Rescan files")) {
+            scanFiles();
+            status_.set(TextFormat("Found %zu .flp/.fsc files", files_.size()));
+        }
+
+        const float bodyY = topH + 10.0f;
+        const float bodyH = gfx::H - bodyY - (touch ? 12.0f : 48.0f);
+        const float leftW = 540.0f;
+        const float rightX = leftW + 28.0f;
+        const float rightW = gfx::W - rightX - 16.0f;
+
+        // ---- Left column: file path, discovered files, patterns
+        DrawRectangleRounded({14, bodyY, leftW, bodyH}, 0.02f, 6, kPanel);
+        DrawRectangleRoundedLinesEx({14, bodyY, leftW, bodyH}, 0.02f, 6, 1.5f, Color{110, 92, 150, 150});
+        float ly = bodyY + 12.0f;
+        const float lx = 26.0f, lw = leftW - 24.0f;
+        const float rh = touch ? 36.0f : 30.0f;
+        gfx::text(FontId::Ui, "1. Select or drop a .flp / .fsc file", lx, ly, 18, kGold);
+        ly += 24.0f;
+        ui_.text("sniff_path", {lx, ly, lw - 90.0f, rh}, "File", pathInput_);
+        if (ui_.button({lx + lw - 84.0f, ly, 84.0f, rh}, "Open")) loadFile(trim(pathInput_));
+        ly += rh + 8.0f;
+
+        // Discovered .flp / .fsc list
+        const float listH = loaded_ ? 168.0f : (bodyH - (ly - bodyY) - 14.0f);
+        const Rectangle fileBox{lx, ly, lw, listH};
+        DrawRectangleRec(fileBox, Color{16, 12, 26, 220});
+        DrawRectangleLinesEx(fileBox, 1.0f, Color{84, 70, 120, 180});
+        if (files_.empty()) {
+            gfx::text(FontId::Ui, "No .flp/.fsc files found in songs/ or mods/.", lx + 10, ly + 10, 16, kDim);
+            gfx::text(FontId::Ui, "Drag & drop an FLP onto the window, or enter its path above.", lx + 10, ly + 32, 15, kDim);
+        } else {
+            const float rowH = touch ? 34.0f : 26.0f;
+            ui_.beginScroll("sniff_files", fileBox, fileScroll_);
+            for (int i = 0; i < int(files_.size()); ++i) {
+                const float y = fileBox.y + 4.0f + float(i) * rowH - fileScroll_;
+                if (y + rowH < fileBox.y || y > fileBox.y + fileBox.height) continue;
+                const Rectangle r{fileBox.x + 4, y, fileBox.width - 14, rowH - 2};
+                const bool sel = files_[size_t(i)] == loadedPath_;
+                const bool hov = ui_.hover(r);
+                if (sel || hov) DrawRectangleRec(r, sel ? Color{90, 66, 140, 230} : Color{50, 38, 76, 200});
+                std::string label = files_[size_t(i)];
+                if (label.rfind(a.base, 0) == 0) label = label.substr(a.base.size());
+                gfx::text(FontId::Ui, label, r.x + 8, r.y + (rowH - 16.0f) * 0.5f, 16, sel ? kGold : kInk);
+                if (hov && ui_.tap()) loadFile(files_[size_t(i)]);
+            }
+            ui_.endScroll(fileBox, fileScroll_, float(files_.size()) * rowH + 8.0f);
+        }
+        ly += listH + 10.0f;
+
+        // Loaded project info & patterns
+        if (loaded_) {
+            gfx::text(FontId::Ui,
+                      TextFormat("2. Patterns   |   BPM: %.2f   PPQN: %d   FPC ch: %d",
+                                 proj_.bpm > 0 ? proj_.bpm : 120.0, proj_.ppqn, proj_.chartChannel),
+                      lx, ly, 17, kGold);
+            ly += 24.0f;
+            const Rectangle patBox{lx, ly, lw, bodyY + bodyH - ly - 10.0f};
+            DrawRectangleRec(patBox, Color{16, 12, 26, 220});
+            DrawRectangleLinesEx(patBox, 1.0f, Color{84, 70, 120, 180});
+            const float rowH = touch ? 36.0f : 28.0f;
+            ui_.beginScroll("sniff_pats", patBox, patScroll_);
+            for (int i = 0; i < int(proj_.patterns.size()); ++i) {
+                const FlpPattern& pat = proj_.patterns[size_t(i)];
+                const float y = patBox.y + 4.0f + float(i) * rowH - patScroll_;
+                if (y + rowH < patBox.y || y > patBox.y + patBox.height) continue;
+                const Rectangle r{patBox.x + 4, y, patBox.width - 14, rowH - 2};
+                const bool sel = pat.number == pattern_;
+                const bool hov = ui_.hover(r);
+                if (sel || hov) DrawRectangleRec(r, sel ? Color{90, 66, 140, 230} : Color{50, 38, 76, 200});
+                int lo = 127, hi = 0;
+                for (const FlpNote& n : pat.notes) {
+                    lo = std::min(lo, int(n.pitch));
+                    hi = std::max(hi, int(n.pitch));
+                }
+                const std::string range = pat.notes.empty() ? std::string("empty")
+                                                            : (midiNoteName(lo) + ".." + midiNoteName(hi) + " (" + std::to_string(lo) + "-" + std::to_string(hi) + ")");
+                const std::string lbl = TextFormat("#%d %s  -  %zu notes  [%s]", pat.number,
+                                                   pat.name.empty() ? "Pattern" : pat.name.c_str(), pat.notes.size(), range.c_str());
+                gfx::text(FontId::Ui, lbl, r.x + 8, r.y + (rowH - 16.0f) * 0.5f, 15, sel ? kGold : kInk);
+                if (hov && ui_.tap()) {
+                    pattern_ = pat.number;
+                    if (!pat.name.empty()) diffName_ = prettyName(pat.name);
+                    updatePreview();
+                }
+            }
+            ui_.endScroll(patBox, patScroll_, float(proj_.patterns.size()) * rowH + 8.0f);
+        }
+
+        // ---- Right column: Multikey MIDI ranges + Export
+        const Rectangle rightBox{rightX, bodyY, rightW, bodyH};
+        DrawRectangleRounded(rightBox, 0.02f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(rightBox, 0.02f, 6, 1.5f, Color{110, 92, 150, 150});
+        const Rectangle rView{rightBox.x + 6, rightBox.y + 6, rightBox.width - 12, rightBox.height - 12};
+        ui_.beginScroll("sniff_right", rView, rightScroll_);
+        const float startY = rView.y + 4.0f - rightScroll_;
+        float ry = startY;
+        const float rx = rightBox.x + 14.0f, rw = rightBox.width - 34.0f;
+        auto rrow = [&](float h = -1.0f) {
+            if (h <= 0.0f) h = rh;
+            Rectangle r{rx, ry, rw, h};
+            ry += h + 7.0f;
+            return r;
+        };
+        auto heading = [&](const std::string& s) {
+            gfx::text(FontId::Ui, s, rx, ry, 18, kGold);
+            ry += 24.0f;
+        };
+
+        heading("3. Multikey MIDI Note Ranges");
+        // Quick key count presets
+        {
+            const float bw = (rw - 16.0f) / 5.0f;
+            auto preset = [&](int idx, const char* label, int k) {
+                if (ui_.button({rx + idx * (bw + 4.0f), ry, bw, rh}, label, oppKeys_ == k && plKeys_ == k)) {
+                    oppKeys_ = plKeys_ = double(k);
+                    plStart_ = 48;  // C3
+                    oppStart_ = std::max(60, int(plStart_) + k + (k <= 4 ? 8 : 3));
+                    if (k <= 9) oppStart_ = 60;  // C4 fits up to 9K cleanly above C3 (48..56)
+                    updatePreview();
+                }
+            };
+            preset(0, "4K", 4);
+            preset(1, "6K", 6);
+            preset(2, "7K", 7);
+            preset(3, "9K", 9);
+            if (ui_.button({rx + 4 * (bw + 4.0f), ry, bw, rh}, "Swap")) {
+                std::swap(oppStart_, plStart_);
+                std::swap(oppKeys_, plKeys_);
+                updatePreview();
+            }
+            ry += rh + 8.0f;
+        }
+
+        // Opponent MIDI range
+        bool changed = false;
+        if (ui_.stepper(rrow(), "Opponent start MIDI", oppStart_, 1, 0, 127, "%.0f")) changed = true;
+        if (ui_.stepper(rrow(), "Opponent keys", oppKeys_, 1, 1, kMaxKeys, "%.0f")) changed = true;
+        gfx::text(FontId::Ui,
+                  TextFormat("Opponent range: %s (%d) .. %s (%d)  [%dK]",
+                             midiNoteName(int(oppStart_)).c_str(), int(oppStart_),
+                             midiNoteName(std::min(127, int(oppStart_) + int(oppKeys_) - 1)).c_str(),
+                             std::min(127, int(oppStart_) + int(oppKeys_) - 1), int(oppKeys_)),
+                  rx, ry, 16, Color{255, 160, 180, 255});
+        ry += 22.0f;
+
+        // Player MIDI range
+        if (ui_.stepper(rrow(), "Player start MIDI", plStart_, 1, 0, 127, "%.0f")) changed = true;
+        if (ui_.stepper(rrow(), "Player keys", plKeys_, 1, 1, kMaxKeys, "%.0f")) changed = true;
+        gfx::text(FontId::Ui,
+                  TextFormat("Player range:   %s (%d) .. %s (%d)  [%dK]",
+                             midiNoteName(int(plStart_)).c_str(), int(plStart_),
+                             midiNoteName(std::min(127, int(plStart_) + int(plKeys_) - 1)).c_str(),
+                             std::min(127, int(plStart_) + int(plKeys_) - 1), int(plKeys_)),
+                  rx, ry, 16, Color{140, 235, 255, 255});
+        ry += 24.0f;
+
+        // Channel, BPM override, Markers
+        if (ui_.choice(rrow(), "Channel", channelLabels_, channelIdx_)) changed = true;
+        if (ui_.stepper(rrow(), "BPM override (0=auto)", bpmOverride_, 1, 0, 2000, "%.2f")) changed = true;
+        if (ui_.check(rrow(), "SNIFF camera/alt markers (F3/F#3/A3/A#3)", useMarkers_)) changed = true;
+        if (changed) updatePreview();
+
+        // Live match preview box
+        {
+            const Rectangle pbox{rx, ry, rw, 54.0f};
+            DrawRectangleRounded(pbox, 0.14f, 6, Color{18, 14, 30, 220});
+            DrawRectangleRoundedLinesEx(pbox, 0.14f, 6, 1.0f, previewOk_ ? Color{110, 220, 150, 180} : Color{220, 110, 110, 180});
+            if (!loaded_) {
+                gfx::text(FontId::Ui, "Open a .flp or .fsc file to preview matched notes.", rx + 10, ry + 18, 16, kDim);
+            } else if (previewOk_) {
+                gfx::text(FontId::Ui,
+                          TextFormat("Matched: %llu player, %llu opponent (%zu sections, %dK)",
+                                     (unsigned long long)previewPl_, (unsigned long long)previewOpp_, previewSecs_,
+                                     std::max(int(oppKeys_), int(plKeys_))),
+                          rx + 10, ry + 8, 16, Color{150, 240, 175, 255});
+                gfx::text(FontId::Ui,
+                          TextFormat("BPM %.2f   |   Scroll speed %.2f", previewBpm_, previewSpeed_),
+                          rx + 10, ry + 30, 15, kDim);
+            } else {
+                gfx::text(FontId::Ui, "Preview: " + previewErr_, rx + 10, ry + 18, 16, Color{255, 140, 140, 255});
+            }
+            ry += 62.0f;
+        }
+
+        heading("4. Convert & Export");
+        ui_.text("sniff_song", rrow(), "Song folder", songFolder_);
+        ui_.text("sniff_diff", rrow(), "Difficulty", diffName_);
+        ui_.choice(rrow(), "Save format", {"Psych JSON", "Binary .ghc", "Both"}, saveFmt_);
+        if (saveFmt_ != 1) ui_.check(rrow(), "Minify Psych JSON (remove formatting)", minifyJson_);
+
+        const float bw = (rw - 8.0f) * 0.5f;
+        if (ui_.button({rx, ry, bw, rh + 6}, "Convert & Save", true)) convertAndSave();
+        if (ui_.button({rx + bw + 8.0f, ry, bw, rh + 6}, "Open in Chart Editor")) {
+            if (!lastSavedSongId_.empty()) {
+                ui_.endScroll(rView, rightScroll_, ry - startY + rh + 20.0f);
+                a.change(makeChartEditor(lastSavedSongId_, lastSavedDiff_));
+                gfx::endCanvas();
+                return;
+            }
+            status_.set("Convert & Save first to open in the Chart Editor", true);
+        }
+        ry += rh + 14.0f;
+        gfx::text(FontId::Ui, "Output dir: " + outputDir(), rx, ry, 14, kDim);
+        ry += 22.0f;
+
+        ui_.endScroll(rView, rightScroll_, ry - startY + 12.0f);
+        ui_.overlays();
+        status_.draw();
+        hints("Drag & drop .flp/.fsc anywhere   Adjust Opponent & Player MIDI ranges for multikey   ESC back");
+        gfx::endCanvas();
+    }
+
+private:
+    ModChoice mod_;
+    Ui ui_;
+    Status status_;
+    std::vector<std::string> files_;
+    std::string pathInput_, loadedPath_;
+    FlpProject proj_;
+    bool loaded_ = false;
+    int pattern_ = -1;
+    double oppStart_ = 60.0, oppKeys_ = 4.0;
+    double plStart_ = 48.0, plKeys_ = 4.0;
+    std::vector<std::string> channelLabels_{"Auto (FPC)", "All channels"};
+    std::vector<int> channelValues_{-1, -2};
+    int channelIdx_ = 0;
+    double bpmOverride_ = 0.0;
+    bool useMarkers_ = true;
+    std::string songFolder_ = "sniff-song", diffName_ = "Normal";
+    int saveFmt_ = 0;
+    bool minifyJson_ = false;
+    float fileScroll_ = 0.0f, patScroll_ = 0.0f, rightScroll_ = 0.0f;
+    // Preview cache
+    bool previewOk_ = false;
+    std::string previewErr_;
+    uint64_t previewPl_ = 0, previewOpp_ = 0;
+    size_t previewSecs_ = 0;
+    double previewBpm_ = 120.0, previewSpeed_ = 2.0;
+    std::string lastSavedSongId_, lastSavedDiff_;
+
+    void scanFiles() {
+        files_.clear();
+        const App& a = app();
+        std::set<std::string> seen;
+        auto walk = [&](const fs::path& root) {
+            std::error_code ec;
+            if (!fs::exists(root, ec)) return;
+            fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
+            for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                if (it.depth() > 4) { it.disable_recursion_pending(); continue; }
+                if (!it->is_regular_file(ec)) continue;
+                const std::string p = pathStr(it->path());
+                if ((endsWithI(p, ".flp") || endsWithI(p, ".fsc")) && seen.insert(p).second) files_.push_back(p);
+            }
+        };
+        walk(toPath(a.base + "songs"));
+        walk(toPath(a.base + "mods"));
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(toPath(a.base), ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            const std::string p = pathStr(e.path());
+            if ((endsWithI(p, ".flp") || endsWithI(p, ".fsc")) && seen.insert(p).second) files_.push_back(p);
+        }
+        std::sort(files_.begin(), files_.end());
+    }
+
+    void loadFile(const std::string& path) {
+        if (path.empty()) return;
+        FlpProject p;
+        std::string err;
+        if (!readFlpFile(path, p, err)) {
+            status_.set("SNIFF: " + err, true);
+            return;
+        }
+        proj_ = std::move(p);
+        loaded_ = true;
+        loadedPath_ = path;
+        pathInput_ = path;
+        std::vector<int> cp = flpChartPatterns(proj_, true);
+        if (cp.empty()) cp = flpChartPatterns(proj_, false);
+        if (!cp.empty()) pattern_ = cp.front();
+        else if (!proj_.patterns.empty()) pattern_ = proj_.patterns.front().number;
+        else pattern_ = -1;
+
+        // Gather channels present in project
+        std::set<int> chs;
+        for (const FlpPattern& pat : proj_.patterns)
+            for (const FlpNote& n : pat.notes) chs.insert(int(n.channel));
+        channelLabels_ = {"Auto (FPC ch " + std::to_string(proj_.chartChannel) + ")", "All channels"};
+        channelValues_ = {-1, -2};
+        for (int c : chs) {
+            channelLabels_.push_back("Channel " + std::to_string(c));
+            channelValues_.push_back(c);
+        }
+        channelIdx_ = 0;
+
+        const std::string stem = pathStr(toPath(path).stem());
+        songFolder_ = songPathName(proj_.title.empty() ? stem : proj_.title);
+        if (songFolder_.empty()) songFolder_ = "sniff-song";
+        diffName_ = pattern_ >= 0 ? flpPatternLabel(proj_, pattern_) : std::string("Normal");
+        if (diffName_.rfind("Pattern ", 0) == 0) diffName_ = "Normal";
+        updatePreview();
+        status_.set("Loaded " + pathStr(toPath(path).filename()) + " (" + std::to_string(proj_.patterns.size()) + " patterns)");
+    }
+
+    FlpConvertOptions currentOpt() const {
+        FlpConvertOptions o;
+        o.oppStartPitch = int(std::lround(oppStart_));
+        o.oppKeys = int(std::lround(oppKeys_));
+        o.playerStartPitch = int(std::lround(plStart_));
+        o.playerKeys = int(std::lround(plKeys_));
+        o.channel = (channelIdx_ >= 0 && channelIdx_ < int(channelValues_.size())) ? channelValues_[size_t(channelIdx_)] : -1;
+        o.bpmOverride = bpmOverride_;
+        o.useMarkers = useMarkers_;
+        return o;
+    }
+
+    void updatePreview() {
+        previewOk_ = false;
+        previewErr_.clear();
+        if (!loaded_) return;
+        Chart c;
+        std::string err;
+        if (!flpToChart(proj_, pattern_, currentOpt(), c, err)) {
+            previewErr_ = err;
+            return;
+        }
+        previewOk_ = true;
+        previewPl_ = c.playerNotes;
+        previewOpp_ = c.opponentNotes;
+        previewSecs_ = c.sections.size();
+        previewBpm_ = c.bpmAt(0);
+        previewSpeed_ = c.speed;
+    }
+
+    std::string outputDir() const {
+        const std::string key = songPathName(songFolder_.empty() ? "sniff-song" : songFolder_);
+        if (mod_.name.empty()) return app().base + "songs/" + key + "/";
+        return mod_.roots[0] + "data/" + key + "/";
+    }
+
+    std::string chartToPsychJson(const Chart& c, StreamedNotesBuilder* bin, bool compact) const {
+        const char* col = compact ? ":" : ": ";
+        const char* com = compact ? "," : ", ";
+        const char* nl2 = compact ? "" : "\n  ";
+        const char* nl4 = compact ? "" : "\n    ";
+        const int K = c.keys;
+        std::string o;
+        o.reserve(c.notes.size() * 24 + 2048);
+        const std::string title = c.title.empty() ? prettyName(songFolder_) : c.title;
+        o += std::string("{\"song\"") + col + "{" + nl2 + "\"song\"" + col + jsonStr(title) + "," + nl2 + "\"bpm\"" + col +
+             jnum(c.bpmAt(0)) + "," + nl2 + "\"speed\"" + col + jnum(c.speed) + "," + nl2 + "\"needsVoices\"" + col + "false," +
+             nl2 + "\"player1\"" + col + "\"bf\"," + nl2 + "\"player2\"" + col + "\"dad\"," + nl2 + "\"gfVersion\"" + col + "\"gf\"," +
+             nl2 + "\"stage\"" + col + "\"stage\"";
+        if (K != 4 || c.sideKeys[0] || c.sideKeys[1]) {
+            o += std::string(",") + nl2 + "\"keyCount\"" + col + std::to_string(c.keysOf(0)) + "," + nl2 + "\"playerKeyCount\"" + col +
+                 std::to_string(c.keysOf(1)) + "," + nl2 + "\"mania\"" + col + std::to_string(K - 1);
+        }
+        o += std::string(",") + nl2 + "\"events\"" + col + "[]," + nl2 + "\"notes\"" + col + "[";
+        size_t ni = 0;
+        const size_t nSec = std::max<size_t>(1, c.sections.size());
+        for (size_t s = 0; s < nSec; ++s) {
+            const SectionInfo sec = s < c.sections.size() ? c.sections[s] : SectionInfo{0, true, false, false, 4, c.bpmAt(0)};
+            const double b = (s + 1 < c.sections.size()) ? c.sections[s + 1].timeMs : 1e18;
+            o += std::string(s ? "," : "") + nl4 + "{\"sectionBeats\"" + col + jnum(sec.beats) + com + "\"lengthInSteps\"" + col +
+                 std::to_string(int(std::lround(sec.beats * 4))) + com + "\"mustHitSection\"" + col +
+                 (sec.mustHit ? "true" : "false") + com + "\"changeBPM\"" + col + "false" + com + "\"bpm\"" + col + jnum(sec.bpm) +
+                 com + "\"altAnim\"" + col + (sec.alt ? "true" : "false") + com + "\"gfSection\"" + col + "false" + com +
+                 "\"sectionNotes\"" + col + (bin ? bin->beginArray() : std::string("["));
+            bool first = true;
+            while (ni < c.notes.size() && (c.notes[ni].time < b - 0.5 || s + 1 == nSec)) {
+                const Note& n = c.notes[ni++];
+                const bool player = n.side == 1;
+                const int data = (player == sec.mustHit) ? int(n.lane) : int(n.lane) + K;
+                const bool alt = (n.flags & kFlagAlt) != 0;
+                if (bin) {
+                    const std::string t = alt ? std::string("Alt Animation") : std::string();
+                    for (uint16_t k = 0; k < std::max<uint16_t>(1, n.stack); ++k) bin->add(n.time, data, n.length, t);
+                    continue;
+                }
+                std::string one = "[" + jnum(n.time) + com + std::to_string(data) + com + jnum(n.length);
+                if (alt) one += std::string(com) + "\"Alt Animation\"";
+                one += "]";
+                for (uint16_t k = 0; k < std::max<uint16_t>(1, n.stack); ++k) {
+                    o += std::string(first ? "" : com) + one;
+                    first = false;
+                }
+            }
+            o += bin ? "}" : "]}";
+        }
+        o += compact ? "]}}" : "\n  ]\n}}\n";
+        if (bin) bin->finish();
+        return o;
+    }
+
+    void convertAndSave() {
+        if (!loaded_) {
+            status_.set("Load an .flp or .fsc file first", true);
+            return;
+        }
+        Chart c;
+        std::string err;
+        if (!flpToChart(proj_, pattern_, currentOpt(), c, err)) {
+            status_.set("SNIFF: " + err, true);
+            return;
+        }
+        const std::string key = songPathName(songFolder_.empty() ? "sniff-song" : songFolder_);
+        const std::string dLower = toLower(trim(diffName_));
+        const std::string stem = key + (dLower.empty() || dLower == "normal" ? std::string() : "-" + songPathName(dLower));
+        const std::string dir = outputDir();
+        std::error_code ec;
+        fs::create_directories(toPath(dir), ec);
+        const std::string jsonPath = dir + stem + ".json";
+        const std::string ghcPath = dir + stem + kBinaryChartExt;
+        const bool wantJson = saveFmt_ != 1, wantGhc = saveFmt_ != 0;
+        if (wantJson) {
+            if (!saveText(jsonPath, chartToPsychJson(c, nullptr, minifyJson_), err)) {
+                status_.set(err, true);
+                return;
+            }
+        }
+        if (wantGhc) {
+            StreamedNotes sn;
+            StreamedNotesBuilder bin(sn);
+            const std::string skel = chartToPsychJson(c, &bin, true);
+            if (!writeBinaryChart(ghcPath, skel, sn, 3, err)) {
+                status_.set("GHC: " + err, true);
+                return;
+            }
+        }
+        // Rescan library so the new chart shows up in Freeplay & Chart Editor.
+        App& a = app();
+        a.library.scan(a.base);
+        lastSavedSongId_.clear();
+        lastSavedDiff_ = diffName_.empty() ? "Normal" : diffName_;
+        for (const SongEntry& s : a.library.songs()) {
+            for (size_t i = 0; i < s.chartPaths.size(); ++i) {
+                const std::string& cp = s.chartPaths[i];
+                if (fs::equivalent(toPath(cp), toPath(wantJson ? jsonPath : ghcPath), ec)) {
+                    lastSavedSongId_ = s.id;
+                    if (i < s.diffs.size()) lastSavedDiff_ = s.diffs[i];
+                    break;
+                }
+            }
+            if (!lastSavedSongId_.empty()) break;
+        }
+        status_.set(TextFormat("Converted %llu notes (%dK) -> %s", (unsigned long long)(c.playerNotes + c.opponentNotes),
+                               c.keys, (wantJson ? jsonPath : ghcPath).c_str()));
+    }
+};
+
+// ====================================================== modchart editor ==
+// Visual timeline editor for timed Psych-compatible Lua modcharts. Generates
+// and reloads `modchart.lua` inside the selected song's data folder.
+
+class ModchartEditorState : public State {
+public:
+    bool keyReserved(int) const override { return !ui_.focus.empty(); }
+    TouchLayout touchLayout() const override {
+        TouchLayout t;
+        t.pad = false;
+        return t;
+    }
+
+    void enter() override {
+        mod_ = currentMod();
+        refreshSongs();
+        if (!songs_.empty()) selectSong(0);
+    }
+
+    void update(double dt) override {
+        App& a = app();
+        Input& in = a.input;
+        feedUi(ui_);
+        if (playing_) {
+            curBeat_ += dt * (bpm_ / 60.0);
+            if (curBeat_ > maxBeat_) curBeat_ = 0.0;
+        }
+        if (ui_.focus.empty() && ui_.dropId.empty()) {
+            if (in.pressed(KEY_SPACE)) playing_ = !playing_;
+            if (in.pressed(KEY_R)) {
+                playing_ = false;
+                curBeat_ = 0.0;
+            }
+            if (in.back()) {
+                sfxPlay(Sfx::Cancel);
+                a.change(makeEditorMenu());
+                return;
+            }
+        }
+    }
+
+    void draw() override {
+        App& a = app();
+        const bool touch = a.touchMode;
+        if (ui_.tap() && ui_.askId.empty()) ui_.focus.clear();
+        gfx::beginCanvas();
+        ClearBackground(Color{16, 12, 24, 255});
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{16, 12, 24, 255});
+
+        // Top bar
+        const float topH = touch ? 50.0f : 44.0f;
+        DrawRectangleRec({0, 0, gfx::W, topH}, Color{8, 5, 16, 245});
+        DrawRectangleRec({0, topH - 1, gfx::W, 1}, Color{110, 92, 150, 150});
+        if (ui_.button({10, 6, 98, topH - 12}, "< BACK")) {
+            sfxPlay(Sfx::Cancel);
+            a.change(makeEditorMenu());
+            gfx::endCanvas();
+            return;
+        }
+        gfx::text(FontId::Title, "MODCHART EDITOR", 118, 9, touch ? 24.0f : 26.0f, kGold);
+        if (!songLabels_.empty()) {
+            if (ui_.dropdown("mc_song", {370, 7, 300, topH - 14}, "Song", songLabels_, songIdx_, 52)) {
+                selectSong(songIdx_);
+            }
+        }
+        if (ui_.button({682, 7, 96, topH - 14}, playing_ ? "PAUSE" : "PLAY", playing_)) playing_ = !playing_;
+        if (ui_.button({784, 7, 82, topH - 14}, "RESET")) {
+            playing_ = false;
+            curBeat_ = 0.0;
+        }
+        gfx::text(FontId::Ui, TextFormat("Beat %.2f", curBeat_), 880, 13, 18, kGold);
+        if (ui_.button({gfx::W - 188, 7, 176, topH - 14}, "Save modchart.lua", true)) saveModchart();
+
+        const float bodyY = topH + 8.0f;
+        const float panelXPos = 816.0f;
+        const float stageW = panelXPos - 22.0f;
+        const float stageH = gfx::H - bodyY - (touch ? 12.0f : 48.0f);
+
+        // ---- Left: Live animated strumline preview + beat scrubber
+        drawPreviewStage({12.0f, bodyY, stageW, stageH});
+
+        // ---- Right: Events list & inspector
+        const Rectangle pRect{panelXPos, bodyY, gfx::W - panelXPos - 12.0f, stageH};
+        DrawRectangleRounded(pRect, 0.02f, 6, kPanel);
+        DrawRectangleRoundedLinesEx(pRect, 0.02f, 6, 1.5f, Color{110, 92, 150, 160});
+        const Rectangle view{pRect.x + 6, pRect.y + 6, pRect.width - 12, pRect.height - 12};
+        ui_.beginScroll("mc_panel", view, panelScroll_);
+        const float startY = view.y + 4.0f - panelScroll_;
+        float y = startY;
+        const float x = pRect.x + 12.0f, w = pRect.width - 30.0f;
+        const float rh = touch ? 36.0f : 30.0f;
+        auto row = [&](float h = -1.0f) {
+            if (h <= 0.0f) h = rh;
+            Rectangle r{x, y, w, h};
+            y += h + 7.0f;
+            return r;
+        };
+
+        gfx::text(FontId::Ui, "Preview Settings", x, y, 17, kGold);
+        y += 22.0f;
+        ui_.stepper(row(), "Preview BPM", bpm_, 1, 30, 600, "%.1f");
+        double pk = previewKeys_;
+        if (ui_.stepper(row(), "Preview Keys", pk, 1, 1, 9, "%.0f")) previewKeys_ = int(pk);
+
+        y += 4.0f;
+        gfx::text(FontId::Ui, TextFormat("Modchart Events (%zu)", events_.size()), x, y, 17, kGold);
+        y += 24.0f;
+        {
+            const float bw = (w - 12.0f) / 3.0f;
+            if (ui_.button({x, y, bw, rh}, "+ Add")) addEvent();
+            if (ui_.button({x + bw + 6, y, bw, rh}, "Duplicate") && sel_ >= 0 && sel_ < int(events_.size())) {
+                ModEvent copy = events_[size_t(sel_)];
+                copy.beat += 1.0;
+                events_.push_back(copy);
+                sortEvents(copy);
+            }
+            if (ui_.button({x + 2 * (bw + 6), y, bw, rh}, "Delete") && sel_ >= 0 && sel_ < int(events_.size())) {
+                events_.erase(events_.begin() + sel_);
+                sel_ = std::min(sel_, int(events_.size()) - 1);
+            }
+            y += rh + 8.0f;
+        }
+
+        // Compact event list
+        const float listH = 165.0f;
+        const Rectangle ebox{x, y, w, listH};
+        DrawRectangleRec(ebox, Color{14, 10, 24, 230});
+        DrawRectangleLinesEx(ebox, 1.0f, Color{84, 70, 120, 170});
+        if (events_.empty()) {
+            gfx::text(FontId::Ui, "No events yet. Tap '+ Add' to create one.", ebox.x + 8, ebox.y + 10, 15, kDim);
+        } else {
+            const float itemH = touch ? 32.0f : 25.0f;
+            const int vis = std::max(1, int((listH - 6) / itemH));
+            if (CheckCollisionPointRec(ui_.mouse, ebox) && ui_.wheel != 0)
+                listScroll_ = clampv(listScroll_ - ui_.wheel * 2.0f, 0.0f, float(std::max(0, int(events_.size()) - vis)));
+            const int first = std::clamp(int(listScroll_), 0, std::max(0, int(events_.size()) - 1));
+            for (int k = 0; k < vis && first + k < int(events_.size()); ++k) {
+                const int i = first + k;
+                const ModEvent& ev = events_[size_t(i)];
+                const Rectangle r{ebox.x + 3, ebox.y + 3 + float(k) * itemH, ebox.width - 6, itemH - 2};
+                const bool hov = ui_.hover(r);
+                if (i == sel_ || hov) DrawRectangleRec(r, i == sel_ ? Color{90, 66, 140, 240} : Color{50, 38, 76, 200});
+                const std::string line = TextFormat("B%.2f  %s (%s) -> %.2g", ev.beat, kPropNames[ev.prop], kTargetNames[ev.target], ev.value);
+                gfx::text(FontId::Ui, line, r.x + 6, r.y + (itemH - 15.0f) * 0.5f, 15, i == sel_ ? kGold : kInk);
+                if (hov && ui_.tap()) {
+                    sel_ = i;
+                    curBeat_ = ev.beat;
+                }
+            }
+        }
+        y += listH + 10.0f;
+
+        // Selected event inspector
+        if (sel_ >= 0 && sel_ < int(events_.size())) {
+            ModEvent& ev = events_[size_t(sel_)];
+            gfx::text(FontId::Ui, TextFormat("Edit Event #%d", sel_ + 1), x, y, 17, kGold);
+            y += 24.0f;
+            if (ui_.stepper(row(), "Beat", ev.beat, 0.25, 0.0, 1024.0, "%.2f")) {
+                ModEvent snap = ev;
+                sortEvents(snap);
+            }
+            ui_.stepper(row(), "Duration (beats)", ev.dur, 0.25, 0.0, 64.0, "%.2f");
+            ui_.dropdown("mc_prop", row(), "Property", propList_, ev.prop, 84);
+            ui_.dropdown("mc_tgt", row(), "Target", targetList_, ev.target, 84);
+            const double step = (ev.prop == kPropAlpha || ev.prop == kPropScroll || ev.prop == kPropCamZoom) ? 0.1 : 10.0;
+            const double lo = (ev.prop == kPropAlpha) ? 0.0 : (ev.prop == kPropScroll || ev.prop == kPropCamZoom) ? 0.1 : -1280.0;
+            const double hi = (ev.prop == kPropAlpha) ? 1.0 : (ev.prop == kPropScroll || ev.prop == kPropCamZoom) ? 10.0 : 1280.0;
+            ui_.stepper(row(), "Value", ev.value, step, lo, hi, "%.2f");
+            ui_.dropdown("mc_ease", row(), "Ease", easeList_, ev.ease, 84);
+        }
+
+        ui_.endScroll(view, panelScroll_, y - startY + 24.0f);
+        ui_.overlays();
+        status_.draw();
+        hints("SPACE play/pause   R reset   Drag timeline to scrub   Saves modchart.lua into the song folder   ESC back");
+        gfx::endCanvas();
+    }
+
+private:
+    enum Prop {
+        kPropStrumX = 0,
+        kPropStrumY,
+        kPropStrumAngle,
+        kPropAlpha,
+        kPropScroll,
+        kPropCamZoom,
+        kPropCamAngle,
+        kPropDrunk,
+        kPropTipsy,
+        kPropBounce,
+        kPropCount
+    };
+    static constexpr const char* kPropNames[kPropCount] = {"Strum X",   "Strum Y",      "Strum Angle", "Strum Alpha", "Scroll Speed",
+                                                           "Cam Zoom",  "Cam Angle",    "Drunk (X)",   "Tipsy (Y)",   "Bounce"};
+    static constexpr const char* kTargetNames[] = {"Both", "Player", "Opponent", "Lane 0", "Lane 1", "Lane 2",
+                                                   "Lane 3", "Lane 4", "Lane 5", "Lane 6", "Lane 7", "Lane 8"};
+    static constexpr const char* kEaseNames[] = {"linear", "quadOut", "quadInOut", "cubeOut", "sineInOut", "elasticOut", "backOut", "expoOut"};
+
+    struct ModEvent {
+        double beat = 0.0;
+        double dur = 1.0;
+        int prop = kPropStrumY;
+        int target = 0;  // 0 Both, 1 Player, 2 Opponent, 3+ specific lane (target - 3)
+        double value = 40.0;
+        int ease = 1;
+    };
+
+    ModChoice mod_;
+    Ui ui_;
+    Status status_;
+    std::vector<const SongEntry*> songs_;
+    std::vector<std::string> songLabels_;
+    int songIdx_ = 0;
+    std::vector<ModEvent> events_;
+    int sel_ = -1;
+    bool playing_ = false;
+    double curBeat_ = 0.0, maxBeat_ = 64.0, bpm_ = 120.0;
+    int previewKeys_ = 4;
+    float panelScroll_ = 0.0f, listScroll_ = 0.0f;
+    bool scrubbing_ = false;
+    std::vector<std::string> propList_{std::begin(kPropNames), std::end(kPropNames)};
+    std::vector<std::string> targetList_{std::begin(kTargetNames), std::end(kTargetNames)};
+    std::vector<std::string> easeList_{std::begin(kEaseNames), std::end(kEaseNames)};
+
+    void refreshSongs() {
+        songs_.clear();
+        songLabels_.clear();
+        for (const SongEntry& e : app().library.songs()) {
+            if (e.dataDir.empty()) continue;
+            songs_.push_back(&e);
+            songLabels_.push_back(e.title + (e.pack.empty() ? "" : " [" + e.pack + "]"));
+        }
+        songIdx_ = std::clamp(songIdx_, 0, std::max(0, int(songs_.size()) - 1));
+    }
+
+    std::string modchartPath() const {
+        if (songIdx_ < 0 || songIdx_ >= int(songs_.size())) return app().base + "mods/modchart.lua";
+        const std::string& d = songs_[size_t(songIdx_)]->dataDir;
+        return d + (!d.empty() && d.back() == '/' ? "" : "/") + "modchart.lua";
+    }
+
+    void selectSong(int idx) {
+        songIdx_ = std::clamp(idx, 0, std::max(0, int(songs_.size()) - 1));
+        events_.clear();
+        sel_ = -1;
+        curBeat_ = 0.0;
+        playing_ = false;
+        bpm_ = 120.0;
+        if (songIdx_ >= 0 && songIdx_ < int(songs_.size())) {
+            const SongEntry& se = *songs_[size_t(songIdx_)];
+            if (!se.chartPaths.empty() && !endsWithI(se.chartPaths[0], ".ghc")) {
+                std::string chartTxt;
+                if (readTextFile(se.chartPaths[0], chartTxt)) {
+                    const size_t bp = chartTxt.find("\"bpm\"");
+                    if (bp != std::string::npos) {
+                        const size_t col = chartTxt.find(':', bp);
+                        if (col != std::string::npos) {
+                            const double v = std::atof(chartTxt.c_str() + col + 1);
+                            if (v >= 20.0 && v <= 999.0) bpm_ = v;
+                        }
+                    }
+                }
+            }
+        }
+        loadModchart();
+    }
+
+    void addEvent() {
+        ModEvent ev;
+        ev.beat = std::round(curBeat_ * 4.0) * 0.25;
+        ev.dur = 1.0;
+        ev.prop = kPropDrunk;
+        ev.target = 0;
+        ev.value = 30.0;
+        ev.ease = 1;
+        events_.push_back(ev);
+        sortEvents(ev);
+    }
+
+    void sortEvents(const ModEvent& track) {
+        std::stable_sort(events_.begin(), events_.end(), [](const ModEvent& a, const ModEvent& b) { return a.beat < b.beat; });
+        sel_ = 0;
+        maxBeat_ = 32.0;
+        for (int i = 0; i < int(events_.size()); ++i) {
+            maxBeat_ = std::max(maxBeat_, events_[size_t(i)].beat + events_[size_t(i)].dur + 8.0);
+            if (std::fabs(events_[size_t(i)].beat - track.beat) < 1e-6 && events_[size_t(i)].prop == track.prop &&
+                events_[size_t(i)].target == track.target)
+                sel_ = i;
+        }
+    }
+
+    void loadModchart() {
+        std::string txt;
+        if (!readTextFile(modchartPath(), txt)) return;
+        size_t pos = 0;
+        while (pos < txt.size()) {
+            size_t end = txt.find('\n', pos);
+            if (end == std::string::npos) end = txt.size();
+            const std::string line = trim(txt.substr(pos, end - pos));
+            pos = end + 1;
+            if (line.rfind("-- EVT ", 0) == 0) {
+                ModEvent ev;
+                if (std::sscanf(line.c_str() + 7, "%lf %lf %d %d %lf %d", &ev.beat, &ev.dur, &ev.prop, &ev.target, &ev.value, &ev.ease) == 6) {
+                    ev.prop = std::clamp(ev.prop, 0, int(kPropCount) - 1);
+                    ev.target = std::clamp(ev.target, 0, int(targetList_.size()) - 1);
+                    ev.ease = std::clamp(ev.ease, 0, int(easeList_.size()) - 1);
+                    events_.push_back(ev);
+                }
+            }
+        }
+        if (!events_.empty()) {
+            sortEvents(events_[0]);
+            status_.set("Loaded " + std::to_string(events_.size()) + " modchart events");
+        }
+    }
+
+    void saveModchart() {
+        std::string lua;
+        lua += "-- ASTRALIS_MODCHART_V1\n";
+        lua += "-- Generated by Astralis Modchart Editor (Psych Engine Lua compatible)\n";
+        for (const ModEvent& ev : events_) {
+            lua += TextFormat("-- EVT %.4f %.4f %d %d %.4f %d\n", ev.beat, ev.dur, ev.prop, ev.target, ev.value, ev.ease);
+        }
+        lua += "\nlocal mcEvents = {\n";
+        for (size_t i = 0; i < events_.size(); ++i) {
+            const ModEvent& ev = events_[i];
+            lua += TextFormat("    {beat = %.4f, dur = %.4f, prop = %d, target = %d, value = %.4f, ease = '%s', fired = false},\n",
+                              ev.beat, ev.dur, ev.prop, ev.target, ev.value, kEaseNames[ev.ease]);
+        }
+        lua += "}\n\n";
+        lua += R"LUA(local baseX, baseY = {}, {}
+local drunkAmp, tipsyAmp, bounceAmp = 0, 0, 0
+local baseZoom = 1
+
+function onCreatePost()
+    baseZoom = getProperty('defaultCamZoom') or 1
+    local n = getProperty('strumLineNotes.length') or 8
+    for i = 0, n - 1 do
+        baseX[i] = getPropertyFromGroup('strumLineNotes', i, 'x')
+        baseY[i] = getPropertyFromGroup('strumLineNotes', i, 'y')
+    end
+end
+
+local function lanesFor(target)
+    local total = getProperty('strumLineNotes.length') or 8
+    local half = math.floor(total / 2)
+    local out = {}
+    if target == 0 then
+        for i = 0, total - 1 do out[#out + 1] = i end
+    elseif target == 1 then
+        for i = half, total - 1 do out[#out + 1] = i end
+    elseif target == 2 then
+        for i = 0, half - 1 do out[#out + 1] = i end
+    else
+        local lane = target - 3
+        if lane < half then out[#out + 1] = lane end
+        if half + lane < total then out[#out + 1] = half + lane end
+    end
+    return out
+end
+
+local function fireEvent(idx, ev)
+    local sec = math.max(0.001, (ev.dur or 0) * (crochet / 1000))
+    local lanes = lanesFor(ev.target)
+    if ev.prop == 0 then
+        for _, l in ipairs(lanes) do
+            noteTweenX('mcX_' .. idx .. '_' .. l, l, (baseX[l] or 0) + ev.value, sec, ev.ease)
+        end
+    elseif ev.prop == 1 then
+        for _, l in ipairs(lanes) do
+            noteTweenY('mcY_' .. idx .. '_' .. l, l, (baseY[l] or 50) + ev.value, sec, ev.ease)
+        end
+    elseif ev.prop == 2 then
+        for _, l in ipairs(lanes) do
+            noteTweenAngle('mcA_' .. idx .. '_' .. l, l, ev.value, sec, ev.ease)
+        end
+    elseif ev.prop == 3 then
+        for _, l in ipairs(lanes) do
+            noteTweenAlpha('mcAl_' .. idx .. '_' .. l, l, math.max(0, math.min(1, ev.value)), sec, ev.ease)
+        end
+    elseif ev.prop == 4 then
+        setProperty('songSpeed', math.max(0.1, ev.value))
+    elseif ev.prop == 5 then
+        doTweenZoom('mcZoom_' .. idx, 'camGame', math.max(0.1, ev.value), sec, ev.ease)
+        setProperty('defaultCamZoom', math.max(0.1, ev.value))
+    elseif ev.prop == 6 then
+        doTweenAngle('mcCamA_' .. idx, 'camHUD', ev.value, sec, ev.ease)
+    elseif ev.prop == 7 then
+        drunkAmp = ev.value
+    elseif ev.prop == 8 then
+        tipsyAmp = ev.value
+    elseif ev.prop == 9 then
+        bounceAmp = ev.value
+    end
+end
+
+function onUpdate(elapsed)
+    local beat = curDecBeat or 0
+    for i, ev in ipairs(mcEvents) do
+        if not ev.fired and beat >= ev.beat then
+            ev.fired = true
+            fireEvent(i, ev)
+        end
+    end
+    if drunkAmp ~= 0 or tipsyAmp ~= 0 or bounceAmp ~= 0 then
+        local total = getProperty('strumLineNotes.length') or 8
+        for i = 0, total - 1 do
+            if baseX[i] and baseY[i] then
+                local dx = drunkAmp * math.sin(beat * 1.5 + i * 0.65)
+                local dy = tipsyAmp * math.cos(beat * 2.0 + i * 0.8) + bounceAmp * math.abs(math.sin(beat * math.pi))
+                if drunkAmp ~= 0 then setPropertyFromGroup('strumLineNotes', i, 'x', baseX[i] + dx) end
+                if tipsyAmp ~= 0 or bounceAmp ~= 0 then setPropertyFromGroup('strumLineNotes', i, 'y', baseY[i] + dy) end
+            end
+        end
+    end
+end
+)LUA";
+        std::string err;
+        const std::string p = modchartPath();
+        if (!saveText(p, lua, err)) {
+            status_.set(err, true);
+            return;
+        }
+        status_.set("Saved " + p + " (" + std::to_string(events_.size()) + " events)");
+    }
+
+    struct EvalState {
+        float ox[2][9]{}, oy[2][9]{}, ang[2][9]{}, alpha[2][9]{};
+        float scroll = 2.0f, camZoom = 1.0f, camAngle = 0.0f;
+        float drunk = 0.0f, tipsy = 0.0f, bounce = 0.0f;
+    };
+
+    EvalState evaluateAt(double beat) const {
+        EvalState s;
+        for (int side = 0; side < 2; ++side)
+            for (int l = 0; l < 9; ++l) s.alpha[side][l] = 1.0f;
+        for (const ModEvent& ev : events_) {
+            if (beat < ev.beat) continue;
+            const double t = ev.dur > 1e-5 ? std::clamp((beat - ev.beat) / ev.dur, 0.0, 1.0) : 1.0;
+            const float k = float(psych::ease(kEaseNames[ev.ease], t));
+            auto apply = [&](auto fn) {
+                for (int side = 0; side < 2; ++side)
+                    for (int l = 0; l < previewKeys_; ++l) {
+                        if (ev.target == 1 && side != 1) continue;
+                        if (ev.target == 2 && side != 0) continue;
+                        if (ev.target >= 3 && l != ev.target - 3) continue;
+                        fn(side, l);
+                    }
+            };
+            switch (ev.prop) {
+                case kPropStrumX: apply([&](int sd, int l) { s.ox[sd][l] += (float(ev.value) - s.ox[sd][l]) * k; }); break;
+                case kPropStrumY: apply([&](int sd, int l) { s.oy[sd][l] += (float(ev.value) - s.oy[sd][l]) * k; }); break;
+                case kPropStrumAngle: apply([&](int sd, int l) { s.ang[sd][l] += (float(ev.value) - s.ang[sd][l]) * k; }); break;
+                case kPropAlpha: apply([&](int sd, int l) { s.alpha[sd][l] += (float(std::clamp(ev.value, 0.0, 1.0)) - s.alpha[sd][l]) * k; }); break;
+                case kPropScroll: s.scroll = std::max(0.1f, float(ev.value)); break;
+                case kPropCamZoom: s.camZoom += (std::max(0.2f, float(ev.value)) - s.camZoom) * k; break;
+                case kPropCamAngle: s.camAngle += (float(ev.value) - s.camAngle) * k; break;
+                case kPropDrunk: s.drunk = float(ev.value); break;
+                case kPropTipsy: s.tipsy = float(ev.value); break;
+                case kPropBounce: s.bounce = float(ev.value); break;
+                default: break;
+            }
+        }
+        for (int side = 0; side < 2; ++side)
+            for (int l = 0; l < previewKeys_; ++l) {
+                const int idx = side * previewKeys_ + l;
+                s.ox[side][l] += s.drunk * std::sin(float(beat) * 1.5f + float(idx) * 0.65f);
+                s.oy[side][l] += s.tipsy * std::cos(float(beat) * 2.0f + float(idx) * 0.8f) +
+                                 s.bounce * std::fabs(std::sin(float(beat) * 3.14159265f));
+            }
+        return s;
+    }
+
+    void drawPreviewStage(Rectangle area) {
+        DrawRectangleRounded(area, 0.02f, 6, Color{10, 8, 18, 240});
+        DrawRectangleRoundedLinesEx(area, 0.02f, 6, 1.5f, Color{92, 78, 134, 170});
+        const float barH = 56.0f;
+        const Rectangle view{area.x + 8, area.y + 8, area.width - 16, area.height - barH - 16};
+        DrawRectangleRec(view, Color{18, 14, 30, 255});
+
+        const EvalState st = evaluateAt(curBeat_);
+        const Vector2 center{view.x + view.width * 0.5f, view.y + view.height * 0.5f};
+        const float scale = (view.width / 1280.0f) * st.camZoom;
+        const float rad = st.camAngle * 0.01745329f;
+        const float cs = std::cos(rad), sn = std::sin(rad);
+        auto xform = [&](float gx, float gy) -> Vector2 {
+            const float dx = (gx - 640.0f) * scale;
+            const float dy = (gy - 360.0f) * scale;
+            return {center.x + dx * cs - dy * sn, center.y + dx * sn + dy * cs};
+        };
+
+        // Subtle beat pulse backdrop grid
+        const float pulse = float(1.0 - std::fmod(curBeat_, 1.0));
+        DrawRectangleLinesEx(view, 1.5f, fade(kGold, 0.25f + 0.35f * pulse));
+        const float lw = std::min(110.0f, 460.0f / float(previewKeys_));
+        const float noteSz = lw * 0.86f * scale;
+        static const Color kLaneCols[4] = {Color{200, 90, 240, 255}, Color{60, 200, 255, 255},
+                                           Color{70, 235, 110, 255}, Color{250, 75, 95, 255}};
+
+        // Draw Opponent (side 0) & Player (side 1) strums + scrolling guide notes
+        for (int side = 0; side < 2; ++side) {
+            const float baseSideX = side == 0 ? 320.0f : 960.0f;
+            const Vector2 lbl = xform(baseSideX, 58.0f);
+            gfx::text(FontId::Ui, side == 0 ? "OPPONENT" : "PLAYER", lbl.x, lbl.y, 15, fade(kIvory, 0.55f), Align::Center);
+            for (int l = 0; l < previewKeys_; ++l) {
+                const float gx = baseSideX + (float(l) - (previewKeys_ - 1) * 0.5f) * lw + st.ox[side][l];
+                const float gy = 140.0f + st.oy[side][l];
+                const Vector2 p = xform(gx, gy);
+                const float al = st.alpha[side][l];
+                const int dir = gfx::laneDir(previewKeys_, l);
+                const Color col = kLaneCols[dir % 4];
+                // Guide lane line
+                const Vector2 pBot = xform(gx, 660.0f);
+                DrawLineEx(p, pBot, 1.0f, fade(col, 0.16f * al));
+                // Scrolling sample notes showing scroll speed
+                for (int k = 0; k < 4; ++k) {
+                    const float bOff = float(k) - float(std::fmod(curBeat_, 1.0));
+                    const float ny = gy + bOff * 110.0f * (st.scroll * 0.5f);
+                    if (ny < gy || ny > 660.0f) continue;
+                    const Vector2 np = xform(gx, ny);
+                    DrawCircleV(np, noteSz * 0.30f, fade(col, 0.55f * al));
+                }
+                // Receptor square rotated by strum angle + camAngle
+                const Rectangle rec{p.x, p.y, noteSz, noteSz};
+                DrawRectanglePro(rec, {noteSz * 0.5f, noteSz * 0.5f}, st.ang[side][l] + st.camAngle, fade(col, 0.85f * al));
+                DrawCircleV(p, noteSz * 0.14f, fade(WHITE, 0.9f * al));
+            }
+        }
+
+        gfx::text(FontId::Ui,
+                  TextFormat("Zoom %.2fx   CamAngle %.1f   Scroll %.2f   Drunk %.0f   Tipsy %.0f   Bounce %.0f",
+                             st.camZoom, st.camAngle, st.scroll, st.drunk, st.tipsy, st.bounce),
+                  view.x + 10, view.y + view.height - 22, 14, fade(kIvory, 0.72f));
+
+        // Timeline scrubber bar
+        const Rectangle bar{area.x + 16, view.y + view.height + 12, area.width - 32, 34};
+        DrawRectangleRounded(bar, 0.25f, 6, Color{24, 18, 40, 255});
+        DrawRectangleRoundedLinesEx(bar, 0.25f, 6, 1.0f, Color{96, 80, 140, 200});
+        for (int i = 0; i < int(events_.size()); ++i) {
+            const float fx = float(std::clamp(events_[size_t(i)].beat / std::max(1.0, maxBeat_), 0.0, 1.0));
+            const float mx = bar.x + 6 + fx * (bar.width - 12);
+            DrawRectangleRec({mx - 2, bar.y + 4, 4, bar.height - 8}, i == sel_ ? kGold : Color{130, 210, 255, 220});
+        }
+        const float headX = bar.x + 6 + float(std::clamp(curBeat_ / std::max(1.0, maxBeat_), 0.0, 1.0)) * (bar.width - 12);
+        DrawRectangleRec({headX - 2, bar.y - 3, 4, bar.height + 6}, WHITE);
+
+        if (ui_.hover(bar) && ui_.click) {
+            scrubbing_ = true;
+            playing_ = false;
+        }
+        if (scrubbing_) {
+            if (!ui_.down) scrubbing_ = false;
+            else {
+                const float fx = std::clamp((ui_.mouse.x - (bar.x + 6)) / std::max(1.0f, bar.width - 12), 0.0f, 1.0f);
+                curBeat_ = std::round(fx * maxBeat_ * 4.0) * 0.25;
+            }
+        }
+    }
+};
+
 }  // namespace
 
 std::unique_ptr<State> makeScriptEditor() { return std::make_unique<ScriptEditorState>(); }
@@ -2991,5 +4068,7 @@ std::unique_ptr<State> makeEditorMenu() { return std::make_unique<EditorMenuStat
 std::unique_ptr<State> makeCharacterEditor() { return std::make_unique<CharacterEditorState>(); }
 std::unique_ptr<State> makeStageEditor() { return std::make_unique<StageEditorState>(); }
 std::unique_ptr<State> makeEventEditor() { return std::make_unique<EventEditorState>(); }
+std::unique_ptr<State> makeModchartEditor() { return std::make_unique<ModchartEditorState>(); }
+std::unique_ptr<State> makeSniffEditor() { return std::make_unique<SniffEditorState>(); }
 
 }  // namespace gh

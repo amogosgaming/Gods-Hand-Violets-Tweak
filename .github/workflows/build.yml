@@ -34,9 +34,6 @@ permissions:
   contents: write
 
 concurrency:
-  # A newer push cancels an older build of the same branch, but a manual
-  # release run and a push build never cancel each other (a merge followed by
-  # a release run left the merge commit with a cancelled, red build).
   group: build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
@@ -55,21 +52,21 @@ jobs:
         run: |
           p="${{ inputs.platforms || 'all' }}"
           case "$p" in
-            windows)        m='[{"os":"windows-latest","name":"windows-x64"},{"os":"ubuntu-22.04","name":"windows-vista-7-x86","mingw32":true}]'; rd=true; ra=false ;;
-            windows-legacy) m='[{"os":"ubuntu-22.04","name":"windows-vista-7-x86","mingw32":true}]'; rd=true; ra=false ;;
-            linux)          m='[{"os":"ubuntu-22.04","name":"linux-x64"}]'; rd=true; ra=false ;;
-            macos)          m='[{"os":"macos-15","name":"macos-arm64"}]'; rd=true; ra=false ;;
-            android)        m='[{"os":"ubuntu-22.04","name":"linux-x64"}]'; rd=false; ra=true ;;
-            *)              m='[{"os":"windows-latest","name":"windows-x64"},{"os":"ubuntu-22.04","name":"windows-vista-7-x86","mingw32":true},{"os":"ubuntu-22.04","name":"linux-x64"},{"os":"macos-15","name":"macos-arm64"}]'; rd=true; ra=true ;;
+            windows)        m='[{"os":"windows-latest","name":"windows-x64-sse4","isa":"SSE4"},{"os":"windows-latest","name":"windows-x64-avx2","isa":"AVX2"},{"os":"ubuntu-22.04","name":"windows-vista-7-x86-sse2","mingw32":true,"isa":"SSE2"}]'; rd=true; ra=false ;;
+            windows-legacy) m='[{"os":"ubuntu-22.04","name":"windows-vista-7-x86-sse2","mingw32":true,"isa":"SSE2"}]'; rd=true; ra=false ;;
+            linux)          m='[{"os":"ubuntu-22.04","name":"linux-x64-sse4","isa":"SSE4"},{"os":"ubuntu-22.04","name":"linux-x64-avx2","isa":"AVX2"}]'; rd=true; ra=false ;;
+            macos)          m='[{"os":"macos-15","name":"macos-arm64","isa":"AUTO"}]'; rd=true; ra=false ;;
+            android)        m='[{"os":"ubuntu-22.04","name":"linux-x64-sse4","isa":"SSE4"}]'; rd=false; ra=true ;;
+            *)              m='[{"os":"windows-latest","name":"windows-x64-sse4","isa":"SSE4"},{"os":"windows-latest","name":"windows-x64-avx2","isa":"AVX2"},{"os":"ubuntu-22.04","name":"windows-vista-7-x86-sse2","mingw32":true,"isa":"SSE2"},{"os":"ubuntu-22.04","name":"linux-x64-sse4","isa":"SSE4"},{"os":"ubuntu-22.04","name":"linux-x64-avx2","isa":"AVX2"},{"os":"macos-15","name":"macos-arm64","isa":"AUTO"}]'; rd=true; ra=true ;;
           esac
           echo "desktop_matrix=$m" >> "$GITHUB_OUTPUT"
           echo "run_desktop=$rd" >> "$GITHUB_OUTPUT"
           echo "run_android=$ra" >> "$GITHUB_OUTPUT"
       - name: Configure
-        run: cmake -S . -B build -DGH_BUILD_GAME=OFF -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DGH_BUILD_GAME=OFF -DGH_CPU_ISA=SSE4 -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
-      - name: Run tests (charts, gameplay rules, composer and audio rendering)
+      - name: Run tests (charts, gameplay rules, raster and audio rendering)
         run: ./build/gh_tests --audio
 
   build:
@@ -86,7 +83,7 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux' && !matrix.mingw32
         run: bash tools/ci_apt_install.sh libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libasound2-dev
-      - name: MinGW-w64 dependencies (Windows Vista/7 x86)
+      - name: MinGW-w64 dependencies (Windows Vista/7 x86 SSE2)
         if: matrix.mingw32
         run: bash tools/ci_apt_install.sh gcc-mingw-w64-i686-posix g++-mingw-w64-i686-posix binutils-mingw-w64-i686 ninja-build
       - name: Configure
@@ -100,12 +97,13 @@ jobs:
               -DCMAKE_CXX_COMPILER=i686-w64-mingw32-g++-posix \
               -DCMAKE_RC_COMPILER=i686-w64-mingw32-windres \
               -DCMAKE_BUILD_TYPE=Release \
+              -DGH_CPU_ISA=SSE2 \
               -DGH_WINDOWS_LEGACY=ON \
               -DGH_BUILD_TESTS=OFF
           elif [ "$RUNNER_OS" = "Linux" ]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=ON
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_CPU_ISA="${{ matrix.isa }}" -DGH_BUILD_TESTS=ON
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_BUILD_TESTS=OFF
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGH_CPU_ISA="${{ matrix.isa }}" -DGH_BUILD_TESTS=OFF
           fi
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -113,18 +111,13 @@ jobs:
         if: runner.os == 'Linux' && !matrix.mingw32
         run: ./build/gh_tests
       - name: Note renderer assembly (MSVC)
-        # The MASM version of the x86-64 routine, checked against the C++ one
-        # on Windows itself (the Linux tests check the GCC one).
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.isa == 'SSE4'
         shell: bash
         run: |
-          cmake -S . -B build-raster -DGH_BUILD_GAME=OFF -DGH_BUILD_TESTS=ON
+          cmake -S . -B build-raster -DGH_BUILD_GAME=OFF -DGH_BUILD_TESTS=ON -DGH_CPU_ISA=SSE4
           cmake --build build-raster --config Release --target gh_tests --parallel
           build-raster/Release/gh_tests.exe --raster
       - name: Core tests on ARM64 (NEON)
-        # Every core test on Apple Silicon itself: the NEON note blending,
-        # chart scanning and YUV conversion against the plain C++ (Android
-        # phones run the same code).
         if: runner.os == 'macOS'
         run: |
           cmake -S . -B build-raster -DGH_BUILD_GAME=OFF -DGH_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
@@ -133,18 +126,18 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          cmake --install build --config Release --prefix dist/GodsHand
-          mkdir -p dist/GodsHand/mods
+          cmake --install build --config Release --prefix dist/Astralis
+          mkdir -p dist/Astralis/mods
           cd dist
           if [ "$RUNNER_OS" = "Windows" ]; then
-            7z a ../GodsHand-${{ matrix.name }}.zip GodsHand
+            7z a ../Astralis-${{ matrix.name }}.zip Astralis
           else
-            zip -r ../GodsHand-${{ matrix.name }}.zip GodsHand
+            zip -r ../Astralis-${{ matrix.name }}.zip Astralis
           fi
       - uses: actions/upload-artifact@v4
         with:
-          name: GodsHand-${{ matrix.name }}
-          path: GodsHand-${{ matrix.name }}.zip
+          name: Astralis-${{ matrix.name }}
+          path: Astralis-${{ matrix.name }}.zip
 
   android:
     name: Build android
@@ -162,8 +155,6 @@ jobs:
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           yes | "$sdkmanager" --licenses > /dev/null || true
           "$sdkmanager" "platforms;android-34" "build-tools;34.0.0" "ndk;27.2.12479018" > /dev/null
-          # Ninja: the runner's own, else the one in the SDK's CMake package (from
-          # Google's servers, so an Ubuntu mirror outage does not stop the build).
           if ! command -v ninja > /dev/null; then
             "$sdkmanager" "cmake;3.22.1" > /dev/null
             mkdir -p "$RUNNER_TEMP/ninja"
@@ -172,7 +163,6 @@ jobs:
           fi
       - name: Build APK
         env:
-          # Optional: a private signing key (base64 keystore + password) instead of android/godshand.keystore.
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           GH_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
         run: |
@@ -180,11 +170,11 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
             export GH_KEYSTORE="$RUNNER_TEMP/release.keystore"
           fi
-          ANDROID_SDK="$ANDROID_HOME" bash android/build_apk.sh "$PWD/GodsHand-android.apk"
+          ANDROID_SDK="$ANDROID_HOME" bash android/build_apk.sh "$PWD/Astralis-android.apk"
       - uses: actions/upload-artifact@v4
         with:
-          name: GodsHand-android
-          path: GodsHand-android.apk
+          name: Astralis-android
+          path: Astralis-android.apk
 
   android-test:
     name: Test android (emulator)
@@ -195,7 +185,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: GodsHand-android
+          name: Astralis-android
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -210,7 +200,7 @@ jobs:
           profile: pixel_6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: bash android/emulator_test.sh GodsHand-android.apk android-shots
+          script: bash android/emulator_test.sh Astralis-android.apk android-shots
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -220,9 +210,6 @@ jobs:
   release:
     name: Publish downloads
     needs: [tests, build, android, android-test]
-    # Publish whatever platforms built, so one unavailable runner does not hold
-    # back the other downloads. A run cancelled by a newer push publishes
-    # nothing: the newer run does.
     if: ${{ !cancelled() && (github.event_name == 'push' || inputs.release != '') && needs.tests.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -232,8 +219,6 @@ jobs:
           path: artifacts
           merge-multiple: true
       - name: Publish the release
-        # An official release: a pushed v* tag, or a manual run with a tag to create.
-        # The game's packages only: the source code is not published with them.
         if: ${{ inputs.release != '' || startsWith(github.ref, 'refs/tags/') }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -241,54 +226,28 @@ jobs:
           RELEASE_TAG: ${{ inputs.release }}
         run: |
           shopt -s nullglob
-          # Patterns, so a platform that did not build is simply left out (nullglob).
           files=()
           for f in artifacts/*.zip artifacts/*.apk; do
-            [ "$(basename "$f")" = GodsHand-complete-source.zip ] || files+=("$f")
+            files+=("$f")
           done
           if [ ${#files[@]} -eq 0 ]; then echo "No packages were built."; exit 1; fi
           ls -la artifacts
           cat > notes.md <<'EOF'
           | Download | System | How to play |
           |---|---|---|
-          | `GodsHand-windows-x64.zip` | Windows 7/8/10/11 (64-bit, OpenGL 3.3) | Extract, run `godshand.exe` |
-          | `GodsHand-windows-vista-7-x86.zip` | Windows Vista/7+ (32-bit & 64-bit, OpenGL 2.1) | Extract, run `godshand.exe` |
-          | `GodsHand-linux-x64.zip` | Linux x64 | Extract, run `./godshand` |
-          | `GodsHand-macos-arm64.zip` | macOS (Apple Silicon) | Extract; the first time, right-click `godshand` > Open |
-          | `GodsHand-android.apk` | Android 7+ | Open it on the phone and allow installing from this source |
-
-          Mod packs: Freeplay > MOD PACKS in the game, or the [`mods`](https://github.com/deatuamae67-crypto/Gods-Hand-of-Principality-And-Demise/releases/tag/mods) release. Not all of the mods are by deatuamae67-crypto: some are, and the others belong to their original creators.
-
-          License: all rights reserved (see `LICENSE`). You may play the game and make mods for it; forking, copying, republishing, rebranding or reusing the code is not allowed. The only way to contribute is to open an issue in the official repository. The license covers every version, including those first published under the MIT License (up to 1.6.2) and 1.6.3: those licenses were withdrawn.
+          | `Astralis-windows-x64-avx2.zip` | Windows 7/8/10/11 (64-bit, AVX2 - Intel 4th gen+ / Ryzen) | Extract, run `astralis.exe` |
+          | `Astralis-windows-x64-sse4.zip` | Windows 7/8/10/11 (64-bit, SSE4 - Intel 3rd gen & older) | Extract, run `astralis.exe` |
+          | `Astralis-windows-vista-7-x86-sse2.zip` | Windows Vista/7+ (32-bit pure SSE2, OpenGL 2.1) | Extract, run `astralis.exe` |
+          | `Astralis-linux-x64-avx2.zip` | Linux x64 (AVX2) | Extract, run `./astralis` |
+          | `Astralis-linux-x64-sse4.zip` | Linux x64 (SSE4) | Extract, run `./astralis` |
+          | `Astralis-macos-arm64.zip` | macOS (Apple Silicon) | Extract; first time, right-click `astralis` > Open |
+          | `Astralis-android.apk` | Android 7+ | Open it on the phone and allow installing from this source |
           EOF
           tag="$RELEASE_TAG"
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then tag="$GITHUB_REF_NAME"; fi
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tags look like v1.2.3, not '$tag'."; exit 1; }
-          # A run for a release that already exists (one platform found no
-          # runner the first time) completes it: its packages are added or
-          # replaced, and the notes and the tag stay as they are.
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "${files[@]}" --clobber
           else
-            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "God's Hand $tag" --notes-file notes.md
+            gh release create "$tag" "${files[@]}" --target "$GITHUB_SHA" --title "Astralis $tag" --notes-file notes.md
           fi
-      - name: Keep only the newest release and the mod packs
-        # Older releases are removed with their tags (and so with the source code
-        # GitHub attaches to every tag); push builds no longer publish a
-        # "latest build". Runs after a release is published, and on every push.
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          gh release list --limit 500 --json tagName,isDraft,isPrerelease > releases.json
-          keep="$(jq -r '[.[] | select((.isDraft | not) and (.isPrerelease | not) and (.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+$")))]
-                         | sort_by(.tagName | ltrimstr("v") | split(".") | map(tonumber)) | last | .tagName // empty' releases.json)"
-          if [ -z "$keep" ]; then echo "No official release yet: nothing removed."; exit 0; fi
-          echo "Keeping $keep and mods."
-          # Releases before 1.6.3 also carried the complete source package.
-          gh release delete-asset "$keep" GodsHand-complete-source.zip -y 2>/dev/null && echo "Removed the source package from $keep" || true
-          jq -r '.[].tagName' releases.json | while read -r t; do
-            case "$t" in "" | mods | "$keep") continue ;; esac
-            echo "Removing release $t and its tag"
-            gh release delete "$t" --cleanup-tag -y || echo "  (already gone)"
-          done

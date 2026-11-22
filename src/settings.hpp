@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 // Persistent options, key bindings and best scores (plain text files).
@@ -43,7 +43,8 @@ struct Settings {
     // once while the frame rate is under its target; all are still played),
     // 1 full (every pixel).
     int noteDetail = 0;
-    int noteRenderer = 3;  // 0 GPU, 1 CPU with x86-64 assembly, 2 CPU with C++, 3 Auto
+    int noteRenderer = 3;  // 0 GPU, 1 CPU (ASM), 2 CPU (C++), 3 Auto
+    int noteAsmCpu = 0;    // 0 x86 SSE2, 1 x86-64 SSE4 (disabled), 2 AVX2 (disabled)
     bool luaNoteCallbacks = true;  // goodNoteHit, opponentNoteHit, noteMiss... (OFF: faster spam charts)
     // Rendering mode (desktop): songs play by themselves and are recorded to a
     // video with ffmpeg, frame by frame (render_mode.hpp).
@@ -69,7 +70,7 @@ struct Settings {
     float healthBarAlpha = 1.0f;
     // Psych Engine's own options (Visuals and UI, Gameplay).
     bool hideHud = false;       // health bar, icons, score line and ratings hidden
-    bool watermark = true;      // "God's Hand (version)" in the bottom-left corner of songs
+    bool watermark = true;      // "Astralis Engine (version)" in the bottom-left corner of songs
     bool visualizer = true;     // the audio visualizer in the top-right corner of songs
     bool scoreZoom = true;      // the score line grows a little on each note you hit
     bool botplayText = true;    // BOTPLAY (or REPLAY) on screen while the game plays by itself

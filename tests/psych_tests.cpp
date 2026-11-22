@@ -739,8 +739,7 @@ int runPsychCorpus(const char* dir) {
     return atlasFail + charFail + stageFail;
 }
 
-// ------------------------------------------------- AutoChart, replays, zips --
-#include "autochart.hpp"
+// ------------------------------------------------------- Replays, zips, GHC --
 #include "chart_binary.hpp"
 #include "chart_stream.hpp"
 #include "effects.hpp"
@@ -752,39 +751,6 @@ int runPsychCorpus(const char* dir) {
 #include "session.hpp"
 
 namespace {
-
-void testAutoChart() {
-    // 40 s of clicks at 128 BPM: low thumps on beats, high ticks on off-beats.
-    const int rate = 44100;
-    const double bpm = 128, beat = 60.0 / bpm, first = 0.37;
-    std::vector<int16_t> pcm(size_t(rate * 40), 0);
-    for (double t = first; t < 39.5; t += beat / 2) {
-        const bool onBeat = std::fmod((t - first) / beat + 1e-6, 1.0) < 0.25;
-        const double f = onBeat ? 90 : 3200;
-        for (int i = 0; i < rate / 12; ++i) {
-            const size_t k = size_t(t * rate) + size_t(i);
-            if (k >= pcm.size()) break;
-            const double env = std::exp(-double(i) / (rate * 0.02));
-            pcm[k] = int16_t(std::clamp(pcm[k] + 14000.0 * env * std::sin(2 * kPi * f * i / rate), -32767.0, 32767.0));
-        }
-    }
-    Chart c;
-    AutoChartInfo info;
-    PCHECK(autoChart(pcm.data(), pcm.size(), 1, rate, 2, c, &info));
-    PCHECK(std::fabs(info.bpm - bpm) < 1.5);
-    PCHECK(c.notes.size() > 100 && c.playerNotes > 30 && c.opponentNotes > 30);
-    // Notes sit on the detected grid near the real clicks.
-    int onGrid = 0;
-    for (const Note& n : c.notes) {
-        const double rel = (n.time / 1000.0 - first) / (beat / 4);
-        if (std::fabs(rel - std::round(rel)) < 0.2) ++onGrid;
-    }
-    PCHECK(onGrid > int(c.notes.size() * 9 / 10));
-    Chart easy;
-    PCHECK(autoChart(pcm.data(), pcm.size(), 1, rate, 0, easy) && easy.notes.size() < c.notes.size());
-    std::vector<int16_t> silence(size_t(rate) * 10, 0);
-    PCHECK(!autoChart(silence.data(), silence.size(), 1, rate, 1, c));
-}
 
 void testReplayDeterminism() {
     Chart c;
@@ -1068,6 +1034,28 @@ void testChartStreaming() {
                        x.stack == y.stack && x.type == y.type && x.flags == y.flags;
             }
             PCHECK(same);
+            // GHC v3 compression algorithms, levels and block sizes round-trip identically.
+            for (const GhcWriteOptions& opt : {GhcWriteOptions{GhcCompression::None, 1, 2048},
+                                               GhcWriteOptions{GhcCompression::Deflate, 1, 4096},
+                                               GhcWriteOptions{GhcCompression::Deflate, 9, 8192},
+                                               GhcWriteOptions{GhcCompression::RleDeflate, 5, 1024},
+                                               GhcWriteOptions{GhcCompression::RleDeflate, 9, 16384}}) {
+                const std::string v3path = (fs::temp_directory_path() / "gh_v3_opts.ghc").string();
+                std::string e3;
+                PCHECK(writeBinaryChart(v3path, skeleton, built, opt, e3));
+                Chart cv3;
+                PCHECK(loadChartFile(v3path, "Normal", cv3, e3));
+                bool ok3 = cv3.notes.size() == cj.notes.size() && cv3.events.size() == cj.events.size() &&
+                           cv3.title == cj.title && cv3.noteTypes == cj.noteTypes;
+                for (size_t i = 0; ok3 && i < cj.notes.size(); ++i) {
+                    const Note& x = cj.notes[i];
+                    const Note& y = cv3.notes[i];
+                    ok3 = std::fabs(x.time - y.time) < 1e-5 && std::fabs(x.length - y.length) < 1e-2 && x.lane == y.lane &&
+                          x.side == y.side && x.stack == y.stack && x.type == y.type && x.flags == y.flags;
+                }
+                PCHECK(ok3);
+                fs::remove(v3path);
+            }
             fs::remove(jpath);
             fs::remove(bpath);
         }
@@ -1536,7 +1524,8 @@ void testBuiltinScripts() {
         if (code) PCHECK(compiles(ev, code));
     }
     // Done in C++: no script, still the engine's.
-    for (const char* ev : {"Zoom Camera", "Target Camera", "Philly Glow", "Kill Henchmen", "Flash", "Invert No", "Hey!"})
+    for (const char* ev : {"Zoom Camera", "Target Camera", "Philly Glow", "Kill Henchmen", "Flash", "Invert No", "Hey!",
+                           "Change Key Count", "Change Mania", "Set Key Count"})
         PCHECK(builtin::engineEvent(ev) && !builtin::eventLua(ev));
     // Unknown events borrow other mods' scripts.
     PCHECK(!builtin::engineEvent("Image Flash") && !builtin::engineEvent("Toggle Trail"));
@@ -1545,9 +1534,8 @@ void testBuiltinScripts() {
 
 }  // namespace
 
-void runExtraTests(bool audio) {
+void runExtraTests(bool /*audio*/) {
     testBuiltinScripts();
-    testAutoChart();
     testReplayDeterminism();
     testZipInstall();
     testChartStreaming();
@@ -1555,17 +1543,4 @@ void runExtraTests(bool audio) {
     testHScript();
     testLuaExtras();
     testJsEngineEffects();
-    if (!audio) return;
-    // AutoChart on the built-in songs: report the tempo it hears.
-    for (const SongDef& def : builtinSongs()) {
-        auto comp = compose(def, true);
-        Chart c;
-        AutoChartInfo info;
-        const bool ok = autoChart(comp->inst.data(), comp->inst.size() / 2, 2, 44100, 1, c, &info);
-        double ratio = info.bpm / def.bpm;
-        while (ratio > 1.4) ratio /= 2;
-        while (ratio < 0.7) ratio *= 2;
-        std::printf("  AutoChart %-13s %6.1f BPM (real %5.1f)  %zu notes\n", def.title.c_str(), info.bpm, def.bpm, c.notes.size());
-        PCHECK(ok && std::fabs(ratio - 1.0) < 0.03);
-    }
 }

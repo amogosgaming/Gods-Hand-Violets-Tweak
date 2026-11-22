@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 // Title, main menu, story, freeplay and credits screens.
@@ -48,12 +48,6 @@ void hints(const char* s) {
     if (app().touchMode) return;  // the on-screen buttons speak for themselves
     DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
     gfx::text(FontId::Ui, s, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
-}
-
-double lastBeatTime() {
-    const double b = app().menuBeat();
-    const double frac = b - std::floor(b);
-    return app().now - frac * 60.0 / app().menuBpm();
 }
 
 std::vector<std::string> wrap(const std::string& s, size_t width) {
@@ -153,16 +147,16 @@ public:
             DrawRectangleRec({0, 0, gfx::W, gfx::H}, BLACK);
             gfx::glow({gfx::W * 0.5f, gfx::H * 0.44f}, 320.0f + 50.0f * pulse, fade(Color{110, 90, 210, 255}, 0.22f + 0.12f * pulse));
             const float s = 1.0f + 0.045f * pulse;
-            if (ui.alphabetCentered("GOD'S HAND", gfx::W * 0.5f, 165.0f - 10.0f * pulse, 84.0f * s, 1.0f) < 0)
-                ui.uiText("GOD'S HAND", gfx::W * 0.5f, 155.0f - 8.0f * pulse, 86.0f * s, WHITE, 0, 3.0f);
-            if (ui.alphabetCentered("OF PRINCIPALITY AND DEMISE", gfx::W * 0.5f, 286.0f, 34.0f, 0.9f) < 0)
-                ui.uiText("OF PRINCIPALITY AND DEMISE", gfx::W * 0.5f, 288.0f, 28.0f, kIvory, 0, 2.0f);
+            if (ui.alphabetCentered("ASTRALIS", gfx::W * 0.5f, 185.0f - 10.0f * pulse, 92.0f * s, 1.0f) < 0)
+                ui.uiText("ASTRALIS", gfx::W * 0.5f, 175.0f - 8.0f * pulse, 92.0f * s, WHITE, 0, 3.0f);
+            if (ui.alphabetCentered("ENGINE", gfx::W * 0.5f, 296.0f, 36.0f, 0.9f) < 0)
+                ui.uiText("ENGINE", gfx::W * 0.5f, 298.0f, 30.0f, kIvory, 0, 2.0f);
             const float blink = leaving_ ? (std::fmod(float(now) * 14.0f, 2.0f) < 1.0f ? 1.0f : 0.15f)
                                          : 0.45f + 0.55f * (0.5f + 0.5f * std::sin(float(now) * 3.5f));
             const char* prompt = a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN";
             const Color pc = leaving_ ? Color{51, 255, 255, 255} : Color{51, 51, 204, 255};
             ui.uiText(prompt, gfx::W * 0.5f, 520.0f, 38.0f, fade(leaving_ ? pc : gfx::mix(pc, WHITE, blink), blink), 0, 2.5f);
-            ui.uiText("God's Hand Engine v" GH_VERSION, 14.0f, gfx::H - 34.0f, 18.0f, fade(WHITE, 0.75f), -1, 1.5f);
+            ui.uiText("Astralis Engine v" GH_VERSION, 14.0f, gfx::H - 34.0f, 18.0f, fade(WHITE, 0.75f), -1, 1.5f);
             if (!a.mixer.audioOk())
                 ui.uiText("No audio device found - the game will run silently", gfx::W * 0.5f, 580.0f, 20.0f,
                           Color{255, 160, 140, 255}, 0, 1.5f);
@@ -171,22 +165,14 @@ public:
             return;
         }
         drawMenuBackground(now, 0xF4C76B, pulse);
-        CharacterState p;
-        p.id = CharId::Principality;
-        p.beatAt = lastBeatTime();
-        drawCharacter(p, {230, 690}, 0.9f, now, false);
-        CharacterState h;
-        h.id = CharId::Herald;
-        h.beatAt = p.beatAt;
-        drawCharacter(h, {1060, 690}, 0.95f, now, true);
         const float s = 1.0f + 0.025f * pulse;
-        gfx::glowText(FontId::Title, "GOD'S HAND", gfx::W / 2, 150 - 6 * s, 104 * s, kGold, Color{255, 190, 80, 255});
-        gfx::text(FontId::Title, "of Principality and Demise", gfx::W / 2, 286, 38, kIvory, Align::Center, 2.0f);
+        gfx::glowText(FontId::Title, "ASTRALIS", gfx::W / 2, 170 - 6 * s, 108 * s, kGold, Color{255, 190, 80, 255});
+        gfx::text(FontId::Title, "Astralis Engine", gfx::W / 2, 296, 38, kIvory, Align::Center, 2.0f);
         const float blink = leaving_ ? (std::fmod(float(now) * 12.0f, 2.0f) < 1.0f ? 1.0f : 0.2f)
                                      : 0.55f + 0.45f * std::sin(float(now) * 3.5f);
         gfx::text(FontId::Ui, a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN", gfx::W / 2, 470, 40, fade(WHITE, blink),
                   Align::Center, 2.0f);
-        gfx::text(FontId::Ui, "A rhythm duel  -  v" GH_VERSION, gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
+        gfx::text(FontId::Ui, "Astralis Engine  -  v" GH_VERSION, gfx::W / 2, 680, 22, fade(kIvory, 0.7f), Align::Center, 1.0f);
         if (!a.mixer.audioOk())
             gfx::text(FontId::Ui, "No audio device found - the game will run silently", gfx::W / 2, 520, 22,
                       Color{255, 160, 140, 255}, Align::Center, 1.5f);
@@ -202,9 +188,7 @@ private:
 
 // -------------------------------------------------------------- Main menu --
 
-// RENDER MODE and AUTOCHART open the song list for recording a video or
-// for playing a chart made from the song's audio.
-constexpr const char* kMainItems[] = {"STORY MODE", "FREEPLAY", "RENDER MODE", "AUTOCHART", "OPTIONS", "CREDITS", "QUIT"};
+constexpr const char* kMainItems[] = {"STORY MODE", "FREEPLAY", "CREDITS", "OPTIONS", "QUIT"};
 constexpr int kMainCount = int(sizeof(kMainItems) / sizeof(kMainItems[0]));
 
 class MainMenuState : public State {
@@ -222,15 +206,11 @@ public:
                 switch (chosen_) {
                     case 0: a.change(makeStory()); break;
                     case 1:
-                    case 2:
-                    case 3:
-                        a.songListMode = chosen_ == 2   ? App::SongListMode::Render
-                                         : chosen_ == 3 ? App::SongListMode::AutoChart
-                                                        : App::SongListMode::Play;
+                        a.songListMode = App::SongListMode::Play;
                         a.change(makeFreeplay());
                         break;
-                    case 4: a.change(makeOptions()); break;
-                    case 5: a.change(makeCredits()); break;
+                    case 2: a.change(makeCredits()); break;
+                    case 3: a.change(makeOptions()); break;
                     default: a.quit = true; break;
                 }
             }
@@ -244,7 +224,7 @@ public:
             sfxPlay(sel == kMainCount - 1 ? Sfx::Cancel : Sfx::Confirm);
         }
         if (a.input.back()) { sfxPlay(Sfx::Cancel); a.change(makeTitle()); }
-        // 7: the editors (chart, character, stage, events), as Psych's Master Editor Menu.
+        // 7: the editors (chart, character, stage, events, modchart, SNIFF), as Psych's Master Editor Menu.
         if (a.input.pressed(KEY_SEVEN) || a.input.pressed(KEY_KP_7)) {
             sfxPlay(Sfx::Confirm);
             a.change(makeEditorMenu());
@@ -259,11 +239,11 @@ public:
         if (a.psychMenusActive()) {
             const PsychUi& ui = psychUi();
             const bool magenta = chosen_ >= 0 && a.settings.flashing && std::fmod(float(now - chosenAt_) * 10.0f, 2.0f) < 1.0f;
-            drawPsychMenuBackground(magenta ? 3 : 0, WHITE, anim_ * 38.0f, true, now, 0xFDE871, pulse);
+            drawPsychMenuBackground(magenta ? 3 : 0, WHITE, anim_ * 42.0f, true, now, 0xFDE871, pulse);
             for (int i = 0; i < kMainCount; ++i) {
                 const bool on = i == a.mainSel;
                 const float d = float(i) - anim_;
-                const float y = 330.0f + d * 116.0f;
+                const float y = 330.0f + d * 130.0f;
                 if (y < -120.0f || y > gfx::H + 120.0f) continue;
                 float itemAlpha = on ? 1.0f : 0.78f;
                 if (chosen_ >= 0) {
@@ -274,8 +254,8 @@ public:
                 int spriteIdx = -1;
                 if (i == 0) spriteIdx = 0;       // story_mode
                 else if (i == 1) spriteIdx = 1;  // freeplay
-                else if (i == 4) spriteIdx = 2;  // options
-                else if (i == 5) spriteIdx = 3;  // credits
+                else if (i == 2) spriteIdx = 3;  // credits
+                else if (i == 3) spriteIdx = 2;  // options
                 bool drawn = false;
                 if (spriteIdx >= 0) drawn = ui.drawMainMenuItem(spriteIdx, {gfx::W * 0.5f, y}, on, now, itemAlpha);
                 if (!drawn) {
@@ -285,22 +265,17 @@ public:
                                   fade(on ? kGold : WHITE, itemAlpha), 0, 2.5f);
                 }
             }
-            ui.uiText("God's Hand Engine v" GH_VERSION, 12.0f, gfx::H - 88.0f, 18.0f, WHITE, -1, 1.5f);
+            ui.uiText("Astralis Engine v" GH_VERSION, 12.0f, gfx::H - 88.0f, 18.0f, WHITE, -1, 1.5f);
             ui.uiText(a.library.report(), 12.0f, gfx::H - 66.0f, 16.0f, fade(WHITE, 0.85f), -1, 1.25f);
             hints("UP/DOWN select   ENTER confirm   7 editors   ESC back   F11 fullscreen");
             gfx::endCanvas();
             return;
         }
         drawMenuBackground(now, 0x8C6CFF, pulse, true);
-        CharacterState h;
-        h.id = CharId::Herald;
-        h.beatAt = lastBeatTime();
-        gfx::glow({1080, 500}, 230 + 20 * pulse, fade(kGold, 0.3f));
-        drawCharacter(h, {1080, 640}, 0.85f, now, true);
-        gfx::text(FontId::Title, "GOD'S HAND", 60, 40, 44, kGold, Align::Left, 2.0f);
+        gfx::text(FontId::Title, "ASTRALIS", 60, 40, 44, kGold, Align::Left, 2.0f);
         for (int i = 0; i < kMainCount; ++i) {
             const bool on = i == a.mainSel;
-            const float y = 128.0f + i * 70.0f - (on ? 6.0f : 0.0f);
+            const float y = 160.0f + i * 84.0f - (on ? 6.0f : 0.0f);
             float size = on ? 56.0f + 4.0f * pulse : 42.0f;
             Color c = on ? kGold : fade(kIvory, 0.55f);
             if (chosen_ >= 0 && on && std::fmod(float(now - chosenAt_) * 10.0f, 2.0f) < 1.0f) c = WHITE;
@@ -328,22 +303,56 @@ private:
 
 class StoryState : public State {
 public:
-    void update(double) override {
+    struct WeekDef {
+        const char* id;
+        const char* title;
+        const char* motto;
+        std::vector<const char*> songKeys;
+        std::vector<const char*> trackNames;
+        Color banner;
+    };
+    static const std::vector<WeekDef>& weeks() {
+        static const std::vector<WeekDef> w = {
+            {"week:tutorial", "TUTORIAL", "TEACHING TIME", {"tutorial"}, {"Tutorial"}, Color{249, 207, 81, 255}},
+            {"week:week1", "WEEK 1", "DADDY DEAREST", {"bopeebo", "fresh", "dad-battle"}, {"Bopeebo", "Fresh", "Dad Battle"},
+             Color{249, 207, 81, 255}},
+        };
+        return w;
+    }
+    static std::string findSongId(const App& a, const std::string& key) {
+        const std::string k = toLower(key);
+        for (const SongEntry& e : a.library.songs())
+            if (e.pack.empty() && toLower(e.songKey) == k) return e.id;
+        for (const SongEntry& e : a.library.songs())
+            if (toLower(e.songKey) == k) return e.id;
+        return "custom:songs/" + k;
+    }
+    void update(double dt) override {
         App& a = app();
         static const char* diffs[3] = {"Easy", "Normal", "Hard"};
+        const auto& ws = weeks();
+        const int nw = int(ws.size());
+        week_ = clampv(week_, 0, nw - 1);
+        animWeek_ = approach(animWeek_, float(week_), 12.0f, float(dt));
         int& d = a.storyDiff;
         d = clampv(d, 0, 2);
+        if (a.input.up()) { week_ = (week_ + nw - 1) % nw; sfxPlay(Sfx::Scroll); }
+        if (a.input.down()) { week_ = (week_ + 1) % nw; sfxPlay(Sfx::Scroll); }
         if (a.input.left()) { d = (d + 2) % 3; sfxPlay(Sfx::Scroll); }
         if (a.input.right()) { d = (d + 1) % 3; sfxPlay(Sfx::Scroll); }
         if (a.input.back()) { sfxPlay(Sfx::Cancel); a.change(makeMainMenu()); }
         if (a.input.accept() && !go_) {
+            const WeekDef& w = ws[size_t(week_)];
+            std::vector<std::string> ids;
+            for (const char* sk : w.songKeys) ids.push_back(findSongId(a, sk));
+            if (ids.empty()) return;
             go_ = true;
             sfxPlay(Sfx::Confirm);
             PlayRequest r;
-            r.songId = "builtin:principality";
+            r.songId = ids[0];
             r.diff = diffs[d];
             r.story = true;
-            r.storyQueue = {"builtin:godshand", "builtin:demise"};
+            for (size_t i = 1; i < ids.size(); ++i) r.storyQueue.push_back(ids[i]);
             a.change(makePlay(r));
         }
     }
@@ -351,71 +360,53 @@ public:
         App& a = app();
         const double now = a.now;
         static const char* diffs[3] = {"Easy", "Normal", "Hard"};
+        const auto& ws = weeks();
+        const WeekDef& w = ws[size_t(clampv(week_, 0, int(ws.size()) - 1))];
         const std::string d = diffs[clampv(a.storyDiff, 0, 2)];
-        const ScoreEntry* best = a.scores.get(Scores::key("week:ascension", d));
+        const ScoreEntry* best = a.scores.get(Scores::key(w.id, d));
         gfx::beginCanvas();
-        if (a.psychMenusActive()) {
-            const PsychUi& ui = psychUi();
-            DrawRectangleRec({0, 0, gfx::W, gfx::H}, BLACK);
-            ui.uiText(best ? ("WEEK SCORE: " + fmtThousands(best->score)) : std::string("WEEK SCORE: 0"), 18.0f, 12.0f, 30.0f, WHITE, -1,
-                      2.0f);
-            ui.uiText("THE BIG SHOW", gfx::W - 18.0f, 12.0f, 30.0f, fade(WHITE, 0.72f), 1, 2.0f);
-            DrawRectangleRec({0, 56, gfx::W, 400}, Color{249, 207, 81, 255});
-            const CharId ids[3] = {CharId::Principality, CharId::Hand, CharId::Demise};
-            const double bt = lastBeatTime();
-            for (int i = 0; i < 3; ++i) {
-                CharacterState c;
-                c.id = ids[i];
-                c.beatAt = bt;
-                const float x = 310.0f + i * 330.0f;
-                drawCharacter(c, {x, 424}, i == 2 ? 0.68f : 0.74f, now, false);
-                ui.uiText(charDisplayName(ids[i]), x, 424.0f, 20.0f, WHITE, 0, 2.0f);
-            }
-            const Color pink{229, 87, 119, 255};
-            ui.uiText("TRACKS", 190.0f, 476.0f, 30.0f, pink, 0, 2.0f);
-            const char* tracks[3] = {"Principality", "Godshand", "Demise"};
-            for (int i = 0; i < 3; ++i) ui.uiText(tracks[i], 190.0f, 520.0f + i * 36.0f, 26.0f, pink, 0, 1.5f);
-            if (ui.alphabetCentered("WEEK 1", 640.0f, 514.0f, 56.0f, 1.0f) < 0)
-                ui.uiText("WEEK 1", 640.0f, 514.0f, 48.0f, WHITE, 0, 2.5f);
-            const Color dc = diffColor(d);
-            const float bob = std::sin(float(now) * 4.0f) * 4.0f;
-            const std::string diffUpper = toLower(d) == "hard" ? "HARD" : (d == "Easy" ? "EASY" : "NORMAL");
-            ui.uiText("<", 890.0f - bob, 518.0f, 44.0f, WHITE, 0, 2.0f);
-            ui.uiText(diffUpper, 1040.0f, 518.0f, 44.0f, dc, 0, 2.5f);
-            ui.uiText(">", 1190.0f + bob, 518.0f, 44.0f, WHITE, 0, 2.0f);
-            hints("LEFT/RIGHT difficulty   ENTER start the week   ESC back");
-            gfx::endCanvas();
-            return;
+        const PsychUi& ui = psychUi();
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, BLACK);
+        ui.uiText(best ? ("WEEK SCORE: " + fmtThousands(best->score)) : std::string("WEEK SCORE: 0"), 18.0f, 12.0f, 30.0f, WHITE, -1, 2.0f);
+        ui.uiText(w.motto, gfx::W - 18.0f, 12.0f, 30.0f, fade(WHITE, 0.72f), 1, 2.0f);
+        DrawRectangleRec({0, 56, gfx::W, 386}, w.banner);
+        // Clean Psych-style Story Mode banner heading & week emblem.
+        const float pulse = menuPulse();
+        const float titleY = 178.0f - 6.0f * pulse;
+        if (ui.alphabetCentered(w.title, gfx::W * 0.5f, titleY, 82.0f, 1.0f) < 0)
+            ui.uiText(w.title, gfx::W * 0.5f, titleY, 76.0f, WHITE, 0, 3.0f);
+        ui.uiText(w.motto, gfx::W * 0.5f, 290.0f, 30.0f, Color{34, 24, 52, 255}, 0, 0.0f);
+        ui.uiText(week_ == 0 ? "Girlfriend  vs  Boyfriend" : "Daddy Dearest  vs  Boyfriend", gfx::W * 0.5f, 344.0f, 24.0f,
+                  Color{54, 34, 72, 255}, 0, 0.0f);
+
+        const Color pink{229, 87, 119, 255};
+        ui.uiText("TRACKS", 190.0f, 466.0f, 30.0f, pink, 0, 2.0f);
+        for (size_t i = 0; i < w.trackNames.size(); ++i)
+            ui.uiText(w.trackNames[i], 190.0f, 510.0f + float(i) * 36.0f, 26.0f, pink, 0, 1.5f);
+
+        // Selectable week list in the center, Psych-style.
+        for (int i = 0; i < int(ws.size()); ++i) {
+            const float wy = 508.0f + (float(i) - animWeek_) * 84.0f;
+            if (wy < 452.0f || wy > gfx::H - 44.0f) continue;
+            const bool on = i == week_;
+            const float alpha = on ? 1.0f : 0.45f;
+            if (ui.alphabetCentered(ws[size_t(i)].title, 640.0f, wy, on ? 56.0f : 44.0f, alpha) < 0)
+                ui.uiText(ws[size_t(i)].title, 640.0f, wy, on ? 48.0f : 38.0f, fade(WHITE, alpha), 0, 2.5f);
         }
-        drawMenuBackground(now, 0xFF8A5C, menuPulse());
-        gfx::gradientRect({0, 70, gfx::W, 330}, Color{10, 6, 20, 220}, Color{40, 18, 40, 220});
-        const CharId ids[3] = {CharId::Principality, CharId::Hand, CharId::Demise};
-        const double bt = lastBeatTime();
-        for (int i = 0; i < 3; ++i) {
-            CharacterState c;
-            c.id = ids[i];
-            c.beatAt = bt;
-            const float x = 330.0f + i * 310.0f;
-            drawCharacter(c, {x, 370}, i == 2 ? 0.62f : 0.68f, now, false);
-            gfx::text(FontId::Ui, charDisplayName(ids[i]), x, 372, 24, charColor(ids[i]), Align::Center, 1.5f);
-        }
-        gfx::text(FontId::Title, "WEEK 1", 60, 14, 40, kGold, Align::Left, 2.0f);
-        gfx::text(FontId::Title, "THE BIG SHOW", gfx::W - 60, 14, 40, kIvory, Align::Right, 2.0f);
-        gfx::text(FontId::Ui, "TRACKS", 120, 440, 28, kGold);
-        const char* tracks[3] = {"Principality", "Godshand", "Demise"};
-        for (int i = 0; i < 3; ++i) gfx::text(FontId::Ui, tracks[i], 120, 478.0f + i * 40, 34, kIvory, Align::Left, 1.5f);
+
         const Color dc = diffColor(d);
         const float bob = std::sin(float(now) * 4.0f) * 4.0f;
-        gfx::drawNote(gfx::kLeft, {760 - bob, 500}, 54);
-        gfx::drawNote(gfx::kRight, {1160 + bob, 500}, 54);
-        gfx::glowText(FontId::Title, toLower(d) == "hard" ? "HARD" : (d == "Easy" ? "EASY" : "NORMAL"), 960, 470, 56, dc, dc);
-        gfx::text(FontId::Ui, best ? ("WEEK SCORE: " + fmtThousands(best->score)) : std::string("WEEK SCORE: -"), 960, 560,
-                  28, kIvory, Align::Center, 1.5f);
-        hints("LEFT/RIGHT difficulty   ENTER start the week   ESC back");
+        const std::string diffUpper = toLower(d) == "hard" ? "HARD" : (d == "Easy" ? "EASY" : "NORMAL");
+        ui.uiText("<", 890.0f - bob, 514.0f, 44.0f, WHITE, 0, 2.0f);
+        ui.uiText(diffUpper, 1040.0f, 514.0f, 44.0f, dc, 0, 2.5f);
+        ui.uiText(">", 1190.0f + bob, 514.0f, 44.0f, WHITE, 0, 2.0f);
+        hints("UP/DOWN week   LEFT/RIGHT difficulty   ENTER start the week   ESC back");
         gfx::endCanvas();
     }
 
 private:
+    int week_ = 0;
+    float animWeek_ = 0;
     bool go_ = false;
 };
 
@@ -585,7 +576,6 @@ public:
                 r.songId = e->id;
                 r.diff = diffsOf(e)[size_t(diffIndex())];
                 r.render = a.songListMode == App::SongListMode::Render;
-                r.autoChart = autoMode();
                 a.change(makePlay(r));
                 return;
             }
@@ -691,10 +681,9 @@ public:
                 const std::string count = n == 0 ? std::string("no songs") : TextFormat("%d song%s", n, n == 1 ? "" : "s");
                 ui.uiText(count, 722.0f, 24.0f, 18.0f, fade(WHITE, 0.75f), 1, 1.25f);
             }
-            if (a.songListMode != App::SongListMode::Play) {
-                const bool render = a.songListMode == App::SongListMode::Render;
-                DrawRectangleRec({gfx::W - 430.0f, 124.0f, 430.0f, 40.0f}, render ? Color{140, 24, 34, 215} : Color{24, 76, 140, 215});
-                ui.uiText(render ? "RENDER MODE" : "AUTOCHART", gfx::W - 215.0f, 131.0f, 24.0f, WHITE, 0, 2.0f);
+            if (a.songListMode == App::SongListMode::Render) {
+                DrawRectangleRec({gfx::W - 430.0f, 124.0f, 430.0f, 40.0f}, Color{140, 24, 34, 215});
+                ui.uiText("RENDER MODE", gfx::W - 215.0f, 131.0f, 24.0f, WHITE, 0, 2.0f);
             }
             if (modsOpen_) drawMods();
             const char* go = a.songListMode == App::SongListMode::Render ? "ENTER record" : "ENTER play";
@@ -772,13 +761,10 @@ public:
             const std::string count = n == 0 ? std::string("no songs") : TextFormat("%d song%s", n, n == 1 ? "" : "s");
             gfx::text(FontId::Ui, count, 766, 32, 20, fade(kIvory, 0.7f), Align::Right, 1.0f);
         }
-        if (a.songListMode != App::SongListMode::Play) {
-            const bool render = a.songListMode == App::SongListMode::Render;
-            DrawRectangleRounded({830, 18, 410, 46}, 0.4f, 8, render ? Color{120, 20, 30, 230} : Color{20, 70, 120, 230});
-            gfx::text(FontId::Title, render ? "RENDER MODE" : "AUTOCHART", 1035, 20, 26, WHITE, Align::Center, 2.0f);
-            gfx::text(FontId::Ui,
-                      render ? "The song plays by itself and is saved as a video"
-                             : "A chart made from the song's own audio",
+        if (a.songListMode == App::SongListMode::Render) {
+            DrawRectangleRounded({830, 18, 410, 46}, 0.4f, 8, Color{120, 20, 30, 230});
+            gfx::text(FontId::Title, "RENDER MODE", 1035, 20, 26, WHITE, Align::Center, 2.0f);
+            gfx::text(FontId::Ui, "The song plays by itself and is saved as a video",
                       1035, 640, 18, fade(kIvory, 0.75f), Align::Center);
         }
         if (modsOpen_) drawMods();
@@ -848,13 +834,8 @@ private:
         PollInputEvents();
         SwapScreenBuffer();
     }
-    // AUTOCHART: every song in the three difficulties AutoChart makes.
-    static bool autoMode() { return app().songListMode == App::SongListMode::AutoChart; }
-    static const std::vector<std::string>& diffsOf(const SongEntry* e) {
-        static const std::vector<std::string> kAuto = {"Easy", "Normal", "Hard"};
-        return autoMode() ? kAuto : e->diffs;
-    }
-    static std::string scoreId(const SongEntry* e) { return autoMode() ? e->id + "#autochart" : e->id; }
+    static const std::vector<std::string>& diffsOf(const SongEntry* e) { return e->diffs; }
+    static std::string scoreId(const SongEntry* e) { return e->id; }
     int diffIndex() const {
         if (list_.empty()) return 0;
         const int nd = int(diffsOf(list_[size_t(app().freeplaySel)]).size());
@@ -1035,36 +1016,31 @@ public:
     }
     void draw() override {
         static const char* lines[] = {
-            "#GOD'S HAND",
-            "of Principality and Demise",
+            "#ASTRALIS",
+            "Astralis Engine v" GH_VERSION,
             "",
-            "@A RHYTHM DUEL",
-            "A project by deatuamae67-crypto",
+            "@ASTRALIS ENGINE",
+            "A native C++20 rhythm game engine by deatuamae67-crypto",
+            "High-performance multi-key, Psych Lua & spam chart engine",
             "",
-            "@ENGINE, MUSIC, ART AND CHARTS",
-            "Written from scratch in C++20",
-            "Every song is synthesized and every character is drawn in code",
-            "Built with Claude Code",
+            "@ASSETS & DEFAULT SONGS",
+            "Psych Engine 0.7.3 UI, Tutorial & Week 1 assets",
+            "ShadowMario & Psych Engine contributors (Apache 2.0)",
+            "Friday Night Funkin' original cast & music by The Funkin' Crew",
             "",
             "@LIBRARIES",
             "raylib 5.5 by Ramon Santamaria (zlib license)",
+            "Lua 5.4 by PUC-Rio (MIT license)",
+            "miniz by Rich Geldreich (MIT license)",
             "",
             "@FONTS",
-            "Luckiest Guy by Astigmatic (Apache License 2.0)",
-            "Rajdhani by Indian Type Foundry (SIL Open Font License)",
+            "VCR OSD Mono by Riciery Leal",
             "",
             "@LICENSE",
-            "All rights reserved, every version (see LICENSE)",
-            "Play it, record it and make mods for it",
-            "No forks, copies or rebrands: contribute through issues",
+            "See LICENSE and licenses/PSYCH_ENGINE_LICENSE.txt",
+            "Play it, chart for it, mod it and build with it",
             "",
-            "@THE CAST",
-            "Hype - the hype man with the mic",
-            "Principal P - no rapping in the halls",
-            "DJ Hand - the hand on the decks",
-            "D-Mize - king of the underground",
-            "",
-            "Thank you for playing.",
+            "Thank you for playing Astralis.",
         };
         const App& a = app();
         const double now = a.now;

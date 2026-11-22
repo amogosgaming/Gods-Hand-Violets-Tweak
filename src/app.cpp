@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "app.hpp"
@@ -169,22 +169,24 @@ void App::applyPsychUi() {
     ui.setSmooth(settings.antialiasing);
     psychReport.clear();
     psychFolderInUse.clear();
-    if (settings.psychUi) {
-        // No folder chosen (or it is gone): the most complete Psych Engine /
-        // JS Engine copy already on disk, such as an engine installed as a mod pack.
-        std::string folder = settings.psychFolder;
-        psychAutomatic = folder.empty() || !DirectoryExists(folder.c_str());
-        if (psychAutomatic) {
+    // Psych Engine UI is built into Astralis via bundled assets/shared/.
+    settings.psychUi = true;
+    settings.psychMenus = true;
+    std::string folder = settings.psychFolder;
+    psychAutomatic = folder.empty() || !DirectoryExists(folder.c_str());
+    if (psychAutomatic) {
+        if (DirectoryExists((base + "assets/shared").c_str()) || DirectoryExists((base + "assets").c_str())) {
+            folder = base;
+            platform::log("Astralis UI loaded from bundled assets in " + folder);
+        } else {
             const std::vector<PsychFolder> found = findPsychFolders(base);
             folder = found.empty() ? std::string() : found.front().path;
-            platform::log(found.empty() ? std::string("no Psych Engine copy found")
-                                        : "Psych Engine interface from " + folder + " (" + std::to_string(found.size()) + " copies found)");
         }
-        psychFolderInUse = folder;
-        if (folder.empty()) psychReport = "no Psych Engine or JS Engine copy found among your mods";
-        else if (ui.load(folder, psychReport) > 0) ui.setActive(true);
-        else psychReport = "nothing of the Psych Engine interface found there";
     }
+    psychFolderInUse = folder;
+    if (folder.empty()) psychReport = "bundled assets folder not found";
+    else if (ui.load(folder, psychReport) > 0) ui.setActive(true);
+    else psychReport = "no UI assets found in " + folder;
     ui.applySounds();
     // Menu music: Psych's freakyMenu while that interface is on, ours otherwise.
     const bool wantPsych = ui.active() && !ui.menuMusic().empty();
@@ -251,7 +253,6 @@ int App::run(int argc, char** argv) {
         else if (!std::strcmp(a, "--touch")) touchMode = true;
         else if (!std::strcmp(a, "--perf")) perf = true;  // frame times on stdout every second
         else if (!std::strcmp(a, "--render")) renderCli = true;  // record the --autoplay song to renders/
-        else if (!std::strcmp(a, "--autochart")) autoChartCli = true;  // the --autoplay song with an AutoChart
         else if (!std::strcmp(a, "--size")) std::sscanf(next(), "%dx%d", &winW_, &winH_);  // e.g. 2400x1080
     }
     if (!checkScriptsDir.empty()) return checkScripts(checkScriptsDir);  // --check-scripts <folder>
@@ -264,8 +265,8 @@ int App::run(int argc, char** argv) {
         library.scan(base);
         for (const SongEntry& e : library.songs()) {
             if (e.builtin) continue;
-            std::printf("%s\n  title: %s | %s%s\n  audio: %s\n", e.id.c_str(), e.title.c_str(), e.subtitle.c_str(),
-                        e.autoChart ? " | AutoChart" : "", e.inst.empty() ? "(none)" : e.inst.c_str());
+            std::printf("%s\n  title: %s | %s\n  audio: %s\n", e.id.c_str(), e.title.c_str(), e.subtitle.c_str(),
+                        e.inst.empty() ? "(none)" : e.inst.c_str());
             if (!e.voices.empty() || !e.voicesP.empty() || !e.voicesO.empty())
                 std::printf("  voices: %s\n", (e.voices.empty() ? e.voicesP + " " + e.voicesO : e.voices).c_str());
             std::string meta;
@@ -298,9 +299,9 @@ int App::run(int argc, char** argv) {
         touchMode = true;
     }
     if (base.empty()) base = GetApplicationDirectory();
-    if (!FileExists((base + "assets/fonts/Rajdhani-Bold.ttf").c_str())) {
+    if (!FileExists((base + "assets/fonts/vcr.ttf").c_str())) {
         std::string cwd = std::string(GetWorkingDirectory()) + "/";
-        if (FileExists((cwd + "assets/fonts/Rajdhani-Bold.ttf").c_str())) base = cwd;
+        if (FileExists((cwd + "assets/fonts/vcr.ttf").c_str())) base = cwd;
     }
     userDir = base;
     if (!platform::kAndroid && !baseGiven && !FileExists((base + "portable.txt").c_str())) {
@@ -313,6 +314,8 @@ int App::run(int argc, char** argv) {
         }
     }
     settings.load(userDir + "settings.cfg");
+    settings.psychUi = true;
+    settings.psychMenus = true;
     scores.load(userDir + "scores.cfg");
     if (!autoRun.enabled) {  // Freeplay's modifiers and the song last picked, as they were left
         mods.rate = settings.modRate;
@@ -332,8 +335,20 @@ int App::run(int argc, char** argv) {
     SetTraceLogLevel(LOG_WARNING);
     device::beforeWindow();  // a laptop's fast graphics card, before the OpenGL context exists
     // Android: the whole screen, whatever its size.
-    InitWindow(platform::kAndroid ? 0 : std::max(320, winW_), platform::kAndroid ? 0 : std::max(180, winH_),
-               "God's Hand of Principality and Demise");
+    const int initW = platform::kAndroid ? 0 : std::max(320, winW_);
+    const int initH = platform::kAndroid ? 0 : std::max(180, winH_);
+    InitWindow(initW, initH, "Astralis");
+    // Older Intel iGPUs (e.g. Core i5 3rd gen / Intel HD 4000) can reject
+    // MSAA 4x or VSync context flags: fall back cleanly to a plain window.
+    if (!IsWindowReady() && !platform::kAndroid) {
+        platform::log("InitWindow failed with MSAA/VSync hints; retrying plain OpenGL window");
+        SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+        InitWindow(initW, initH, "Astralis");
+    }
+    if (!IsWindowReady()) {
+        platform::log("InitWindow failed: no compatible OpenGL context could be created");
+        return 1;
+    }
     platform::afterWindowInit();
     platform::setVsync(settings.vsync);  // explicit both ways: some drivers default to on
     device::startGame(frameBudget());    // the system told a game runs (game scheduling, GameMode, performance hints)
@@ -379,21 +394,20 @@ int App::run(int argc, char** argv) {
 
     menuBpm_ = menuTheme().bpm;
     menuJob_ = std::async(std::launch::async, [this] { return library.menuMusic(&menuLoop_); });
-    if (settings.psychUi) applyPsychUi();
+    applyPsychUi();
 
     startTime = now = nowSec();
     if (autoRun.enabled && !autoRun.song.empty()) {
         PlayRequest r;
-        r.songId = autoRun.song.find(':') == std::string::npos ? "builtin:" + autoRun.song : autoRun.song;
+        r.songId = autoRun.song.find(':') == std::string::npos ? "custom:songs/" + autoRun.song : autoRun.song;
         r.diff = autoRun.diff;
-        r.autoChart = autoChartCli;
         mods.botplay = autoRun.botplay;
         state_ = makePlay(r);
     } else if (!autoRun.editorSong.empty()) state_ = makeChartEditor(autoRun.editorSong, autoRun.diff);
     else if (autoRun.state == "menu") state_ = makeMainMenu();
     else if (autoRun.state == "freeplay") state_ = makeFreeplay();
-    else if (autoRun.state == "render-list" || autoRun.state == "autochart-list") {
-        songListMode = autoRun.state == "render-list" ? SongListMode::Render : SongListMode::AutoChart;
+    else if (autoRun.state == "render-list") {
+        songListMode = SongListMode::Render;
         state_ = makeFreeplay();
     }
     else if (autoRun.state == "story") state_ = makeStory();
@@ -403,13 +417,14 @@ int App::run(int argc, char** argv) {
     else if (autoRun.state == "modpacks") state_ = makeModPacks();
     else if (autoRun.state == "editors") state_ = makeEditorMenu();
     else if (autoRun.state == "scripts") state_ = makeScriptEditor();
+    else if (autoRun.state == "modchart-editor") state_ = makeModchartEditor();
+    else if (autoRun.state == "sniff-editor") state_ = makeSniffEditor();
     else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "converter") state_ = makeChartConverter();
     else if (autoRun.state == "note-colors") state_ = makeNoteColors();
     else if (autoRun.state == "note-skins") state_ = makeNoteSkins();
     else if (autoRun.state == "key-bindings") state_ = makeKeyBindings();
     else if (autoRun.state == "character-editor") state_ = makeCharacterEditor();
-    else if (autoRun.state == "stage-editor") state_ = makeStageEditor();
     else if (autoRun.state == "event-editor") state_ = makeEventEditor();
     else state_ = makeTitle();
     state_->enter();

@@ -384,8 +384,9 @@ void PlayState::setScriptGlobals() {
     set("hudWidth", double(gfx::W));
     set("hudHeight", double(gfx::H));
     set("keyCount", double(chart_.keys));
-    set("playerKeyCount", double(chart_.keys));
-    set("opponentKeyCount", double(chart_.keys));
+    set("playerKeyCount", double(chart_.keysOf(1)));
+    set("opponentKeyCount", double(chart_.keysOf(0)));
+    set("mania", double(chart_.keys));
 }
 
 void PlayState::updateStatGlobals() {
@@ -948,6 +949,33 @@ void PlayState::handleBuiltinEvent(const psych::ChartEvent& e) {
         }
         return;
     }
+    if (n == "Change Key Count" || n == "Change Mania" || n == "Set Key Count") {
+        // Value 1: key count (1..18) or "opp,player" (e.g. "6,9").
+        // Value 2: target side ("both"/empty, "player"/"bf", or "opponent"/"dad").
+        const std::string v1 = trim(e.v1);
+        const std::string v2 = toLower(trim(e.v2));
+        int oppK = chart_.keysOf(0);
+        int plK = chart_.keysOf(1);
+        const size_t comma = v1.find(',');
+        if (comma != std::string::npos) {
+            const std::string aStr = trim(v1.substr(0, comma));
+            const std::string bStr = trim(v1.substr(comma + 1));
+            if (!aStr.empty()) oppK = std::clamp(int(std::lround(numOr(aStr, oppK))), 1, kMaxKeys);
+            if (!bStr.empty()) plK = std::clamp(int(std::lround(numOr(bStr, plK))), 1, kMaxKeys);
+        } else if (!v1.empty()) {
+            const int k = std::clamp(int(std::lround(numOr(v1, chart_.keys))), 1, kMaxKeys);
+            if (v2 == "player" || v2 == "bf" || v2 == "boyfriend" || v2 == "1") {
+                plK = k;
+            } else if (v2 == "opponent" || v2 == "dad" || v2 == "0") {
+                oppK = k;
+            } else {
+                oppK = k;
+                plK = k;
+            }
+        }
+        changeKeyCount(oppK, plK);
+        return;
+    }
     if (handleJsEngineEvent(e)) return;
     if (!psych_) return;
     if (handleDekEvent(e)) return;
@@ -1445,7 +1473,7 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
         return true;
     }
     if (n == "Windows Notification") {
-        notices_.push_back({v1.empty() ? std::string("God's Hand") : e.v1, e.v2, a.now, 1});
+        notices_.push_back({v1.empty() ? std::string("Astralis") : e.v1, e.v2, a.now, 1});
         return true;
     }
     if (n == "Enable Bot Energy" || n == "Disable Bot Energy") {
@@ -2088,7 +2116,7 @@ bool PlayState::getGameProp(std::string_view path, Value& out) {
         if (w == "height") return num(gfx::H);
         if (w == "x") return num(pos.x);
         if (w == "y") return num(pos.y);
-        if (w == "title") { out = std::string("God's Hand"); return true; }
+        if (w == "title") { out = std::string("Astralis"); return true; }
         if (w == "fullscreen") return flag(IsWindowFullscreen());
         if (w == "resizable") return flag(!platform::kAndroid);
         if (w == "borderless" || w == "maximized" || w == "minimized") return flag(false);

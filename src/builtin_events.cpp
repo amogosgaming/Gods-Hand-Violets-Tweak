@@ -39,6 +39,8 @@ const char* const kNative[] = {
     "Toggle Blocked Glitch Effect",
     // Dek Engine (its finale)
     "Glitch Shader add", "Glitch Shader add (CamHud)",
+    // Astralis Engine
+    "Change Key Count", "Change Mania", "Set Key Count",
 };
 
 // ------------------------------------------------------------------ Psych --

@@ -1,13 +1,13 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
-// Options > GRAPHICS > Note renderer: notes drawn by the graphics card (GPU,
-// the usual way) or by the processor (CPU), with the assembly routine (x86-64
-// SSE2, or ARM64 NEON on phones and Apple Silicon) or with C++. On the
-// processor every note is a picture made once (with the note skin, its colours
-// and size) and blended into a picture of the screen (note_raster), which
-// reaches the graphics card in one piece. Notes that are turned, mines and
-// lanes turned by scripts stay on the GPU.
+// Options > Graphics > Note renderer: notes drawn by the graphics card (GPU,
+// the usual way) or by the processor (CPU), with the assembly routine (x86
+// SSE2, with x86-64 SSE4 and AVX2 options currently disabled; or ARM64 NEON on
+// phones and Apple Silicon) or with C++. On the processor every note is a
+// picture made once (with the note skin, its colours and size) and blended into
+// a picture of the screen (note_raster), which reaches the graphics card in one
+// piece. Notes that are turned, mines and lanes turned by scripts stay on the GPU.
 #pragma once
 
 #include <cstdint>
@@ -28,9 +28,11 @@ public:
     static bool softwareOpenGl();
     ~NoteRenderer();
     void setMode(int mode);
+    void setAsmCpu(int opt);
     int mode() const { return mode_; }
+    raster::CpuAsmOption asmCpu() const { return asmCpu_; }
     bool cpu() const { return mode_ != kGpu; }
-    bool usingAsm() const { return mode_ == kCpuAsm && asmOk_ && raster::haveAsm(); }
+    bool usingAsm() const { return mode_ == kCpuAsm && asmOk_ && raster::haveAsm() && raster::cpuAsmEnabled(asmCpu_); }
     const char* name() const;
     // Before drawing (no camera or render target active): makes the pictures
     // of notes asked for and not seen before.
@@ -65,6 +67,7 @@ private:
     void upload();
     void drawLayer();
     int mode_ = kGpu;
+    raster::CpuAsmOption asmCpu_ = raster::CpuAsmOption::X86Sse2;
     bool auto_ = false;  // the mode was picked by Auto
     bool asmOk_ = true, asmChecked_ = false, inFrame_ = false;
     float scale_ = 1.0f;

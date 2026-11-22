@@ -1,11 +1,11 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
-// All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
-
-// Notes drawn on the processor (Options > GRAPHICS > Note renderer): note
+// Astralis Engine.
+//
+// Notes drawn on the processor (Options > Graphics > Note renderer): note
 // pictures are blended into a picture of the screen here, a row at a time,
-// by x86-64 assembly (SSE2) or by portable C++, and the result goes to the
-// graphics card in one piece. Pixels are premultiplied RGBA8 (R G B A in
-// memory). Kept apart from raylib so the tests can check it.
+// by x86 assembly (x86 SSE2 enabled; x86-64 SSE4 and AVX2 disabled), ARM64
+// NEON, or portable C++, and the result goes to the graphics card in one piece.
+// Pixels are premultiplied RGBA8 (R G B A in memory). Kept apart from raylib
+// so the tests can check it.
 #pragma once
 
 #include <cstddef>
@@ -14,14 +14,29 @@
 
 namespace gh::raster {
 
+// The 3 x86 CPU assembly options for the ASM note renderer.
+// SSE4 and AVX2 are disabled by default for broad CPU compatibility (e.g. Intel Core i5 3rd gen).
+enum class CpuAsmOption : int {
+    X86Sse2 = 0,
+    X64Sse4 = 1,
+    Avx2 = 2,
+};
+
+// Returns true when the given x86 CPU assembly option is enabled in this build and supported on this CPU.
+bool cpuAsmEnabled(CpuAsmOption opt);
+const char* cpuAsmLabel(CpuAsmOption opt);
+bool cpuSupportsSse4();
+bool cpuSupportsAvx2();
+
 // Blends n pixels of src over dst, src first scaled by alpha256 / 256 (0..256):
 //   s = src * alpha256 / 256;  dst = s + dst * (255 - s.a) / 255
-// Both versions give exactly the same pixels.
+// All versions give exactly the same pixels.
 void blendRowC(uint32_t* dst, const uint32_t* src, size_t n, uint32_t alpha256);
-void blendRowAsm(uint32_t* dst, const uint32_t* src, size_t n, uint32_t alpha256);  // blendRowC where there is no assembly
-bool haveAsm();  // this build has an assembly routine (x86-64 SSE2 or ARM64 NEON)
-const char* asmName();  // "x86-64 SSE2", "ARM64 NEON" or "" (none)
-// Compares the assembly routine with the C++ one on random pixels; false
+void blendRowAsm(uint32_t* dst, const uint32_t* src, size_t n, uint32_t alpha256);  // active enabled ASM routine, or blendRowC
+void blendRowAsmOption(uint32_t* dst, const uint32_t* src, size_t n, uint32_t alpha256, CpuAsmOption opt);
+bool haveAsm();  // this build has an enabled assembly routine (x86 SSE2 or ARM64 NEON)
+const char* asmName();  // "x86 SSE2", "ARM64 NEON" or "" (none)
+// Compares the active assembly routine with the C++ one on random pixels; false
 // when they differ (the game then uses the C++ one).
 bool selfTest();
 
@@ -45,7 +60,7 @@ public:
     int height() const { return h_; }
     void begin();  // a new frame
     // s with its top-left corner at (x, y), clipped to the picture.
-    void blit(const Sprite& s, int x, int y, float alpha, bool useAsm);
+    void blit(const Sprite& s, int x, int y, float alpha, bool useAsm, CpuAsmOption opt = CpuAsmOption::X86Sse2);
     // What to upload now: [uploadLeft, uploadRight) x [uploadTop, uploadBottom),
     // what was drawn since begin() and what begin() cleared; empty when equal.
     int uploadTop() const;

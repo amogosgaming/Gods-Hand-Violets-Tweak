@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "song_scan.hpp"
@@ -451,31 +451,6 @@ AudioSet audioIn(const fs::path& dir, std::string_view preferKey = {}) {
     return a;
 }
 
-// "Traumatism_G-Side_Inst" -> "Traumatism_G-Side" (role 1: instrumental),
-// "Song (Vocals)" -> "Song" (role 2: vocals); anything else is a full mix (0).
-std::string audioBase(const std::string& stem, int& role) {
-    role = 0;
-    std::string s = stem;
-    while (!s.empty() && (s.back() == ' ' || s.back() == ')')) s.pop_back();
-    const size_t sep = s.find_last_of("-_ (");
-    const std::string tail = toLower(sep == std::string::npos ? s : s.substr(sep + 1));
-    if (tail == "inst" || tail == "instrumental") role = 1;
-    else if (tail == "voices" || tail == "vocals" || tail == "vocal" || tail == "voice" || tail == "vox") role = 2;
-    if (role == 0) return trim(stem);
-    s = sep == std::string::npos ? std::string() : s.substr(0, sep);
-    while (!s.empty() && (s.back() == ' ' || s.back() == '-' || s.back() == '_' || s.back() == '(')) s.pop_back();
-    return trim(s);
-}
-
-bool genericAudioName(const std::string& base) {
-    static const char* names[] = {"inst", "instrumental", "voices", "vocals", "audio", "song", "music", "track", "untitled"};
-    const std::string k = fuzzyKey(base);
-    if (groupKey(base).empty()) return true;
-    for (const char* n : names)
-        if (k == n) return true;
-    return false;
-}
-
 std::string modDisplayName(const fs::path& modDir) {
     std::string text;
     if (readTextFile(pathStr(modDir / "mod.json"), text) || readTextFile(pathStr(modDir / "pack.json"), text)) {
@@ -564,13 +539,8 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
     e.dataDir = dirS + "/";
     e.songKey = folder;
 
-    if (charts.empty()) {
-        // No chart at all: offer AutoChart when the folder has audio.
-        e.autoChart = true;
-        e.subtitle = source + " - AutoChart";
-        e.diffs = {"Easy", "Normal", "Hard"};
-        e.chartPaths = {"", "", ""};
-    } else if (!vsliceChart.empty() && !meta.empty()) {
+    if (charts.empty()) return;
+    if (!vsliceChart.empty() && !meta.empty()) {
         std::string metaText;
         if (readTextFile(pathStr(meta), metaText)) {
             json::Document d;
@@ -627,17 +597,9 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
             }
         }
     }
-    if (e.autoChart && e.inst.empty()) {
-        // Any single audio file will do as the instrumental.
-        for (const fs::path& f : listDir(toPath(audioDirS.empty() ? dirS : audioDirS), false))
-            if (isAudioExt(toLower(pathStr(f.filename())))) { e.inst = pathStr(f); break; }
-        if (e.inst.empty()) return;
-    }
-    if (!e.autoChart) {
-        for (const std::string& cp : e.chartPaths) {
-            e.chartOpponent = peekChartOpponent(cp, e.metaPath);
-            if (!e.chartOpponent.empty()) break;
-        }
+    for (const std::string& cp : e.chartPaths) {
+        e.chartOpponent = peekChartOpponent(cp, e.metaPath);
+        if (!e.chartOpponent.empty()) break;
     }
     songs.push_back(e);
 }
@@ -723,23 +685,6 @@ double audioSeconds(const std::string& path) {
 
 void scanSongsDir(const std::string& songsDirS, SongScan& out) {
     const fs::path songsDir = toPath(songsDirS);
-    // Loose audio files in songs/: playable through AutoChart.
-    for (const fs::path& f : listDir(songsDir, false)) {
-        const std::string n = pathStr(f.filename());
-        if (!isAudioExt(toLower(n))) continue;
-        SongEntry e;
-        e.title = prettyName(pathStr(f.stem()));
-        e.subtitle = "songs - AutoChart";
-        e.id = "custom:songs/" + songPathName(pathStr(f.stem()));
-        e.color = colorFor(e.id);
-        e.inst = pathStr(f);
-        e.dataDir = songsDirS + (songsDirS.empty() || songsDirS.back() == '/' ? "" : "/");
-        e.songKey = pathStr(f.stem());
-        e.autoChart = true;
-        e.diffs = {"Easy", "Normal", "Hard"};
-        e.chartPaths = {"", "", ""};
-        out.songs.push_back(e);
-    }
     for (const fs::path& d : listDir(songsDir, true)) scanSongFolder(out.songs, pathStr(d), pathStr(d), "songs", pathStr(d) + "/");
 }
 
@@ -884,8 +829,6 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 if (hasChartFile(s)) {
                     scanSongFolder(songs, pathStr(s), pathStr(s), source, pathStr(root) + "/");
                     done.insert(fuzzyKey(name));
-                } else if (hasAudio(s)) {
-                    audioOnly.push_back({name, s});
                 }
             }
             for (size_t i = before; i < songs.size(); ++i) {
@@ -893,11 +836,11 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 e.assetRoots = assetRoots;
                 e.pack = m.folder;
                 // Ids follow the folder (display names can repeat between mods).
-                std::string id = "custom:" + m.folder + "/" + songPathName(e.songKey) + (e.autoChart ? "~auto" : "");
+                std::string id = "custom:" + m.folder + "/" + songPathName(e.songKey);
                 if (ri > 0) id += "~" + std::to_string(ri);
                 e.id = claim(id);
-                if (!e.autoChart) charted.insert(fuzzyKey(e.songKey));
-                if (!e.autoChart && e.inst.empty()) {
+                charted.insert(fuzzyKey(e.songKey));
+                if (e.inst.empty()) {
                     // No audio in this build: the same song from another folder or mod.
                     AudioSet a;
                     indexedAudio(fuzzyKey(e.songKey), mi, a);
@@ -1065,7 +1008,6 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
             std::map<std::string, std::vector<size_t>> bySong;
             for (size_t i = 0; i < n; ++i) {
                 const SongEntry& e = songs[modStart + i];
-                if (e.autoChart) continue;
                 for (const std::string& p : e.chartPaths)
                     if (!p.empty() && std::find(files[i].begin(), files[i].end(), p) == files[i].end()) files[i].push_back(p);
                 if (!files[i].empty()) bySong[groupKey(e.songKey)].push_back(i);
@@ -1095,73 +1037,8 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 if (drop[i]) songs.erase(songs.begin() + std::ptrdiff_t(modStart + i));
         }
 
-        // ---- audio without a chart anywhere in the mod: AutoChart
-        for (auto& [name, dir] : audioOnly) {
-            if (charted.count(fuzzyKey(name))) continue;
-            scanSongFolder(songs, pathStr(dir), pathStr(dir), source, pathStr(dir.parent_path().parent_path()) + "/");
-            if (!songs.empty() && songs.back().songKey == name) {
-                SongEntry& e = songs.back();
-                e.assetRoots = assetRootsOf(dir.parent_path().parent_path());
-                e.pack = m.folder;
-                e.id = claim("custom:" + m.folder + "/" + songPathName(name) + "~auto");
-            }
-            charted.insert(fuzzyKey(name));
-        }
-
-        // ---- loose audio files that no song uses (a pack of songs without
-        // charts): AutoChart. Shorter than 30 s is a sound effect, not a song.
-        std::set<std::string> used;
-        for (size_t i = modStart; i < songs.size(); ++i)
-            for (const std::string* p : {&songs[i].inst, &songs[i].voices, &songs[i].voicesP, &songs[i].voicesO})
-                if (!p->empty()) used.insert(*p);
-        for (const LooseDir& ld : m.loose) {
-            struct Track { std::string base, key, inst, mix, voices; };
-            std::vector<Track> tracks;
-            for (const fs::path& f : listDir(ld.dir, false)) {
-                if (!isAudioExt(toLower(pathStr(f.filename())))) continue;
-                const std::string p = pathStr(f);
-                if (used.count(p)) continue;
-                int role = 0;
-                std::string base = audioBase(pathStr(f.stem()), role);
-                if (genericAudioName(base)) base = pathStr(ld.dir.filename());
-                const std::string key = groupKey(base);
-                Track* t = nullptr;
-                for (Track& x : tracks)
-                    if (x.key == key) t = &x;
-                if (!t) {
-                    tracks.push_back({base, key, {}, {}, {}});
-                    t = &tracks.back();
-                }
-                std::string& slot = role == 1 ? t->inst : role == 2 ? t->voices : t->mix;
-                if (slot.empty()) slot = p;
-            }
-            for (const Track& t : tracks) {
-                const std::string inst = !t.inst.empty() ? t.inst : t.mix;
-                if (inst.empty()) continue;  // vocals alone
-                const std::string fk = fuzzyKey(t.base);
-                if (!fk.empty() && charted.count(fk)) continue;
-                const double secs = audioSeconds(inst);
-                if (secs >= 0 ? secs < 30 : fileSize(inst) < 400000) continue;
-                SongEntry e;
-                e.title = prettyName(t.base);
-                e.subtitle = source + " - AutoChart";
-                e.id = claim("custom:" + m.folder + "/" + songPathName(e.title) + "~auto");
-                e.color = colorFor(e.id);
-                e.modRoot = pathStr(ld.root.empty() ? ld.dir : ld.root) + "/";
-                e.dataDir = pathStr(ld.dir) + "/";
-                e.songKey = songPathName(e.title);
-                e.assetRoots = {pathStr(ld.dir) + "/"};
-                if (!ld.root.empty()) appendUnique(e.assetRoots, assetRootsOf(ld.root));
-                e.pack = m.folder;
-                e.inst = inst;
-                e.voices = t.voices;  // "Song.ogg" next to "Song (Vocals).ogg" is the instrumental
-                e.autoChart = true;
-                e.diffs = {"Easy", "Normal", "Hard"};
-                e.chartPaths = {"", "", ""};
-                if (!fk.empty()) charted.insert(fk);
-                songs.push_back(e);
-            }
-        }
+        (void)audioOnly;
+        (void)charted;
 
         // The same song twice in a mod (a source tree and its build, two
         // versions): the subtitle says which folder each one comes from.

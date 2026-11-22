@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 // Song library: the built-in songs plus any FNF-style songs found in the
@@ -47,8 +47,7 @@ public:
 
     // Heavy work (decoding, composing, parsing). Thread-safe.
     // extraKeys = false: every chart gets 4 keys (Options, Extra keys).
-    // forceAutoChart: a chart made from the song's audio even when it has charts.
-    Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys = true, bool forceAutoChart = false);
+    Prepared prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys = true);
     PcmPtr preview(const SongEntry& e);  // instrumental only, for menus
     // The song's audio read again from its files, the chart left alone (the
     // chart editor's Reload audio).

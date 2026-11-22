@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "library.hpp"
@@ -9,7 +9,6 @@
 #include <set>
 #include <system_error>
 
-#include "autochart.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "json.hpp"
@@ -61,12 +60,43 @@ void Library::scan(const std::string& baseDir, const std::function<void(const st
 
     scanSongsDir(pathStr(base / "songs"), assets_);
     scanModsDir(pathStr(base / "mods"), assets_);
-    for (SongEntry& e : assets_.songs) songs_.push_back(std::move(e));
+    // Bundled Psych Engine shared assets (characters, stages, icons, sounds)
+    // sit in assets/shared/ and assets/ so Tutorial, Week 1 and mods find them.
+    {
+        std::error_code ec;
+        const fs::path sharedDir = base / "assets" / "shared";
+        const fs::path assetsDir = base / "assets";
+        if (fs::is_directory(sharedDir, ec)) assets_.sharedRoots.push_back(pathStr(sharedDir) + "/");
+        if (fs::is_directory(assetsDir, ec)) assets_.sharedRoots.push_back(pathStr(assetsDir) + "/");
+    }
+    auto bundledOrder = [](const SongEntry& e) -> int {
+        if (!e.pack.empty()) return 100;
+        const std::string k = toLower(e.songKey);
+        if (k == "tutorial") return 0;
+        if (k == "bopeebo") return 1;
+        if (k == "fresh") return 2;
+        if (k == "dad-battle" || k == "dadbattle") return 3;
+        return 50;
+    };
+    for (SongEntry& e : assets_.songs) {
+        const int ord = bundledOrder(e);
+        if (ord == 0) {
+            e.subtitle = "Tutorial";
+            e.color = 0xA5004D;
+        } else if (ord >= 1 && ord <= 3) {
+            e.subtitle = "Week 1 - Daddy Dearest";
+            e.color = 0x9271FD;
+        }
+        songs_.push_back(std::move(e));
+    }
     assets_.songs.clear();
-    std::sort(songs_.begin() + std::ptrdiff_t(firstCustom), songs_.end(),
-              [](const SongEntry& a, const SongEntry& b) { return toLower(a.title) < toLower(b.title); });
+    std::sort(songs_.begin() + std::ptrdiff_t(firstCustom), songs_.end(), [&](const SongEntry& a, const SongEntry& b) {
+        const int oa = bundledOrder(a), ob = bundledOrder(b);
+        if (oa != ob) return oa < ob;
+        return toLower(a.title) < toLower(b.title);
+    });
     customCount_ = int(songs_.size() - firstCustom);
-    report_ = std::to_string(customCount_) + " custom song" + (customCount_ == 1 ? "" : "s") + " found";
+    report_ = std::to_string(customCount_) + " song" + (customCount_ == 1 ? "" : "s") + " found";
 }
 
 const SongEntry* Library::find(const std::string& id) const {
@@ -97,65 +127,19 @@ Library::BuiltinAudio Library::builtinAudio(const SongDef& def) {
     return a;
 }
 
-// The whole track decoded (AutoChart reads all of it).
-static PcmPtr loadOrNull(const std::string& path) {
-    if (path.empty()) return nullptr;
-    auto p = std::make_shared<Pcm>();
-    std::string err;
-    if (!loadAudioFile(path, *p, err)) return nullptr;
-    return p;
-}
-
 // A song's track: playable at once, decoded while it plays.
 static PcmPtr streamOrNull(const std::string& path, double startFraction = 0.0) {
     return loadSongAudio(path, startFraction);
 }
 
-Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys, bool forceAutoChart) {
+Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirror, bool extraKeys) {
     Prepared p;
-    if (e.builtin && e.def && !forceAutoChart) {
+    if (e.builtin && e.def) {
         BuiltinAudio a = builtinAudio(*e.def);
         buildChart(*e.def, *a.comp, diff, p.chart);
         p.inst = a.inst;
         p.voiceP = a.vp;
         p.voiceO = a.vo;
-    } else if (e.autoChart || forceAutoChart) {
-        int d = 1;
-        if (forceAutoChart) d = diff == "Easy" ? 0 : diff == "Hard" ? 2 : 1;
-        else
-            for (size_t i = 0; i < e.diffs.size(); ++i)
-                if (e.diffs[i] == diff) d = int(i);
-        if (e.builtin && e.def) {  // the built-in songs' own audio, charted anew
-            BuiltinAudio a = builtinAudio(*e.def);
-            p.inst = a.inst;
-            p.voiceP = a.vp;
-            p.voiceO = a.vo;
-        } else {
-            std::lock_guard<std::mutex> lk(customMtx_);
-            // A streamed copy (the menu's preview) does not hold all the samples.
-            if (customInstKey_ != e.id || !customInst_ || customInst_->stream) {
-                customInstKey_ = e.id;
-                customInst_ = loadOrNull(e.inst);
-            }
-            customCacheKey_.clear();
-            p.inst = customInst_;
-            // A charted song's voices play along with the AutoChart.
-            if (forceAutoChart && !e.autoChart) {
-                if (!e.voices.empty()) p.voiceP = streamOrNull(e.voices);
-                else {
-                    p.voiceP = streamOrNull(e.voicesP);
-                    p.voiceO = streamOrNull(e.voicesO);
-                }
-            }
-        }
-        if (!p.inst) { p.error = "cannot decode " + e.inst; return p; }
-        AutoChartInfo info;
-        if (!autoChart(p.inst->data.data(), p.inst->frames(), p.inst->channels, Mixer::kRate, d, p.chart, &info)) {
-            p.error = "AutoChart found no rhythm in this audio";
-            return p;
-        }
-        p.chart.title = e.title;
-        p.chart.difficulty = diff;
     } else {
         size_t idx = 0;
         for (size_t i = 0; i < e.diffs.size(); ++i)

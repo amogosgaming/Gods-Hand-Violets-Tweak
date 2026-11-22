@@ -82,6 +82,7 @@ public:
 
     // Accessors used for rendering.
     int keys() const { return keys_; }
+    void setKeys(int keys, const LaneMask& keyless = {});
     const std::vector<LaneNote>& lane(int side, int lane) const { return lanes_[side][lane]; }
     std::vector<LaneNote>& laneMut(int side, int lane) { return lanes_[side][lane]; }
     double maxSustain(int side, int lane) const { return maxSus_[side][lane]; }

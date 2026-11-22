@@ -73,6 +73,7 @@ const EventInfo kEvents[] = {
     {"Alt Idle Animation", "Value 1: BF, GF or Dad. Value 2: idle suffix, e.g. -alt."},
     {"Change Character", "Value 1: BF, GF or Dad. Value 2: the new character's name."},
     {"Change Scroll Speed", "Value 1: speed multiplier (1). Value 2: seconds to get there."},
+    {"Change Key Count", "Value 1: key count (1-18) or 'opp,player' (e.g. '6,9'). Value 2: both, player, or opponent."},
     {"Change Note Multiplier", "Value 1: notes counted per hit. Value 2: 1 opponent, 2 player, empty both."},
     {"Fake Song Length", "Value 1: seconds shown on the time bar (empty: the real length). Value 2: 'true' to tween."},
     {"Change Song Name", "Value 1: name on the time bar (empty: the real one)."},
@@ -396,6 +397,7 @@ private:
             for (const auto& f : fs::directory_iterator(toPath(entry_->dataDir), ec))
                 if (equalsI(pathStr(f.path().filename()), "events.json")) eventsFile_ = pathStr(f.path());
         }
+        eventsSeparate_ = !eventsFile_.empty();
         scanNames(c);
         // Saved as it was found: a .ghc alone stays a .ghc (a chart of a
         // billion notes is not written out as JSON), a .ghc with its JSON
@@ -419,7 +421,6 @@ private:
         a.mixer.setTracks(inst_, voiceP_, voiceO_);
         a.mixer.setRate(1.0);
         if (entry_->builtin) flash("Built-in song: saving makes an editable copy in songs/");
-        else if (entry_->autoChart) flash("AutoChart draft: save to keep it as a real chart");
     }
 
     bool tryLeave() {
@@ -1228,59 +1229,73 @@ private:
     }
 
     // ------------------------------------------------------------- saving --
-    bool eventsInChart() const { return eventsFile_.empty() || !eventsSeparate_; }
+    bool eventsInChart() const { return !eventsSeparate_; }
 
-    std::string eventsJson() const {
+    std::string eventsJson(bool compact = false) const {
+        const char* sep = compact ? "," : ", ";
+        const char* rowSep = compact ? "," : ",\n    ";
         std::string o = "[";
         bool firstEv = true;
         for (size_t i = 0; i < events_.size();) {
             const double t = events_[i].timeMs;
-            o += std::string(firstEv ? "" : ",") + "\n    [" + num(t) + ", [";
+            o += firstEv ? (compact ? "[" : "\n    [") : (std::string(rowSep) + "[");
+            o += num(t) + sep + "[";
             bool firstSub = true;
             for (; i < events_.size() && events_[i].timeMs == t; ++i) {
-                o += std::string(firstSub ? "" : ", ") + "[" + jsonStr(events_[i].name) + ", " + jsonStr(events_[i].v1) + ", " +
+                o += std::string(firstSub ? "" : sep) + "[" + jsonStr(events_[i].name) + sep + jsonStr(events_[i].v1) + sep +
                      jsonStr(events_[i].v2) + "]";
                 firstSub = false;
             }
             o += "]]";
             firstEv = false;
         }
-        return o + (events_.empty() ? "]" : "\n  ]");
+        return o + (events_.empty() || compact ? "]" : "\n  ]");
     }
 
     // The chart as Psych JSON. With `bin`, the skeleton of a binary chart
     // instead: the same JSON with each section's notes sent to `bin`, as
     // reading that JSON would give them (a .ghc saved without the JSON).
-    std::string buildJson(bool withEvents, StreamedNotesBuilder* bin = nullptr) {
+    // When `compact` is true, indentation and extra whitespace are stripped.
+    std::string buildJson(bool withEvents, StreamedNotesBuilder* bin = nullptr, bool compact = false) {
         // Sections up to the last note or event (at least one).
         int last = 0;
         if (!notes_.empty()) last = sectionAt(notes_.back().t);
         if (!events_.empty()) last = std::max(last, sectionAt(events_.back().timeMs));
+        const char* col = compact ? ":" : ": ";
+        const char* com = compact ? "," : ", ";
+        const char* nl2 = compact ? "" : "\n  ";
+        const char* nl4 = compact ? "" : "\n    ";
         std::string o;
         long long total = 0;
         for (const EdNote& n : notes_) total += n.stack;
-        o.reserve(bin ? size_t(last + 1) * 200 + 4096 : size_t(total) * 28 + 4096);
-        o += "{\"song\": {\n  \"song\": " + jsonStr(title_) + ",\n  \"bpm\": " + num(sections_.empty() ? 120 : sections_[0].bpm) +
-             ",\n  \"speed\": " + num(speed_) + ",\n  \"needsVoices\": " + (needsVoices_ ? "true" : "false") +
-             ",\n  \"player1\": " + jsonStr(player_) + ",\n  \"player2\": " + jsonStr(opponent_);
-        if (!gf_.empty()) o += ",\n  \"gfVersion\": " + jsonStr(gf_);
-        if (!stage_.empty()) o += ",\n  \"stage\": " + jsonStr(stage_);
-        if (keys_ != 4) o += ",\n  \"keyCount\": " + std::to_string(keys_) + ",\n  \"mania\": " + std::to_string(keys_ - 1);
-        o += ",\n  \"events\": " + (withEvents ? eventsJson() : std::string("[]"));
-        o += ",\n  \"notes\": [";
+        o.reserve(bin ? size_t(last + 1) * 200 + 4096 : size_t(total) * (compact ? 22 : 28) + 4096);
+        o += std::string("{\"song\"") + col + "{" + nl2 + "\"song\"" + col + jsonStr(title_) + "," + nl2 + "\"bpm\"" + col +
+             num(sections_.empty() ? 120 : sections_[0].bpm) + "," + nl2 + "\"speed\"" + col + num(speed_) + "," + nl2 +
+             "\"needsVoices\"" + col + (needsVoices_ ? "true" : "false") + "," + nl2 + "\"player1\"" + col + jsonStr(player_) +
+             "," + nl2 + "\"player2\"" + col + jsonStr(opponent_);
+        if (!gf_.empty()) o += std::string(",") + nl2 + "\"gfVersion\"" + col + jsonStr(gf_);
+        if (!stage_.empty()) o += std::string(",") + nl2 + "\"stage\"" + col + jsonStr(stage_);
+        if (keys_ != 4)
+            o += std::string(",") + nl2 + "\"keyCount\"" + col + std::to_string(keys_) + "," + nl2 + "\"mania\"" + col +
+                 std::to_string(keys_ - 1);
+        o += std::string(",") + nl2 + "\"events\"" + col + (withEvents ? eventsJson(compact) : std::string("[]"));
+        o += std::string(",") + nl2 + "\"notes\"" + col + "[";
         size_t ni = 0;
         double prevBpm = sections_.empty() ? 120 : sections_[0].bpm;
         for (int s = 0; s <= last; ++s) {
             const EdSection sec = section(s);
             const double a = sectionStart(s), b = sectionStart(s + 1);
-            o += std::string(s ? "," : "") + "\n    {\"sectionBeats\": " + num(sec.beats) + ", \"lengthInSteps\": " +
-                 std::to_string(int(std::lround(sec.beats * 4))) + ", \"mustHitSection\": " + (sec.mustHit ? "true" : "false");
-            if (std::fabs(sec.bpm - prevBpm) > 1e-9) o += ", \"changeBPM\": true, \"bpm\": " + num(sec.bpm);
-            else o += ", \"changeBPM\": false, \"bpm\": " + num(sec.bpm);
+            o += std::string(s ? "," : "") + nl4 + "{\"sectionBeats\"" + col + num(sec.beats) + com + "\"lengthInSteps\"" + col +
+                 std::to_string(int(std::lround(sec.beats * 4))) + com + "\"mustHitSection\"" + col +
+                 (sec.mustHit ? "true" : "false");
+            if (std::fabs(sec.bpm - prevBpm) > 1e-9)
+                o += std::string(com) + "\"changeBPM\"" + col + "true" + com + "\"bpm\"" + col + num(sec.bpm);
+            else
+                o += std::string(com) + "\"changeBPM\"" + col + "false" + com + "\"bpm\"" + col + num(sec.bpm);
             prevBpm = sec.bpm;
-            o += std::string(", \"altAnim\": ") + (sec.altAnim ? "true" : "false");
-            o += std::string(", \"gfSection\": ") + (sec.gf ? "true" : "false");
-            o += ", \"sectionNotes\": " + (bin ? bin->beginArray() : std::string("["));
+            o += std::string(com) + "\"altAnim\"" + col + (sec.altAnim ? "true" : "false");
+            o += std::string(com) + "\"gfSection\"" + col + (sec.gf ? "true" : "false");
+            o += std::string(com) + "\"sectionNotes\"" + col + (bin ? bin->beginArray() : std::string("["));
             bool first = true;
             while (ni < notes_.size() && (notes_[ni].t < b - 0.5 || s == last)) {
                 const EdNote& n = notes_[ni++];
@@ -1296,17 +1311,17 @@ private:
                     for (uint32_t k = 0; k < std::max<uint32_t>(1, n.stack); ++k) bin->add(t6, data, l6, type);
                     continue;
                 }
-                std::string one = "[" + num(n.t) + ", " + std::to_string(data) + ", " + num(n.len);
-                if (n.type) one += ", " + jsonStr(typeNames_[n.type]);
+                std::string one = "[" + num(n.t) + com + std::to_string(data) + com + num(n.len);
+                if (n.type) one += std::string(com) + jsonStr(typeNames_[n.type]);
                 one += "]";
                 for (uint32_t k = 0; k < std::max<uint32_t>(1, n.stack); ++k) {  // stacked notes stay stacked
-                    o += std::string(first ? "" : ", ") + one;
+                    o += std::string(first ? "" : com) + one;
                     first = false;
                 }
             }
             o += bin ? "}" : "]}";
         }
-        o += "\n  ]\n}}\n";
+        o += compact ? "]}}" : "\n  ]\n}}\n";
         if (bin) bin->finish();
         return o;
     }
@@ -1349,14 +1364,6 @@ private:
         const std::string key = songPathName(e.builtin ? title_ + " (edit)" : e.songKey);
         const std::string file = key + (equalsI(diff_, "Normal") ? "" : "-" + toLower(diff_)) + ".json";
         if (e.builtin) return app().base + "songs/" + key + "/" + file;
-        if (e.autoChart && !e.inst.empty()) {
-            const fs::path audio = toPath(e.inst);
-            const fs::path dir = audio.parent_path();
-            // A loose audio file in songs/ gets its own folder.
-            if (pathStr(dir) + "/" == app().base + "songs/" || toLower(pathStr(dir.filename())) == "songs")
-                return pathStr(dir / toPath(key) / toPath(file));
-            return pathStr(dir / toPath(file));
-        }
         return pathStr(toPath(e.dataDir) / toPath(file));
     }
 
@@ -1364,6 +1371,11 @@ private:
         std::ofstream out(p, std::ios::binary | std::ios::trunc);
         out.write(text.data(), std::streamsize(text.size()));
         return bool(out);
+    }
+
+    static uint32_t ghcBlockSizeForIdx(int idx) {
+        static constexpr uint32_t kSizes[] = {65536u, 262144u, 524288u, 1048576u};
+        return kSizes[std::clamp(idx, 0, 3)];
     }
 
     bool save(bool playtest) {
@@ -1383,24 +1395,21 @@ private:
             if (!fs::exists(bak, ec)) fs::copy_file(f, bak, ec);
             done = true;
         };
-        // Audio for charts that had none on disk.
         if (entry_->builtin) {
             if (inst_) writeWav(pathStr(p.parent_path() / "Inst.wav"), *inst_);
             if (voiceP_) writeWav(pathStr(p.parent_path() / "Voices-Player.wav"), *voiceP_);
             if (voiceO_) writeWav(pathStr(p.parent_path() / "Voices-Opponent.wav"), *voiceO_);
-        } else if (entry_->autoChart && !entry_->inst.empty()) {
-            const fs::path audio = toPath(entry_->inst);
-            if (audio.parent_path() != p.parent_path()) {
-                const fs::path dst = p.parent_path() / toPath("Inst" + pathStr(audio.extension()));
-                if (!fs::exists(dst, ec)) fs::copy_file(audio, dst, ec);
-            }
         }
+        lastJsonBytes_ = 0;
+        lastGhcBytes_ = 0;
         if (wantJson) {
             backUp(p, backedUp_);
-            if (!writeText(p, buildJson(eventsInChart()))) {
+            const std::string txt = buildJson(eventsInChart(), nullptr, compactJson_);
+            if (!writeText(p, txt)) {
                 flash("Could not save " + path);
                 return false;
             }
+            lastJsonBytes_ = txt.size();
         }
         // The binary chart, straight from the notes: what reading the JSON
         // would give, without writing the JSON first.
@@ -1410,15 +1419,22 @@ private:
             backUp(gp, backedUpGhc_);
             StreamedNotes sn;
             StreamedNotesBuilder bin(sn);
-            const std::string skeleton = buildJson(eventsInChart(), &bin);
+            const std::string skeleton = buildJson(eventsInChart(), &bin, true);
+            GhcWriteOptions opt;
+            opt.algo = GhcCompression(std::clamp(ghcAlgo_, 0, 2));
+            opt.level = std::clamp(int(std::lround(ghcLevel_)), 1, 9);
+            opt.blockNotes = ghcBlockSizeForIdx(ghcBlockIdx_);
             std::string err;
-            wroteGhc = writeBinaryChart(ghcPath, skeleton, sn, 3, err);
+            wroteGhc = writeBinaryChart(ghcPath, skeleton, sn, opt, err);
             if (!wroteGhc && !wantJson) {
                 flash("Could not save the .ghc: " + err);
                 return false;
             }
             if (!wroteGhc) note = "; the .ghc failed: " + err;
-            else if (!wantJson && hadJson) note = "; the .json beside it was left as it was";
+            else {
+                lastGhcBytes_ = fileSize(ghcPath);
+                if (!wantJson && hadJson) note = "; the .json beside it was left as it was";
+            }
         } else if (hadGhc) {
             // Saved as Psych JSON only: the old .ghc would still be what the
             // game plays, so it steps aside (as .ghc.bak, unless the original
@@ -1432,9 +1448,14 @@ private:
                                       : "; the old .ghc is now .ghc.bak";
         }
         if (!eventsInChart()) {
-            const fs::path ep = toPath(eventsFile_);
-            if (!fs::exists(toPath(eventsFile_ + ".bak"), ec)) fs::copy_file(ep, toPath(eventsFile_ + ".bak"), ec);
-            writeText(ep, "{\"song\": {\n  \"events\": " + eventsJson() + ",\n  \"notes\": []\n}}\n");
+            const std::string evPath = eventsFile_.empty() ? pathStr(p.parent_path() / "events.json") : eventsFile_;
+            eventsFile_ = evPath;
+            const fs::path ep = toPath(evPath);
+            if (fs::exists(ep, ec) && !fs::exists(toPath(evPath + ".bak"), ec)) fs::copy_file(ep, toPath(evPath + ".bak"), ec);
+            const std::string evJson = compactJson_
+                                           ? ("{\"song\":{\"events\":" + eventsJson(true) + ",\"notes\":[]}}")
+                                           : ("{\"song\": {\n  \"events\": " + eventsJson(false) + ",\n  \"notes\": []\n}}\n");
+            writeText(ep, evJson);
         }
         dirty_ = false;
         long long total = 0;
@@ -1446,7 +1467,7 @@ private:
         // New files, or a .ghc gone: rescan so Freeplay (and the playtest)
         // see the chart the game will now play.
         std::string id = songId_;
-        if (entry_->builtin || entry_->autoChart || hasGhc != hadGhc || hasJson != hadJson) {
+        if (entry_->builtin || hasGhc != hadGhc || hasJson != hadJson) {
             auto ours = [&](const std::string& cp) {
                 return !cp.empty() && (fs::equivalent(toPath(cp), p, ec) || fs::equivalent(toPath(cp), gp, ec));
             };
@@ -2040,12 +2061,12 @@ private:
         DrawRectangleRounded(panelRect, 0.03f, 6, kPanel);
         DrawRectangleRoundedLinesEx(panelRect, 0.03f, 6, 1.5f, Color{110, 92, 150, 150});
         if (CheckCollisionPointRec(ui_.mouse, panelRect) && (ui_.click || ui_.down || ui_.tap())) ui_.used = true;
-        static const char* tabs[] = {"Song", "Section", "Note", "Events", "Charting", "EZ Spam"};
-        static const char* touchTabs[] = {"Song", "Sec", "Note", "Events", "Chart", "Spam"};
+        static const char* tabs[] = {"Song", "Section", "Note", "Events", "Chart", "Spam", "Save"};
+        static const char* touchTabs[] = {"Song", "Sec", "Note", "Evts", "Chart", "Spam", "Save"};
         const float tabH = touch ? 36.0f : 30.0f;
-        const float tw = (gfx::W - px - 16) / 6.0f;
-        for (int i = 0; i < 6; ++i)
-            if (ui_.button({px + i * tw, py + 6, tw - 4, tabH}, touch ? touchTabs[i] : tabs[i], tab_ == i)) {
+        const float tw = (gfx::W - px - 16) / 7.0f;
+        for (int i = 0; i < 7; ++i)
+            if (ui_.button({px + i * tw, py + 6, tw - 3, tabH}, touch ? touchTabs[i] : tabs[i], tab_ == i)) {
                 tab_ = i;
                 panelScroll_ = 0.0f;
             }
@@ -2078,19 +2099,21 @@ private:
                 if (ui_.stepper(row(), "BPM", bpm, 1, 10, 2000, "%.2f")) setSectionBpm(0, bpm);
                 if (ui_.stepper(row(), "Scroll speed", speed_, 0.1, 0.1, 10, "%.1f")) dirty_ = statsDirty_ = true;
                 double k = keys_;
-                if (ui_.stepper(row(), "Keys", k, 1, 1, 9, "%.0f")) setKeys(int(k));
+                if (ui_.stepper(row(), "Keys", k, 1, 1, kMaxKeys, "%.0f")) setKeys(int(k));
                 if (ui_.check(row(), "Needs voices", needsVoices_)) dirty_ = statsDirty_ = true;
-                if (!eventsFile_.empty() && ui_.check(row(), "Events in events.json", eventsSeparate_)) dirty_ = statsDirty_ = true;
-                ui_.choice(row(), "Save as", {"Psych JSON", "Binary .ghc", "Both"}, saveFormat_);
-                y += 6;
+                y += 4;
                 if (ui_.button(half(0), "Save (F2)")) save(false);
-                if (ui_.button(half(1), "Save and play")) {
+                if (ui_.button(half(1), "Save & play")) {
                     if (save(true)) {
                         if (touch) ui_.endScroll(viewRect, panelScroll_, y - startY);
                         return;
                     }
                 }
                 y += rh + 8;
+                if (ui_.button(row(), "Save format & compression options...")) {
+                    tab_ = 6;
+                    panelScroll_ = 0.0f;
+                }
                 if (ui_.button(half(0), "Reload audio")) reloadAudio();
                 if (ui_.button(half(1), reloadArmed_ ? "Reload: unsaved, again" : "Reload chart")) reloadChart();
                 y += rh + 8;
@@ -2106,9 +2129,7 @@ private:
                     dirty_ = statsDirty_ = true;
                 }
                 y += rh + 8;
-                gfx::text(FontId::Ui, "FL Studio (SNIFF): drop a .flp or .fsc here", x, y, 15, kDim);
-                y += 20;
-                gfx::text(FontId::Ui, "C3-D#3 player, C4-D#4 opponent, F3/F#3 camera", x, y, 15, kDim);
+                gfx::text(FontId::Ui, "FL Studio (SNIFF): drop a .flp/.fsc or use Editors > SNIFF", x, y, 15, kDim);
                 y += 24;
                 break;
             }
@@ -2351,6 +2372,62 @@ private:
                 y += 22;
                 break;
             }
+            case 6: {  // Save: Psych JSON & GHC Binary format settings
+                heading("Chart Save Format");
+                ui_.choice(row(), "Format", {"Psych JSON", "Binary .ghc", "Both"}, saveFormat_);
+                y += 4;
+                heading("Psych JSON Options");
+                ui_.check(row(), "Remove formatting (minify JSON)", compactJson_);
+                ui_.check(row(), "Save events in separate events.json", eventsSeparate_);
+                gfx::text(FontId::Ui,
+                          compactJson_ ? "Minified: strips indentation & newlines for smaller files."
+                                       : "Pretty-printed: human-readable Psych Engine JSON.",
+                          x, y, 15, kDim);
+                y += 24;
+                heading("GHC Binary Options");
+                static const std::vector<std::string> algos = {"None (Raw)", "Deflate", "RLE + Deflate"};
+                ui_.choice(row(), "Algorithm", algos, ghcAlgo_);
+                if (ghcAlgo_ == 0) {
+                    gfx::text(FontId::Ui, "Compression strength: Off (fastest load & save)", x, y + 4, 16, kDim);
+                    y += 30;
+                } else {
+                    ui_.stepper(row(), "Compression strength", ghcLevel_, 1, 1, 9, "%.0f");
+                    gfx::text(FontId::Ui,
+                              ghcAlgo_ == 2 ? "RLE + Deflate: best ratio on repetitive / spam charts."
+                                            : "Deflate: 1 = fastest, 3 = balanced, 9 = smallest.",
+                              x, y, 15, kDim);
+                    y += 22;
+                }
+                static const std::vector<std::string> blockLabels = {"65,536", "262,144", "524,288", "1,048,576"};
+                ui_.choice(row(), "Block size (notes)", blockLabels, ghcBlockIdx_);
+                y += 8;
+                if (ui_.button(half(0), "Save (F2)", true)) save(false);
+                if (ui_.button(half(1), "Save and play")) {
+                    if (save(true)) {
+                        if (touch) ui_.endScroll(viewRect, panelScroll_, y - startY);
+                        return;
+                    }
+                }
+                y += rh + 10;
+                const std::string sp = savePath();
+                std::string shown = sp;
+                if (shown.size() > 42) shown = "..." + shown.substr(shown.size() - 39);
+                gfx::text(FontId::Ui, "Target: " + shown, x, y, 15, kDim);
+                y += 20;
+                if (lastJsonBytes_ > 0 || lastGhcBytes_ > 0) {
+                    auto fmtBytes = [](uint64_t b) -> std::string {
+                        if (b >= 1048576ULL) return TextFormat("%.2f MB", double(b) / 1048576.0);
+                        if (b >= 1024ULL) return TextFormat("%.1f KB", double(b) / 1024.0);
+                        return TextFormat("%llu B", (unsigned long long)b);
+                    };
+                    std::string sz = "Last save:";
+                    if (lastJsonBytes_ > 0) sz += " JSON " + fmtBytes(lastJsonBytes_);
+                    if (lastGhcBytes_ > 0) sz += "  GHC " + fmtBytes(lastGhcBytes_);
+                    gfx::text(FontId::Ui, sz, x, y, 15, kAccent);
+                    y += 20;
+                }
+                break;
+            }
             default: break;
         }
         if (touch) ui_.endScroll(viewRect, panelScroll_, y - startY + 12.0f);
@@ -2505,12 +2582,17 @@ private:
     const SongEntry* entry_ = nullptr;
     std::future<Prepared> job_;
     bool loaded_ = false, playing_ = false, dirty_ = false, dragging_ = false, backedUp_ = false, typing_ = false;
-    bool needsVoices_ = true, eventsSeparate_ = true, boxing_ = false;
+    bool needsVoices_ = true, eventsSeparate_ = false, boxing_ = false;
     bool hitPlayer_ = true, hitOpponent_ = true, metronome_ = false, muteVoices_ = false;
     double hitVolPlayer_ = 0.6, hitVolOpponent_ = 0.6, schedUpTo_ = 0;  // hitsound volumes; scheduled up to (ms)
     double rangeFrom_ = 0, rangeTo_ = 0;  // Section tab: a range of sections to copy
     bool audioOnly_ = false, reloadArmed_ = false, preview_ = true;
-    int saveFormat_ = kSaveJson;  // Song tab: Psych JSON, a binary .ghc, or both (as the chart was found)
+    int saveFormat_ = kSaveJson;  // Save tab: Psych JSON, a binary .ghc, or both
+    bool compactJson_ = false;    // Save tab (Psych JSON): strip formatting/whitespace
+    int ghcAlgo_ = 1;             // Save tab (GHC): 0 None, 1 Deflate, 2 RLE + Deflate
+    double ghcLevel_ = 3.0;       // Save tab (GHC): compression strength 1..9
+    int ghcBlockIdx_ = 1;         // Save tab (GHC): 262,144 notes per block
+    uint64_t lastJsonBytes_ = 0, lastGhcBytes_ = 0;
     bool backedUpGhc_ = false;
     int keys_ = 4, snapIdx_ = 3, typeIdx_ = 0, tab_ = 2, eventIdx_ = 0, fillPattern_ = 1, fillSide_ = 1, fillLane_ = 0;
     // EZ Spam (JS Engine's Note Spamming tab)

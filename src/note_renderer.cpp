@@ -1,4 +1,4 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 #include "note_renderer.hpp"
@@ -33,9 +33,14 @@ NoteRenderer::~NoteRenderer() { unload(); }
 const char* NoteRenderer::name() const {
     if (mode_ == kGpu) return auto_ ? "Auto: GPU" : "GPU";
     if (mode_ == kCpuAsm) {
-        if (!usingAsm()) return auto_ ? "Auto: CPU (C++, no assembly here)" : "CPU (C++, no assembly here)";
-        static const std::string a = std::string("CPU (") + raster::asmName() + " ASM)", b = "Auto: " + a;
-        return auto_ ? b.c_str() : a.c_str();
+        if (!usingAsm()) {
+            if (raster::haveAsm() && !raster::cpuAsmEnabled(asmCpu_))
+                return auto_ ? "Auto: CPU (C++, ASM target disabled)" : "CPU (C++, ASM target disabled)";
+            return auto_ ? "Auto: CPU (C++, no assembly here)" : "CPU (C++, no assembly here)";
+        }
+        static thread_local std::string label;
+        label = (auto_ ? std::string("Auto: CPU (") : std::string("CPU (")) + raster::cpuAsmLabel(asmCpu_) + " ASM)";
+        return label.c_str();
     }
     return "CPU (C++)";
 }
@@ -58,6 +63,13 @@ void NoteRenderer::setMode(int mode) {
     if (mode == mode_) return;
     mode_ = mode;
     if (mode_ == kGpu) unload();
+}
+
+void NoteRenderer::setAsmCpu(int opt) {
+    opt = std::clamp(opt, 0, 2);
+    const auto next = static_cast<raster::CpuAsmOption>(opt);
+    // Keep disabled CPU targets from being engaged; fall back to x86 SSE2 if selected via config.
+    asmCpu_ = raster::cpuAsmEnabled(next) ? next : raster::CpuAsmOption::X86Sse2;
 }
 
 void NoteRenderer::unload() {
@@ -188,7 +200,7 @@ bool NoteRenderer::note(int dir, Vector2 c, float size, float alpha, bool psychL
     // A note reaching past the picture (moved there by a script, maybe
     // brought on screen by a camera) is drawn whole by the GPU instead.
     if (x < 0 || y < 0 || x + s.w > layer_.width() || y + s.h > layer_.height()) return false;
-    layer_.blit(s, x, y, alpha, usingAsm());
+    layer_.blit(s, x, y, alpha, usingAsm(), asmCpu_);
     ++notes_;
     if (s.right <= s.left) return true;  // nothing visible
     // The box of its visible pixels, in canvas units.
