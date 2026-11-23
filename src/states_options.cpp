@@ -8,6 +8,7 @@
 #include <functional>
 
 #include "app.hpp"
+#include "chart_binary.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
 #include "note_raster.hpp"
@@ -51,20 +52,24 @@ struct OptionCategory {
 // Remember which subsection and row Options was on when returning from a sub-screen.
 int gLastCategory = 0;
 int gLastOpenSection = -1;  // -1 = hub
+bool gLastInDelayCombo = false;
 std::string gLastOptionsRow;
 
-// The words of s on as many lines as it takes to stay within `width`.
-std::vector<std::string> wrapWidth(FontId f, const std::string& s, float size, float width) {
+// Word-wrap using Psych VCR font width when available, else FontId::Ui.
+std::vector<std::string> wrapWidth(const PsychUi& ui, bool usePsych, FontId f, const std::string& s, float size, float width) {
     std::vector<std::string> lines;
     std::string cur;
     size_t i = 0;
+    auto meas = [&](const std::string& t) {
+        return usePsych ? ui.textWidth(t, size) : gfx::measure(f, t, size).x;
+    };
     while (i < s.size()) {
         const size_t sp = s.find(' ', i);
         const std::string word = s.substr(i, sp == std::string::npos ? std::string::npos : sp - i);
         i = sp == std::string::npos ? s.size() : sp + 1;
         if (word.empty()) continue;
         const std::string longer = cur.empty() ? word : cur + " " + word;
-        if (!cur.empty() && gfx::measure(f, longer, size).x > width) {
+        if (!cur.empty() && meas(longer) > width) {
             lines.push_back(cur);
             cur = word;
         } else {
@@ -85,24 +90,39 @@ public:
         openSection_ = (gLastOpenSection >= 0 && gLastOpenSection < int(cats_.size()) && !cats_[size_t(gLastOpenSection)].rows.empty())
                            ? gLastOpenSection
                            : -1;
+        inDelayCombo_ = openSection_ >= 0 && gLastInDelayCombo;
         sel_ = 0;
-        if (openSection_ >= 0) {
-            const auto& rows = cats_[size_t(openSection_)].rows;
+        const auto& rows = activeRows();
+        if (openSection_ >= 0 && !rows.empty()) {
             for (int i = 0; i < int(rows.size()); ++i)
                 if (rows[size_t(i)].label == gLastOptionsRow) sel_ = i;
         }
         anim_ = float(sel_);
+        lastToggleRow_ = -1;
+        lastToggleAt_ = -10.0;
     }
 
     void update(double dt) override {
         App& a = app();
         Input& in = a.input;
+        if (askingStorage_) {
+            std::string path;
+            const platform::TextAsk st = platform::textStatus(&path);
+            if (st == platform::TextAsk::Done || st == platform::TextAsk::Cancelled) {
+                askingStorage_ = false;
+                platform::resetText();
+                if (st == platform::TextAsk::Done && !path.empty()) applyStoragePath(path);
+            }
+            return;
+        }
         if (openSection_ < 0) {
             updateHub(dt);
             return;
         }
-        auto& rows = cats_[size_t(openSection_)].rows;
+        auto& rows = activeRows();
         if (rows.empty()) {
+            inDelayCombo_ = false;
+            gLastInDelayCombo = false;
             openSection_ = -1;
             gLastOpenSection = -1;
             return;
@@ -144,6 +164,8 @@ public:
                     else *r.b = !*r.b;
                     if (r.label == "VSync") platform::setVsync(a.settings.vsync);
                     if (r.b == &a.settings.antialiasing) psychUi().setSmooth(a.settings.antialiasing);
+                    lastToggleRow_ = sel_;
+                    lastToggleAt_ = a.now;
                     changed = true;
                 }
                 break;
@@ -185,9 +207,11 @@ public:
                 if (in.accept()) {
                     gLastCategory = openSection_;
                     gLastOpenSection = openSection_;
+                    gLastInDelayCombo = inDelayCombo_;
                     gLastOptionsRow = r.label;
                     sfxPlay(Sfx::Confirm);
                     r.action();
+                    return;
                 }
                 break;
             case Row::Key:
@@ -204,8 +228,20 @@ public:
         if (in.back() && !in.pressed(KEY_BACKSPACE)) {
             a.saveSettings();
             sfxPlay(Sfx::Cancel);
-            openSection_ = -1;
-            gLastOpenSection = -1;
+            if (inDelayCombo_) {
+                inDelayCombo_ = false;
+                gLastInDelayCombo = false;
+                sel_ = 0;
+                const auto& parentRows = cats_[size_t(openSection_)].rows;
+                for (int i = 0; i < int(parentRows.size()); ++i)
+                    if (parentRows[size_t(i)].label == "Adjust Delay and Combo") sel_ = i;
+                anim_ = float(sel_);
+                lastToggleRow_ = -1;
+            } else {
+                openSection_ = -1;
+                gLastOpenSection = -1;
+                lastToggleRow_ = -1;
+            }
         }
     }
 
@@ -214,9 +250,34 @@ public:
         else drawSection();
     }
 
-    bool keyReserved(int) const override { return waiting_; }
+    bool keyReserved(int) const override { return waiting_ || askingStorage_; }
 
 private:
+    std::vector<Row>& activeRows() {
+        return inDelayCombo_ ? delayComboRows_ : cats_[size_t(openSection_)].rows;
+    }
+    const std::vector<Row>& activeRows() const {
+        return inDelayCombo_ ? delayComboRows_ : cats_[size_t(openSection_)].rows;
+    }
+
+    void applyStoragePath(const std::string& path) {
+        App& a = app();
+        if (!platform::setStorageDir(path)) {
+            a.notify("Could not update storage path", 3.0);
+            return;
+        }
+        a.base = platform::dataDir();
+        platform::prepareDataDir(a.base);
+        a.userDir = a.base;
+        setChartCacheDir(a.userDir + "cache/charts/");
+        a.saveSettings();
+        a.scores.load(a.userDir + "scores.cfg");
+        a.library.scan(a.base);
+        a.applyPsychUi();
+        sfxPlay(Sfx::Confirm);
+        a.notify("Storage location: " + platform::displayPath(a.base), 4.0);
+    }
+
     void updateHub(double dt) {
         App& a = app();
         Input& in = a.input;
@@ -227,15 +288,18 @@ private:
         if (in.accept()) {
             const OptionCategory& c = cats_[size_t(catSel_)];
             gLastCategory = catSel_;
+            gLastInDelayCombo = false;
             sfxPlay(Sfx::Confirm);
             if (c.directAction) {
                 gLastOpenSection = -1;
                 c.directAction();
             } else {
                 openSection_ = catSel_;
+                inDelayCombo_ = false;
                 gLastOpenSection = openSection_;
                 sel_ = 0;
                 anim_ = 0;
+                lastToggleRow_ = -1;
                 if (!c.rows.empty()) gLastOptionsRow = c.rows[0].label;
             }
             return;
@@ -243,6 +307,7 @@ private:
         if (in.back() && !in.pressed(KEY_BACKSPACE)) {
             a.saveSettings();
             gLastOpenSection = -1;
+            gLastInDelayCombo = false;
             sfxPlay(Sfx::Cancel);
             if (a.optionsReturn) {
                 const PlayRequest req = *a.optionsReturn;
@@ -254,100 +319,131 @@ private:
         }
     }
 
+    // Psych Engine 0.7.3 OptionsState.hx hub: #EA71FD menuDesat, bold animated Alphabet
+    // categories centered with flanking bold '>' and '<' selectors.
     void drawHub() {
         App& a = app();
         const PsychUi& ui = psychUi();
         gfx::beginCanvas();
-        drawPsychMenuBackground(1, Color{234, 113, 253, 255}, catAnim_ * 12.0f, false, a.now, 0xEA71FD, menuPulse());
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 125});
-        if (ui.alphabet("OPTIONS", 56.0f, 18.0f, 52.0f, 1.0f) < 0)
-            ui.uiText("OPTIONS", 56.0f, 20.0f, 44.0f, WHITE, -1, 2.5f);
+        drawPsychMenuBackground(1, Color{234, 113, 253, 255}, catAnim_ * 10.0f, false, a.now, 0xEA71FD, menuPulse());
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 55});
 
         const int nc = int(cats_.size());
+        const float step = nc <= 6 ? 86.0f : 74.0f;
+        const float height = nc <= 6 ? 60.0f : 52.0f;
+        const float topY = (gfx::H - 120.0f - float(nc - 1) * step - height) * 0.5f + 16.0f;
         for (int i = 0; i < nc; ++i) {
             const bool on = i == catSel_;
-            const float y = 132.0f + float(i) * 62.0f;
+            const float y = topY + float(i) * step;
             const float alpha = on ? 1.0f : 0.6f;
-            const std::string title = cats_[size_t(i)].title;
-            const float h = on ? 50.0f : 42.0f;
-            if (on) {
-                DrawRectangleRec({170.0f, y - 4.0f, gfx::W - 340.0f, 56.0f}, Color{0, 0, 0, 115});
-                ui.uiText(">", 205.0f + std::sin(float(a.now) * 6.0f) * 5.0f, y + 6.0f, 34.0f, kGold, 0, 2.0f);
-                ui.uiText("<", gfx::W - 205.0f - std::sin(float(a.now) * 6.0f) * 5.0f, y + 6.0f, 34.0f, kGold, 0, 2.0f);
+            const std::string& title = cats_[size_t(i)].title;
+            const float w = ui.alphabetCentered(title, gfx::W * 0.5f, y, height, alpha, true);
+            if (w >= 0.0f) {
+                if (on) {
+                    const float leftEdge = gfx::W * 0.5f - w * 0.5f;
+                    const float rightEdge = gfx::W * 0.5f + w * 0.5f;
+                    ui.alphabet(">", leftEdge - 63.0f, y, height, 1.0f, true);
+                    ui.alphabet("<", rightEdge + 15.0f, y, height, 1.0f, true);
+                }
+            } else {
+                ui.uiText(title, gfx::W * 0.5f, y + 6.0f, on ? 42.0f : 34.0f, fade(on ? kGold : WHITE, alpha), 0, 2.0f);
+                if (on) {
+                    const float tw = ui.textWidth(title, 42.0f);
+                    ui.uiText(">", gfx::W * 0.5f - tw * 0.5f - 36.0f, y + 6.0f, 38.0f, kGold, 0, 2.0f);
+                    ui.uiText("<", gfx::W * 0.5f + tw * 0.5f + 36.0f, y + 6.0f, 38.0f, kGold, 0, 2.0f);
+                }
             }
-            if (ui.alphabetCentered(title, gfx::W * 0.5f, y + (on ? 2.0f : 6.0f), h, alpha) < 0)
-                ui.uiText(title, gfx::W * 0.5f, y + 8.0f, on ? 38.0f : 32.0f, fade(on ? kGold : WHITE, alpha), 0, 2.0f);
         }
 
         const OptionCategory& cur = cats_[size_t(catSel_)];
-        DrawRectangleRec({60, gfx::H - 96, gfx::W - 120, 48}, Color{0, 0, 0, 185});
-        ui.uiText(cur.subtitle, gfx::W * 0.5f, gfx::H - 83.0f, 20.0f, WHITE, 0, 1.5f);
+        DrawRectangleRec({90, gfx::H - 102, gfx::W - 180, 50}, Color{0, 0, 0, 155});
+        ui.uiText(cur.subtitle, gfx::W * 0.5f, gfx::H - 89.0f, 22.0f, WHITE, 0, 1.5f);
         if (!a.touchMode) {
             DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
-            ui.uiText("UP/DOWN select category   ENTER open   ESC save and back", gfx::W * 0.5f, gfx::H - 31.0f, 17.0f,
+            ui.uiText("UP/DOWN select   ENTER open   ESC save and back", gfx::W * 0.5f, gfx::H - 31.0f, 18.0f,
                       Color{220, 214, 235, 255}, 0, 1.25f);
         }
         gfx::endCanvas();
     }
 
+    // Psych Engine 0.7.3 BaseOptionsMenu.hx: menuDesat (#EA71FD), top-left dimmed bold title,
+    // slanted normal-Alphabet option labels, animated CheckboxThingie for booleans, bold Alphabet
+    // values on the right, and semi-transparent bottom description box in vcr.ttf.
     void drawSection() {
         App& a = app();
         const PsychUi& ui = psychUi();
         const OptionCategory& cat = cats_[size_t(openSection_)];
-        const auto& rows = cat.rows;
+        const std::string secTitle = inDelayCombo_ ? std::string("ADJUST DELAY AND COMBO") : cat.title;
+        const auto& rows = activeRows();
         gfx::beginCanvas();
         drawPsychMenuBackground(1, Color{234, 113, 253, 255}, anim_ * 8.0f, false, a.now, 0xEA71FD, menuPulse());
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 145});
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 95});
 
-        if (ui.alphabet(cat.title, 56.0f, 16.0f, 48.0f, 1.0f) < 0)
-            ui.uiText(cat.title, 56.0f, 18.0f, 42.0f, WHITE, -1, 2.5f);
-        ui.uiText("OPTIONS > " + cat.title, gfx::W - 56.0f, 30.0f, 18.0f, fade(WHITE, 0.7f), 1, 1.5f);
+        // Subtle Psych BaseOptionsMenu top-left section title (scale ~0.6, alpha 0.45).
+        if (ui.alphabet(secTitle, 64.0f, 24.0f, 40.0f, 0.48f, true) < 0)
+            ui.uiText(secTitle, 64.0f, 26.0f, 34.0f, fade(WHITE, 0.55f), -1, 2.0f);
 
+        const float rowStep = 86.0f;
+        const float labelH = 52.0f;
         for (int i = 0; i < int(rows.size()); ++i) {
-            const float y = 320.0f + (float(i) - anim_) * 52.0f;
-            if (y < 86.0f || y > 610.0f) continue;
+            const float d = float(i) - anim_;
+            const float y = 290.0f + d * rowStep;
+            if (y < 60.0f || y > gfx::H - 120.0f) continue;
             const Row& r = rows[size_t(i)];
             const bool on = i == sel_;
-            const float alpha = saturate(1.0f - std::fabs(float(i) - anim_) * 0.12f);
-            if (on) DrawRectangleRec({110.0f, y - 5.0f, gfx::W - 220.0f, 46.0f}, Color{255, 255, 255, 38});
-            ui.uiText(r.label, 140.0f, y + 4.0f, 26.0f, fade(on ? WHITE : kIvory, alpha), -1, 2.0f);
+            const float alpha = on ? 1.0f : 0.6f;
+            const bool isBool = r.kind == Row::Bool;
+            const float baseX = (isBool ? 290.0f : 195.0f) + d * 18.0f;
+
+            if (isBool) {
+                const bool checked = r.label == "Fullscreen" ? a.settings.fullscreen : *r.b;
+                const double el = (lastToggleRow_ == i) ? (a.now - lastToggleAt_) : -1.0;
+                if (!ui.drawCheckbox({baseX - 112.0f, y - 14.0f}, checked, el, 0.72f, alpha))
+                    ui.uiText(checked ? "[X]" : "[ ]", baseX - 80.0f, y + 8.0f, 32.0f, fade(WHITE, alpha), 0, 2.0f);
+            }
+
+            // Option label in normal (non-bold) Alphabet, matching Psych BaseOptionsMenu.hx.
+            float lw = ui.alphabet(r.label, baseX, y, labelH, alpha, false);
+            if (lw < 0.0f) {
+                ui.uiText(r.label, baseX, y + 10.0f, 30.0f, fade(WHITE, alpha), -1, 2.0f);
+                lw = ui.textWidth(r.label, 30.0f);
+            }
 
             if (r.kind == Row::Key) {
                 for (int k = 0; k < 2; ++k) {
                     const bool hl = on && k == slot_;
                     const std::string name = (hl && waiting_) ? "press a key..." : keyName(a.settings.keys4[r.lane][k]);
-                    const float x = 840.0f + k * 170.0f;
-                    DrawRectangleRec({x - 75, y - 2, 150, 40}, hl ? Color{255, 255, 255, 70} : Color{0, 0, 0, 130});
-                    ui.uiText(name, x, y + 6.0f, 22.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
+                    const float x = 840.0f + k * 180.0f;
+                    DrawRectangleRec({x - 80.0f, y + 2.0f, 160.0f, 46.0f}, hl ? Color{255, 255, 255, 78} : Color{0, 0, 0, 150});
+                    ui.uiText(name, x, y + 12.0f, 24.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
                 }
-                gfx::drawNote(r.lane, {720, y + 18}, 40, alpha);
+                gfx::drawNote(r.lane, {710.0f, y + 24.0f}, 46.0f, alpha);
                 continue;
             }
             if (r.kind == Row::AsmCpu) {
-                // Draw all 3 CPU ASM targets; x86 SSE2 active, x86-64 SSE4 & AVX2 clearly disabled.
                 const int activeOpt = clampv(a.settings.noteAsmCpu, 0, 2);
-                const float x0 = 615.0f;
-                const float wChip = 170.0f;
+                const float x0 = 620.0f;
+                const float wChip = 190.0f;
                 for (int k = 0; k < 3; ++k) {
                     const auto opt = static_cast<raster::CpuAsmOption>(k);
                     const bool enabled = raster::cpuAsmEnabled(opt);
                     const bool chosen = enabled && (activeOpt == k);
-                    const float cx = x0 + float(k) * (wChip + 8.0f);
-                    Color bg = chosen ? Color{70, 115, 70, 200} : (enabled ? Color{30, 30, 42, 175} : Color{22, 22, 28, 160});
-                    DrawRectangleRec({cx, y - 2.0f, wChip, 38.0f}, bg);
-                    DrawRectangleLinesEx({cx, y - 2.0f, wChip, 38.0f}, chosen ? 2.0f : 1.0f,
+                    const float cx = x0 + float(k) * (wChip + 10.0f);
+                    Color bg = chosen ? Color{70, 115, 70, 210} : (enabled ? Color{30, 30, 42, 185} : Color{22, 22, 28, 170});
+                    DrawRectangleRec({cx, y + 4.0f, wChip, 42.0f}, bg);
+                    DrawRectangleLinesEx({cx, y + 4.0f, wChip, 42.0f}, chosen ? 2.0f : 1.0f,
                                          chosen ? kGold : (enabled ? fade(WHITE, 0.45f) : fade(WHITE, 0.16f)));
                     const std::string text = enabled ? std::string(raster::cpuAsmLabel(opt))
                                                      : (std::string(raster::cpuAsmLabel(opt)) + " [OFF]");
                     const Color tc = chosen ? kGold : (enabled ? WHITE : Color{135, 135, 148, 255});
-                    ui.uiText(text, cx + wChip * 0.5f, y + 8.0f, 16.0f, fade(tc, alpha), 0, 1.25f);
+                    ui.uiText(text, cx + wChip * 0.5f, y + 15.0f, 18.0f, fade(tc, alpha), 0, 1.25f);
                 }
                 continue;
             }
+            if (isBool) continue;
 
             std::string val;
             switch (r.kind) {
-                case Row::Bool: val = (r.label == "Fullscreen" ? a.settings.fullscreen : *r.b) ? "ON" : "OFF"; break;
                 case Row::Number: val = r.fmt(*r.f); break;
                 case Row::Choice:
                     if (!r.names.empty()) {
@@ -357,22 +453,34 @@ private:
                         val = *r.i == 0 ? std::string("Unlimited") : std::string(TextFormat("%d FPS", *r.i));
                     }
                     break;
-                case Row::Action: val = r.value ? r.value() + "  >" : ">"; break;
+                case Row::Action: val = r.value ? r.value() : std::string(">"); break;
                 default: break;
             }
-            const std::string shownVal = (on && r.kind != Row::Action ? "<  " : "") + val + (on && r.kind != Row::Action ? "  >" : "");
-            ui.uiText(shownVal, gfx::W - 140.0f, y + 4.0f, 26.0f, fade(on ? kGold : WHITE, alpha), 1, 2.0f);
+            if (!val.empty()) {
+                const float vx = baseX + lw + 44.0f;
+                const float maxValW = std::max(140.0f, gfx::W - 44.0f - vx);
+                float valH = 50.0f;
+                const float rawW = ui.alphabetWidth(val, valH, true);
+                if (rawW > 0.0f) {
+                    if (rawW > maxValW) valH *= maxValW / rawW;
+                    const float vy = y + (labelH - valH) * 0.5f;
+                    ui.alphabet(val, vx, vy, valH, alpha, true, on ? WHITE : Color{230, 230, 240, 255});
+                } else {
+                    ui.uiText(val, vx, y + 10.0f, 30.0f, fade(on ? kGold : WHITE, alpha), -1, 2.0f);
+                }
+            }
         }
 
         const Row& r = rows[size_t(sel_)];
-        DrawRectangleRec({60, gfx::H - 102, gfx::W - 120, 56}, Color{0, 0, 0, 190});
-        const std::vector<std::string> helpLines = wrapWidth(FontId::Ui, r.help, 18.0f, gfx::W - 160.0f);
+        DrawRectangleRec({100, gfx::H - 114, gfx::W - 200, 66}, Color{0, 0, 0, 155});
+        const std::vector<std::string> helpLines = wrapWidth(ui, true, FontId::Ui, r.help, 24.0f, gfx::W - 240.0f);
         for (size_t li = 0; li < std::min<size_t>(2, helpLines.size()); ++li)
-            ui.uiText(helpLines[li], gfx::W * 0.5f, gfx::H - 94.0f + float(li) * 22.0f, 18.0f, WHITE, 0, 1.25f);
+            ui.uiText(helpLines[li], gfx::W * 0.5f, gfx::H - 104.0f + float(li) * 26.0f, 24.0f, WHITE, 0, 1.5f);
         if (!a.touchMode) {
             DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
-            ui.uiText("UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC back to categories", gfx::W * 0.5f, gfx::H - 31.0f,
-                      17.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+            ui.uiText(inDelayCombo_ ? "UP/DOWN select   LEFT/RIGHT change   ENTER open   ESC back to Gameplay"
+                                    : "UP/DOWN select   LEFT/RIGHT change   ENTER toggle   ESC back",
+                      gfx::W * 0.5f, gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
         }
         gfx::endCanvas();
     }
@@ -381,6 +489,24 @@ private:
         Settings& s = app().settings;
         auto pct = [](float v) { return std::string(TextFormat("%d%%", int(std::lround(v * 100)))); };
         cats_.clear();
+
+        // Nested sub-page hidden under Gameplay: Adjust Delay and Combo.
+        delayComboRows_ = {
+            {Row::Action, "Calibrate offset", "Tap along to a metronome to measure your audio/visual offset."},
+            {Row::Number, "Audio offset", "Positive if you hear the music late. Hold SHIFT for steps of 10 ms.", nullptr,
+             &s.offsetMs, -300, 300, 1},
+            {Row::Choice, "Audio latency", "Audio buffer size: lower is faster; raise if sound crackles (next start).", nullptr, nullptr, 0, 0,
+             0, &s.audioLatency, {0, 1, 2, 3}, {"Lowest (6 ms)", "Low (15 ms)", "Normal (30 ms)", "Safe (60 ms)"}},
+            {Row::Number, "Rating X", "Horizontal offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[0], -600, 600, 1},
+            {Row::Number, "Rating Y", "Vertical offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[1], -400, 400, 1},
+            {Row::Number, "Combo X", "Horizontal offset for combo digit popups.", nullptr, &s.comboOffset[2], -600, 600, 1},
+            {Row::Number, "Combo Y", "Vertical offset for combo digit popups.", nullptr, &s.comboOffset[3], -400, 400, 1},
+        };
+        for (Row& r : delayComboRows_) {
+            if (r.label == "Calibrate offset") r.action = [] { app().change(makeCalibration()); };
+            else if (r.label == "Audio offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
+            else if (r.kind == Row::Number) r.fmt = [](float v) { return std::string(TextFormat("%+d", int(std::lround(v)))); };
+        }
 
         // 1. Note Colors (direct screen, just like Psych Engine)
         cats_.push_back({"NOTE COLORS", "Customize the main, highlight and outline colors for each note direction.",
@@ -395,7 +521,7 @@ private:
                 {Row::Key, "Up lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
                 {Row::Key, "Right lane", "ENTER to rebind, LEFT/RIGHT to pick a slot, BACKSPACE to clear."},
                 {Row::Action, "Reset 4-key controls", "Restore D F J K and the arrow keys."},
-                {Row::Action, "Key bindings (1 to 18 keys)...", "Configure every lane key for 1 to 18 key charts."},
+                {Row::Action, "Key bindings (1-18K)", "Configure every lane key for 1 to 18 key charts."},
             };
             int lane = 0;
             for (Row& r : c.rows) {
@@ -407,34 +533,12 @@ private:
                             for (int k = 0; k < 2; ++k) s.keys4[l][k] = d.keys4[l][k];
                         app().saveSettings();
                     };
-                if (r.label == "Key bindings (1 to 18 keys)...") r.action = [] { app().change(makeKeyBindings()); };
+                if (r.label == "Key bindings (1-18K)") r.action = [] { app().change(makeKeyBindings()); };
             }
             cats_.push_back(std::move(c));
         }
 
-        // 3. Adjust Delay and Combo
-        {
-            OptionCategory c{"ADJUST DELAY AND COMBO", "Calibrate audio offset, buffer latency, and rating/combo popup positions.", {}, {}};
-            c.rows = {
-                {Row::Action, "Calibrate offset...", "Tap along to a metronome to measure your audio/visual offset."},
-                {Row::Number, "Audio offset", "Positive if you hear the music late. Hold SHIFT for steps of 10 ms.", nullptr,
-                 &s.offsetMs, -300, 300, 1},
-                {Row::Choice, "Audio latency", "Audio buffer size: lower is faster; raise if sound crackles (next start).", nullptr, nullptr, 0, 0,
-                 0, &s.audioLatency, {0, 1, 2, 3}, {"Lowest (6 ms)", "Low (15 ms)", "Normal (30 ms)", "Safe (60 ms)"}},
-                {Row::Number, "Rating position X", "Horizontal offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[0], -600, 600, 1},
-                {Row::Number, "Rating position Y", "Vertical offset for Sick/Good/Bad/Shit popups.", nullptr, &s.comboOffset[1], -400, 400, 1},
-                {Row::Number, "Combo position X", "Horizontal offset for combo digit popups.", nullptr, &s.comboOffset[2], -600, 600, 1},
-                {Row::Number, "Combo position Y", "Vertical offset for combo digit popups.", nullptr, &s.comboOffset[3], -400, 400, 1},
-            };
-            for (Row& r : c.rows) {
-                if (r.label == "Calibrate offset...") r.action = [] { app().change(makeCalibration()); };
-                else if (r.label == "Audio offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
-                else if (r.kind == Row::Number) r.fmt = [](float v) { return std::string(TextFormat("%+d", int(std::lround(v)))); };
-            }
-            cats_.push_back(std::move(c));
-        }
-
-        // 4. Graphics
+        // 3. Graphics
         {
             OptionCategory c{"GRAPHICS", "Display, framerate, ASM note renderer CPU target, shaders, and FPS overlay.", {}, {}};
             c.rows = {
@@ -453,10 +557,10 @@ private:
                 {Row::AsmCpu, "ASM CPU target",
                  "ASM note renderer CPU target: x86 SSE2 (active), x86-64 SSE4 (disabled), AVX2 (disabled)."},
                 {Row::Bool, "Show FPS", "Display the frame rate counter in the top-left corner.", &s.showFps},
-                {Row::Bool, "FPS: memory", "Show process memory usage and peak under FPS.", &s.fpsMemory},
-                {Row::Bool, "FPS: frame times", "Show update/draw timings and frame-time graph under FPS.", &s.fpsFrameTimes},
-                {Row::Bool, "FPS: CPU, GPU and RAM", "Show CPU/GPU load and memory usage under FPS.", &s.fpsUsage},
-                {Row::Bool, "FPS: hardware", "Show CPU, GPU, OpenGL version and OS under FPS.", &s.fpsHardware},
+                {Row::Bool, "FPS memory", "Show process memory usage and peak under FPS.", &s.fpsMemory},
+                {Row::Bool, "FPS frame times", "Show update/draw timings and frame-time graph under FPS.", &s.fpsFrameTimes},
+                {Row::Bool, "FPS CPU/GPU/RAM", "Show CPU/GPU load and memory usage under FPS.", &s.fpsUsage},
+                {Row::Bool, "FPS hardware", "Show CPU, GPU, OpenGL version and OS under FPS.", &s.fpsHardware},
             };
             if (platform::kAndroid) {
                 c.rows.erase(std::remove_if(c.rows.begin(), c.rows.end(), [](const Row& r) { return r.label == "Fullscreen"; }), c.rows.end());
@@ -464,34 +568,33 @@ private:
             cats_.push_back(std::move(c));
         }
 
-        // 5. Visuals and UI (Psych UI toggles are intentionally hidden; bundled Psych assets are always active)
+        // 4. Visuals and UI (Psych UI toggles are intentionally hidden; bundled Psych assets are always active)
         {
-            OptionCategory c{"VISUALS AND UI", "Note skins, HUD visibility, time bar, splashes, watermark, and pause music.", {}, {}};
+            OptionCategory c{"VISUALS AND UI", "Note skins, HUD visibility, time bar, splashes, and pause music.", {}, {}};
             c.rows = {
-                {Row::Action, "Note skin...", "Choose between Default and bundled/mod note skins."},
+                {Row::Action, "Note skin", "Choose between Default and bundled/mod note skins."},
                 {Row::Bool, "Note splashes", "Bursts of light on SICK! hits.", &s.noteSplashes},
-                {Row::Number, "Note splash opacity", "Opacity of note splash bursts.", nullptr, &s.splashAlpha, 0, 1, 0.1f},
+                {Row::Number, "Splash opacity", "Opacity of note splash bursts.", nullptr, &s.splashAlpha, 0, 1, 0.1f},
                 {Row::Bool, "Hide HUD", "Hides health bar, icons, score text and ratings during gameplay.", &s.hideHud},
                 {Row::Choice, "Time bar", "What the song progress bar at the top shows.", nullptr, nullptr, 0, 0, 0, &s.timeBar,
                  {0, 1, 2, 3}, {"Time left", "Time elapsed", "Song name", "Off"}},
                 {Row::Bool, "Flashing lights", "Enable flashing lights and bright beat flashes.", &s.flashing},
-                {Row::Bool, "Camera zoom on beat", "Beat camera bops (chart/script camera zooms always work).", &s.camZoom},
-                {Row::Bool, "Score text zoom on hit", "Bounce score text slightly on each note hit.", &s.scoreZoom},
-                {Row::Number, "Health bar opacity", "Opacity of the health bar and icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
+                {Row::Bool, "Camera zooms", "Beat camera bops (chart/script camera zooms always work).", &s.camZoom},
+                {Row::Bool, "Score text zoom", "Bounce score text slightly on each note hit.", &s.scoreZoom},
+                {Row::Number, "Health bar alpha", "Opacity of the health bar and icons.", nullptr, &s.healthBarAlpha, 0, 1, 0.1f},
                 {Row::Bool, "Hit popups", "Show rating images and combo numbers on each hit.", &s.hitPopups},
                 {Row::Bool, "Combo stacking", "Stack rating and combo popups instead of replacing the previous one.", &s.comboStacking},
                 {Row::Choice, "Note counter", "Show notes hit under the score line.", nullptr, nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2},
                  {"Off", "Your side", "Both sides"}},
-                {Row::Bool, "Watermark", "Show \"Astralis Engine\" version watermark in the bottom-left corner of songs.", &s.watermark},
                 {Row::Bool, "Audio visualizer", "Show reactive audio spectrum bars in the top-right corner of songs.", &s.visualizer},
                 {Row::Bool, "Botplay text", "Show BOTPLAY / REPLAY indicator while auto-playing.", &s.botplayText},
-                {Row::Bool, "Menu background blur", "Blur menu backgrounds when shaders are enabled.", &s.menuBlur},
-                {Row::Choice, "Pause screen song", "Music played on the pause screen.", nullptr, nullptr, 0, 0, 0, &s.pauseMusic, {0, 1, 2},
+                {Row::Bool, "Menu bg blur", "Blur menu backgrounds when shaders are enabled.", &s.menuBlur},
+                {Row::Choice, "Pause music", "Music played on the pause screen.", nullptr, nullptr, 0, 0, 0, &s.pauseMusic, {0, 1, 2},
                  {"None", "Breakfast", "Tea Time"}},
             };
             for (Row& r : c.rows) {
                 if (r.kind == Row::Number) r.fmt = pct;
-                if (r.label == "Note skin...") {
+                if (r.label == "Note skin") {
                     r.action = [] { app().change(makeNoteSkins()); };
                     r.value = [&s] { return s.noteSkin.empty() ? std::string("Default") : s.noteSkin; };
                 }
@@ -499,9 +602,9 @@ private:
             cats_.push_back(std::move(c));
         }
 
-        // 6. Gameplay
+        // 5. Gameplay (includes hidden "Adjust Delay and Combo" submenu)
         {
-            OptionCategory c{"GAMEPLAY", "Scroll direction, middlescroll, ghost tapping, hit windows, and extra keys.", {}, {}};
+            OptionCategory c{"GAMEPLAY", "Scroll direction, middlescroll, ghost tapping, hit windows, delay & combo.", {}, {}};
             c.rows = {
                 {Row::Bool, "Downscroll", "Notes scroll downward toward receptors at the bottom.", &s.downscroll},
                 {Row::Bool, "Middlescroll", "Center player lanes and dim opponent lanes.", &s.middlescroll},
@@ -509,31 +612,45 @@ private:
                 {Row::Bool, "Opponent strums", "Light up opponent receptors when the opponent hits notes.", &s.opponentStrums},
                 {Row::Bool, "Ghost tapping", "Pressing lanes with no note nearby does not count as a miss.", &s.ghostTapping},
                 {Row::Bool, "Auto pause", "Pause gameplay automatically when the window loses focus.", &s.autoPause},
-                {Row::Bool, "Disable reset button", "Prevent R from instantly triggering game over during a song.", &s.noReset},
+                {Row::Bool, "Disable reset", "Prevent R from instantly triggering game over during a song.", &s.noReset},
                 {Row::Bool, "Extra keys", "Allow 1 to 18 key charts and mid-song key count changes (OFF forces 4K).", &s.extraKeys},
                 {Row::Bool, "Touch controls", "Enable on-screen touch lane buttons.", &s.touchControls},
                 {Row::Number, "Scroll speed", "Override chart scroll speed (0 = use chart speed).", nullptr, &s.scrollSpeed, 0, 6, 0.1f},
                 {Row::Bool, "Show timing (ms)", "Display hit error in milliseconds on each note.", &s.showTimings},
+                {Row::Action, "Adjust Delay and Combo", "Calibrate audio offset, buffer latency, and rating/combo popup positions."},
                 {Row::Number, "Rating offset", "Shifts the center of judgement windows in milliseconds.", nullptr, &s.ratingOffset, -30, 30, 1},
-                {Row::Number, "Sick! hit window", "Maximum timing error (ms) for a SICK! rating.", nullptr, &s.sickWindow, 15, 45, 1},
-                {Row::Number, "Good hit window", "Maximum timing error (ms) for a GOOD rating.", nullptr, &s.goodWindow, 15, 90, 1},
-                {Row::Number, "Bad hit window", "Maximum timing error (ms) for a BAD rating.", nullptr, &s.badWindow, 15, 135, 1},
+                {Row::Number, "Sick! window", "Maximum timing error (ms) for a SICK! rating.", nullptr, &s.sickWindow, 15, 45, 1},
+                {Row::Number, "Good window", "Maximum timing error (ms) for a GOOD rating.", nullptr, &s.goodWindow, 15, 90, 1},
+                {Row::Number, "Bad window", "Maximum timing error (ms) for a BAD rating.", nullptr, &s.badWindow, 15, 135, 1},
                 {Row::Number, "Safe frames", "Maximum early/late hit window in 60 FPS frames.", nullptr, &s.safeFrames, 2, 10, 0.1f},
             };
             if (platform::kAndroid) {
                 c.rows.erase(std::remove_if(c.rows.begin(), c.rows.end(), [](const Row& r) { return r.label == "Touch controls"; }), c.rows.end());
             }
             for (Row& r : c.rows) {
-                if (r.label == "Scroll speed") r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
-                else if (r.label == "Rating offset") r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
-                else if (r.label.find("hit window") != std::string::npos)
+                if (r.label == "Adjust Delay and Combo") {
+                    r.action = [this] {
+                        inDelayCombo_ = true;
+                        gLastInDelayCombo = true;
+                        sel_ = 0;
+                        anim_ = 0;
+                        lastToggleRow_ = -1;
+                        if (!delayComboRows_.empty()) gLastOptionsRow = delayComboRows_[0].label;
+                    };
+                } else if (r.label == "Scroll speed") {
+                    r.fmt = [](float v) { return v <= 0.001f ? std::string("Chart") : std::string(TextFormat("%.1f", v)); };
+                } else if (r.label == "Rating offset") {
+                    r.fmt = [](float v) { return std::string(TextFormat("%+d ms", int(std::lround(v)))); };
+                } else if (r.label.find("window") != std::string::npos) {
                     r.fmt = [](float v) { return std::string(TextFormat("%d ms", int(std::lround(v)))); };
-                else if (r.label == "Safe frames") r.fmt = [](float v) { return std::string(TextFormat("%.1f", v)); };
+                } else if (r.label == "Safe frames") {
+                    r.fmt = [](float v) { return std::string(TextFormat("%.1f", v)); };
+                }
             }
             cats_.push_back(std::move(c));
         }
 
-        // 7. Audio
+        // 6. Audio
         {
             OptionCategory c{"AUDIO", "Master, music, SFX and hitsound volume plus hitsound polyphony.", {}, {}};
             c.rows = {
@@ -541,12 +658,35 @@ private:
                 {Row::Number, "Music volume", "Song and menu music volume.", nullptr, &s.musicVol, 0, 1, 0.05f},
                 {Row::Number, "Sound effects", "Menu and miss sound effects volume.", nullptr, &s.sfxVol, 0, 1, 0.05f},
                 {Row::Number, "Hit sounds", "Sample-accurate click on every hit note.", nullptr, &s.hitsoundVol, 0, 1, 0.05f},
-                {Row::Choice, "Hitsound polyphony", "How overlapping hitsounds behave on dense chords/spam.", nullptr, nullptr, 0, 0, 0,
+                {Row::Choice, "Hitsound mode", "How overlapping hitsounds behave on dense chords/spam.", nullptr, nullptr, 0, 0, 0,
                  &s.hitsoundPolyphony, {0, 1, 2}, {"Off (cut self)", "Polyphonic", "Unlimited"}},
                 {Row::Bool, "Hitsound limiter", "Soft-clips stacked hitsounds to prevent harsh distortion.", &s.hitsoundLimiter},
             };
             for (Row& r : c.rows)
                 if (r.kind == Row::Number) r.fmt = pct;
+            cats_.push_back(std::move(c));
+        }
+
+        // 7. Storage (Android configurable storage path, defaulting to /storage/emulated/0/.astralis)
+        if (platform::kAndroid) {
+            OptionCategory c{"STORAGE", "Choose where Astralis stores mods, songs, settings and saves on Android.", {}, {}};
+            c.rows = {
+                {Row::Action, "Storage folder", "Tap to enter a custom folder path (default: /storage/emulated/0/.astralis)."},
+                {Row::Action, "Default (.astralis)", "Switch back to /storage/emulated/0/.astralis."},
+                {Row::Action, "App-private folder", "Use Android/data/<package>/files (requires no storage permission)."},
+                {Row::Action, "Storage permission", "Grant All Files Access so Astralis can read/write /storage/emulated/0/.astralis."},
+            };
+            c.rows[0].value = [] { return platform::displayPath(platform::configuredStorageDir()); };
+            c.rows[0].action = [this] {
+                if (platform::askText("Storage folder", platform::configuredStorageDir())) askingStorage_ = true;
+            };
+            c.rows[1].action = [this] { applyStoragePath(platform::defaultStorageDir()); };
+            c.rows[2].action = [this] { applyStoragePath(platform::privateStorageDir()); };
+            c.rows[3].value = [] { return platform::hasExternalStorageAccess() ? std::string("Granted") : std::string("Tap to allow"); };
+            c.rows[3].action = [] {
+                platform::requestExternalStorageAccess();
+                app().notify("Allow storage access, then restart or reopen this menu", 4.0);
+            };
             cats_.push_back(std::move(c));
         }
 
@@ -558,11 +698,11 @@ private:
                  {"Always", "luaDebugMode", "Off"}},
                 {Row::Choice, "Lua warnings", "When to display missing asset warnings from scripts.", nullptr, nullptr, 0, 0, 0, &s.luaWarnings,
                  {0, 1, 2}, {"Always", "luaDebugMode", "Off"}},
-                {Row::Bool, "Lua note callbacks", "Forward plain note hits/misses to Lua scripts (OFF is faster on spam charts).",
+                {Row::Bool, "Lua note hooks", "Forward plain note hits/misses to Lua scripts (OFF is faster on spam charts).",
                  &s.luaNoteCallbacks},
-                {Row::Choice, "Render video size", "Resolution when recording via --render (desktop renders/ or Android Movies/Astralis).",
+                {Row::Choice, "Render size", "Resolution when recording via --render (desktop renders/ or Android Movies/Astralis).",
                  nullptr, nullptr, 0, 0, 0, &s.renderSize, {0, 1, 2, 3}, {"1280x720", "1920x1080", "2560x1440", "3840x2160"}},
-                {Row::Choice, "Render frame rate", "Target FPS when recording videos.", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
+                {Row::Choice, "Render FPS", "Target FPS when recording videos.", nullptr, nullptr, 0, 0, 0, &s.renderFps, {30, 60, 120, 240}},
                 {Row::Choice, "Render encoder", "Video codec/hardware encoder for ffmpeg.", nullptr, nullptr, 0, 0, 0, &s.renderEncoder,
                  {7, 0, 1, 2, 3, 4, 5, 6},
                  {"Auto", "H.264 (x264)", "H.265 (x265)", "VP9 (WebM)", "H.264 NVIDIA", "H.265 NVIDIA", "H.264 AMD", "H.264 Intel"}},
@@ -578,12 +718,17 @@ private:
     }
 
     std::vector<OptionCategory> cats_;
+    std::vector<Row> delayComboRows_;
     int catSel_ = 0;
     float catAnim_ = 0;
     int openSection_ = -1;  // -1 = Psych-style Options Hub
+    bool inDelayCombo_ = false;
     int sel_ = 0, slot_ = 0;
     float anim_ = 0;
+    int lastToggleRow_ = -1;
+    double lastToggleAt_ = -10.0;
     bool waiting_ = false;
+    bool askingStorage_ = false;
 };
 
 // ----------------------------------------------------------- Key bindings --
@@ -701,17 +846,20 @@ public:
             const bool changed = l < int(defaults.size()) && !defaults[size_t(l)].empty() && code != defaults[size_t(l)][0];
             const std::string name = on && waiting_ ? std::string("?") : std::string(code ? keyName(code) : "-");
             const float ts = keys_ > 12 ? 20.0f : keys_ > 8 ? 24.0f : 30.0f;
-            gfx::text(FontId::Ui, name, c.x, c.y + 64, ts, on ? WHITE : (changed ? kGold : kIvory), Align::Center, 1.5f);
+            if (psych) ui.uiText(name, c.x, c.y + 64, ts, on ? WHITE : (changed ? kGold : kIvory), 0, 1.5f);
+            else gfx::text(FontId::Ui, name, c.x, c.y + 64, ts, on ? WHITE : (changed ? kGold : kIvory), Align::Center, 1.5f);
         }
         std::string help = waiting_ ? "Press the key for this lane (ESC: keep the one it has)"
                                     : "Lanes for charts with this many keys. Gold: a key you chose.";
         if (keys_ == 4 && !waiting_) help = "4 keys: also in Options > CONTROLS, with a second key for each lane.";
-        DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 120});
-        gfx::text(FontId::Ui, help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
+        DrawRectangleRec({0, gfx::H - 84, gfx::W, 44}, Color{0, 0, 0, 140});
+        if (psych) ui.uiText(help, gfx::W * 0.5f, gfx::H - 74.0f, 22.0f, WHITE, 0, 1.5f);
+        else gfx::text(FontId::Ui, help, gfx::W / 2, gfx::H - 76, 24, kIvory, Align::Center);
         if (!a.touchMode) {
-            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-            gfx::text(FontId::Ui, "UP/DOWN row   LEFT/RIGHT keys or lane   ENTER rebind   BACKSPACE default   R all defaults   ESC back",
-                      gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            const char* kh = "UP/DOWN row   LEFT/RIGHT keys or lane   ENTER rebind   BACKSPACE default   R all defaults   ESC back";
+            if (psych) ui.uiText(kh, gfx::W * 0.5f, gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+            else gfx::text(FontId::Ui, kh, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         }
         gfx::endCanvas();
     }
@@ -836,12 +984,20 @@ public:
             sd = std::sqrt(sd / double(taps_.size()));
             res = TextFormat("Average: %+.0f ms    Spread: %.0f ms    Taps: %d", m, sd, int(taps_.size()));
         }
-        gfx::text(FontId::Ui, res, gfx::W / 2, 410, 34, WHITE, Align::Center, 1.5f);
-        gfx::text(FontId::Ui, TextFormat("Current offset: %+d ms", int(a.settings.offsetMs)), gfx::W / 2, 450, 24,
-                  fade(kIvory, 0.7f), Align::Center);
-        DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-        gfx::text(FontId::Ui, a.touchMode ? "APPLY needs 4+ taps" : "ENTER apply (needs 4+ taps)   R reset   ESC cancel", gfx::W / 2,
-                  gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+        if (psych) {
+            ui.uiText(res, gfx::W * 0.5f, 410.0f, 30.0f, WHITE, 0, 2.0f);
+            ui.uiText(TextFormat("Current offset: %+d ms", int(a.settings.offsetMs)), gfx::W * 0.5f, 452.0f, 22.0f, fade(WHITE, 0.75f), 0, 1.5f);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            ui.uiText(a.touchMode ? "APPLY needs 4+ taps" : "ENTER apply (needs 4+ taps)   R reset   ESC cancel", gfx::W * 0.5f,
+                      gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+        } else {
+            gfx::text(FontId::Ui, res, gfx::W / 2, 410, 34, WHITE, Align::Center, 1.5f);
+            gfx::text(FontId::Ui, TextFormat("Current offset: %+d ms", int(a.settings.offsetMs)), gfx::W / 2, 450, 24,
+                      fade(kIvory, 0.7f), Align::Center);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
+            gfx::text(FontId::Ui, a.touchMode ? "APPLY needs 4+ taps" : "ENTER apply (needs 4+ taps)   R reset   ESC cancel", gfx::W / 2,
+                      gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+        }
         gfx::endCanvas();
     }
 
@@ -939,7 +1095,8 @@ public:
                 DrawCircleV(c, 44, rgb(a.settings.noteColors[d][0]));
                 DrawCircleV({c.x - 14, c.y - 14}, 10, rgb(a.settings.noteColors[d][1]));
             }
-            gfx::text(FontId::Ui, dirs[d], c.x, b.y + b.height + 6, 20, d == dir_ ? kGold : kIvory, Align::Center, 1.5f);
+            if (psych) ui.uiText(dirs[d], c.x, b.y + b.height + 6, 20.0f, d == dir_ ? kGold : WHITE, 0, 1.5f);
+            else gfx::text(FontId::Ui, dirs[d], c.x, b.y + b.height + 6, 20, d == dir_ ? kGold : kIvory, Align::Center, 1.5f);
         }
         static const char* channels[3] = {"Main", "Highlight", "Outline"};
         static const char* parts[3] = {"Hue", "Saturation", "Brightness"};
@@ -948,9 +1105,11 @@ public:
             const int ch = r / 3, part = r % 3;
             if (part == 0) {
                 const uint32_t c = a.settings.noteColors[dir_][ch];
-                gfx::text(FontId::Ui, channels[ch], 120, b.y - 4, 24, kIvory, Align::Left, 1.5f);
+                if (psych) ui.uiText(channels[ch], 120.0f, b.y - 4.0f, 24.0f, WHITE, -1, 1.5f);
+                else gfx::text(FontId::Ui, channels[ch], 120, b.y - 4, 24, kIvory, Align::Left, 1.5f);
                 DrawRectangleRounded({120, b.y + 26, 120, 40}, 0.3f, 6, rgb(c));
-                gfx::text(FontId::Ui, TextFormat("#%06X", unsigned(c)), 180, b.y + 72, 16, kIvory, Align::Center, 1.0f);
+                if (psych) ui.uiText(TextFormat("#%06X", unsigned(c)), 180.0f, b.y + 72.0f, 16.0f, WHITE, 0, 1.25f);
+                else gfx::text(FontId::Ui, TextFormat("#%06X", unsigned(c)), 180, b.y + 72, 16, kIvory, Align::Center, 1.0f);
             }
             // The bar shows what each value would give.
             const Vector3 h = {hsv_[dir_][ch][0], hsv_[dir_][ch][1], hsv_[dir_][ch][2]};
@@ -965,12 +1124,14 @@ public:
             const float v = part == 0 ? h.x / 360.0f : part == 1 ? h.y : h.z;
             DrawRectangleLinesEx(b, r == row_ ? 2.5f : 1.0f, r == row_ ? kGold : fade(kIvory, 0.5f));
             DrawRectangleRec({b.x + b.width * v - 3, b.y - 5, 6, b.height + 10}, WHITE);
-            gfx::text(FontId::Ui, parts[part], b.x - 14, b.y - 1, 18, r == row_ ? kGold : fade(kIvory, 0.8f), Align::Right, 1.0f);
+            if (psych) ui.uiText(parts[part], b.x - 14.0f, b.y - 1.0f, 18.0f, r == row_ ? kGold : fade(WHITE, 0.85f), 1, 1.25f);
+            else gfx::text(FontId::Ui, parts[part], b.x - 14, b.y - 1, 18, r == row_ ? kGold : fade(kIvory, 0.8f), Align::Right, 1.0f);
         }
         if (!a.touchMode) {
-            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-            gfx::text(FontId::Ui, "Q/E or click: note   UP/DOWN: bar   LEFT/RIGHT change (SHIFT faster)   R reset   ESC back", gfx::W / 2,
-                      gfx::H - 33, 20, Color{220, 214, 235, 255}, Align::Center);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            const char* ch = "Q/E or click: note   UP/DOWN: bar   LEFT/RIGHT change (SHIFT faster)   R reset   ESC back";
+            if (psych) ui.uiText(ch, gfx::W * 0.5f, gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+            else gfx::text(FontId::Ui, ch, gfx::W / 2, gfx::H - 33, 20, Color{220, 214, 235, 255}, Align::Center);
         }
         gfx::endCanvas();
     }
@@ -1003,15 +1164,9 @@ private:
 // (Default and the noteSkins/ of the Psych copy and of every installed mod),
 // the chosen one on the right as a song shows it: receptors, notes coming up,
 // holds and the receptors' hit animation. UP/DOWN (or a click on a name)
-// change it at once; P turns the Psych Engine interface, which the skins
-// belong to, on or off; ENTER or ESC save and go back.
+// change it at once; ENTER or ESC save and go back.
 class NoteSkinState : public State {
 public:
-    TouchLayout touchLayout() const override {
-        TouchLayout t;
-        t.keys = {{app().settings.psychUi ? "PSYCH UI: ON" : "PSYCH UI: OFF", KEY_P}};
-        return t;
-    }
     void enter() override {
         start_ = app().now;
         listSkins();
@@ -1027,14 +1182,6 @@ public:
             sfxPlay(in.accept() ? Sfx::Confirm : Sfx::Cancel);
             a.change(makeOptions());
             return;
-        }
-        if (in.pressed(KEY_P)) {  // the Psych Engine interface: the skins are part of it
-            if (pending_) apply();
-            a.settings.psychUi = !a.settings.psychUi;
-            a.applyPsychUi();
-            a.saveSettings();
-            listSkins();
-            sfxPlay(Sfx::Confirm);
         }
         const int n = rows();
         int to = sel_;
@@ -1091,7 +1238,13 @@ public:
             const float alpha = saturate(1.0f - std::fabs(b.y - mid) / (bottom - top) * 1.2f) * 0.7f + 0.3f;
             if (on) DrawRectangleRounded(b, 0.3f, 8, Color{255, 214, 120, 46});
             const std::string name = i == 0 ? std::string("Default") : skins_[size_t(i - 1)];
-            gfx::text(FontId::Ui, on ? "> " + name : name, b.x + 16, b.y + 6, 30, fade(on ? kGold : kIvory, alpha), Align::Left, 1.5f);
+            if (psych) {
+                const std::string label = on ? ("> " + name) : name;
+                if (ui.alphabet(label, b.x + 14.0f, b.y + 2.0f, 38.0f, alpha, on) < 0)
+                    ui.uiText(label, b.x + 16.0f, b.y + 8.0f, 28.0f, fade(on ? kGold : WHITE, alpha), -1, 2.0f);
+            } else {
+                gfx::text(FontId::Ui, on ? "> " + name : name, b.x + 16, b.y + 6, 30, fade(on ? kGold : kIvory, alpha), Align::Left, 1.5f);
+            }
         }
 
         // The preview: the skin as a song shows it.
@@ -1162,29 +1315,28 @@ public:
         EndScissorMode();
         // What the preview shows.
         std::string about, why;
-        if (!a.settings.psychUi) {
-            about = "The Psych Engine interface is OFF";
-            why = std::string("Note skins are part of it: songs show the game's own notes. ") +
-                  (a.touchMode ? "PSYCH UI turns it on." : "P turns it on.");
-        } else if (!skinOn) {
+        if (!skinOn) {
             about = "No Psych Engine interface to show";
-            why = a.psychReport.empty() ? std::string("No Psych Engine or JS Engine copy among your mods.") : a.psychReport;
+            why = a.psychReport.empty() ? std::string("Bundled Psych Engine assets were not found.") : a.psychReport;
         }
         if (!about.empty()) {
             const Rectangle box{p.x + 30, p.y + p.height * 0.5f - 70, p.width - 60, 140};
             DrawRectangleRounded(box, 0.2f, 8, Color{0, 0, 0, 200});
-            gfx::text(FontId::Ui, about, box.x + box.width * 0.5f, box.y + 18, 30, kGold, Align::Center, 1.5f);
+            if (psych) ui.uiText(about, box.x + box.width * 0.5f, box.y + 18, 28.0f, kGold, 0, 1.5f);
+            else gfx::text(FontId::Ui, about, box.x + box.width * 0.5f, box.y + 18, 30, kGold, Align::Center, 1.5f);
             float y = box.y + 62;
-            for (const std::string& line : wrapWidth(FontId::Ui, why, 22, box.width - 40)) {
-                gfx::text(FontId::Ui, line, box.x + box.width * 0.5f, y, 22, kIvory, Align::Center);
+            for (const std::string& line : wrapWidth(ui, psych, FontId::Ui, why, 20.0f, box.width - 40)) {
+                if (psych) ui.uiText(line, box.x + box.width * 0.5f, y, 20.0f, WHITE, 0, 1.25f);
+                else gfx::text(FontId::Ui, line, box.x + box.width * 0.5f, y, 22, kIvory, Align::Center);
                 y += 26;
             }
         }
 
         if (!a.touchMode) {
-            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-            gfx::text(FontId::Ui, "UP/DOWN or click: skin   P Psych interface ON/OFF   ENTER/ESC save and back", gfx::W / 2,
-                      gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+            DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 165});
+            const char* sh = "UP/DOWN or click: skin   ENTER/ESC save and back";
+            if (psych) ui.uiText(sh, gfx::W * 0.5f, gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+            else gfx::text(FontId::Ui, sh, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
         }
         gfx::endCanvas();
     }

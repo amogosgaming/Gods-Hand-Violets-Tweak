@@ -23,9 +23,9 @@ void draw(Rectangle box, int layers);
 // see-through corners (desktop); otherwise the whole square (Android layers).
 Image render(int size, int layers, bool rounded);
 // Desktop: the window's icon (Linux, Windows) and the Dock's (macOS).
-void applyToWindow();
-// godshand --make-icon <dir>: icon-1024.png (rounded), icon-square-1024.png,
+void applyToWindow(const std::string& baseDir = "");
+// --make-icon <dir>: icon-1024.png (rounded), icon-square-1024.png,
 // android-background-1024.png and android-foreground-1024.png.
-bool exportAll(const std::string& dir);
+bool exportAll(const std::string& dir, const std::string& baseDir = "");
 
 }  // namespace gh::appicon

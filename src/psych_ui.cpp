@@ -10,11 +10,13 @@
 #include <cmath>
 #include <deque>
 #include <filesystem>
+#include <sstream>
 #include <system_error>
 
 #include "audio.hpp"
 #include "common.hpp"
 #include "gfx.hpp"
+#include "json.hpp"
 #include "psych.hpp"
 #include "scene.hpp"
 
@@ -127,6 +129,45 @@ void main() {
 const char* kDirs[4] = {"left", "down", "up", "right"};
 const char* kArrows[4] = {"arrowLEFT", "arrowDOWN", "arrowUP", "arrowRIGHT"};
 
+// Exact Psych Engine 0.7.3 AlphaCharacter.allLetters pixel offsets (positive Y moves glyph UP).
+void alphaOffset(char c, bool bold, float& ox, float& oy) {
+    ox = 0.0f;
+    oy = 0.0f;
+    if (bold) {
+        switch (c) {
+            case '\'': oy = 40.0f; break;
+            case '"': oy = 40.0f; break;
+            case '*': oy = 40.0f; break;
+            case '+': oy = 12.0f; break;
+            case '-': oy = 16.0f; break;
+            case ':': oy = 8.0f; break;
+            case ';': oy = 4.0f; break;
+            case '^': oy = 38.0f; break;
+            case ',': oy = -4.0f; break;
+            case '~': oy = 20.0f; break;
+            case '<': oy = -2.0f; break;
+            case '>': oy = -2.0f; break;
+            case '&': oy = 2.0f; break;
+            default: break;
+        }
+    } else {
+        switch (c) {
+            case '\'': oy = 32.0f; break;
+            case '"': oy = 32.0f; break;
+            case '*': oy = 28.0f; break;
+            case '+': oy = 7.0f; break;
+            case '-': oy = 16.0f; break;
+            case ':': oy = 2.0f; break;
+            case ';': oy = -2.0f; break;
+            case '^': oy = 28.0f; break;
+            case ',': oy = -6.0f; break;
+            case '~': oy = 16.0f; break;
+            case ']': oy = -1.0f; break;
+            default: break;
+        }
+    }
+}
+
 }  // namespace
 
 void PsychUi::setPalette(const uint32_t colors[4][3]) {
@@ -139,7 +180,9 @@ void PsychUi::setSmooth(bool smooth) {
     smooth_ = smooth;
     ++generation_;
     const int filter = smooth ? TEXTURE_FILTER_BILINEAR : TEXTURE_FILTER_POINT;
-    for (Texture2D* t : {&notes_, &bar_, &timeBar_, &alphabet_, &menuBg_, &menuDesat_, &menuBgBlue_, &menuBgMagenta_})
+    for (Texture2D* t : {&notes_, &bar_, &timeBar_, &alphabet_, &menuBg_, &menuDesat_, &menuBgBlue_, &menuBgMagenta_,
+                         &checkbox_.tex, &titleLogo_.tex, &titleGf_.tex, &titleEnter_.tex, &newgroundsLogo_,
+                         &menuTracks_, &storyStageBg_, &campaignUi_.tex})
         if (t->id) SetTextureFilter(*t, filter);
     for (MenuSheet& ms : menuItems_)
         if (ms.tex.id) SetTextureFilter(ms.tex, filter);
@@ -149,6 +192,13 @@ void PsychUi::setSmooth(bool smooth) {
         if (t.id) SetTextureFilter(t, filter);
     for (Texture2D& t : count_)
         if (t.id) SetTextureFilter(t, filter);
+    for (Texture2D& t : storyWeeks_)
+        if (t.id) SetTextureFilter(t, filter);
+    for (Texture2D& t : storyDiffs_)
+        if (t.id) SetTextureFilter(t, filter);
+    for (StoryCharSheet& sc : storyChars_)
+        if (sc.tex.id) SetTextureFilter(sc.tex, filter);
+    if (font_.texture.id) SetTextureFilter(font_.texture, smooth ? TEXTURE_FILTER_TRILINEAR : TEXTURE_FILTER_POINT);
 }
 
 // The engine copy's folders PsychUi::load() looks in, wherever the player
@@ -207,6 +257,28 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
     int found = 0;
     std::vector<std::string> missing;
 
+    auto collectAtlas = [](const psych::Atlas& atlas, const std::string& pref) {
+        std::vector<std::pair<int, Frame>> tmp;
+        for (const psych::AtlasFrame& a : atlas.frames) {
+            if (a.name.size() <= pref.size() || a.name.compare(0, pref.size(), pref) != 0) continue;
+            const std::string rest = a.name.substr(pref.size());
+            if (!std::all_of(rest.begin(), rest.end(), [](char ch) { return std::isdigit((unsigned char)ch); })) continue;
+            Frame fr;
+            fr.src = {a.x, a.y, a.w, a.h};
+            fr.fx = a.fx;
+            fr.fy = a.fy;
+            fr.fw = a.fw > 0 ? a.fw : a.w;
+            fr.fh = a.fh > 0 ? a.fh : a.h;
+            fr.rotated = a.rotated;
+            tmp.push_back({std::atoi(rest.c_str()), fr});
+        }
+        std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<Frame> out;
+        out.reserve(tmp.size());
+        for (const auto& p : tmp) out.push_back(p.second);
+        return out;
+    };
+
     roots_ = roots;
     if (loadNotes(f)) ++found;
     else missing.push_back("note skin (NOTE_assets)");
@@ -234,6 +306,7 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
     timeBar_ = loadTex(timePng);
     timeOnTop_ = timePng.empty() ? barOnTop_ : seeThroughMiddle(timePng);
     if (timeBar_.id) ++found;
+
     // Base folder files (used as fallback if a mod overrides font/alphabet with an unreadable file).
     scene::Files baseFiles;
     if (!firstRoots.empty()) {
@@ -250,6 +323,7 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
         if (!tex.id) return false;
         alphabet_ = tex;
         letters_.clear();
+        letters_.reserve(atlas.frames.size());
         for (const psych::AtlasFrame& a : atlas.frames) {
             Frame fr;
             fr.src = {a.x, a.y, a.w, a.h};
@@ -260,22 +334,28 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
             fr.rotated = a.rotated;
             letters_.push_back({a.name, fr});
         }
-        letterKnown_.fill(false);  // the cached letters pointed into the old list
+        boldKnown_.fill(false);
+        normalKnown_.fill(false);
         return true;
     };
-    // Alphabet: the bold letters of the pause menu and other menus.
     if (loadAlphabet(findAny(f, {"images/alphabet.png"})) ||
         (!firstRoots.empty() && loadAlphabet(findAny(baseFiles, {"images/alphabet.png"})))) {
         ++found;
     } else {
         missing.push_back("alphabet");
     }
+
     auto loadVcr = [&](const std::string& ttf) -> bool {
         if (ttf.empty()) return false;
-        Font loaded = LoadFontEx(ttf.c_str(), 48, nullptr, 0);
+        std::vector<int> cps;
+        for (int cp = 32; cp <= 126; ++cp) cps.push_back(cp);
+        for (int cp = 160; cp <= 255; ++cp) cps.push_back(cp);
+        for (int cp : {0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026}) cps.push_back(cp);
+        Font loaded = LoadFontEx(ttf.c_str(), 64, cps.data(), int(cps.size()));
         if (!loaded.texture.id) return false;
         font_ = loaded;
-        SetTextureFilter(font_.texture, TEXTURE_FILTER_BILINEAR);
+        GenTextureMipmaps(&font_.texture);
+        SetTextureFilter(font_.texture, smooth_ ? TEXTURE_FILTER_TRILINEAR : TEXTURE_FILTER_POINT);
         float upm = 0, asc = 0, desc = 0;
         fontScale_ = 1.0f;
         fontAscent_ = 1.0f;
@@ -289,6 +369,7 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
         (!firstRoots.empty() && loadVcr(findAny(baseFiles, {"fonts/vcr.ttf"})))) {
         ++found;
     }
+
     // Menu backgrounds and main menu sheets for full-engine Psych UI mode.
     menuBg_ = loadTex(findAny(f, {"images/menuBG.png"}));
     if (menuBg_.id) ++found;
@@ -298,6 +379,7 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
     if (menuBgBlue_.id) ++found;
     menuBgMagenta_ = loadTex(findAny(f, {"images/menuBGMagenta.png"}));
     if (menuBgMagenta_.id) ++found;
+
     static const char* const kMenuKeys[4] = {"story_mode", "freeplay", "options", "credits"};
     for (int i = 0; i < 4; ++i) {
         const std::string key = kMenuKeys[i];
@@ -308,33 +390,175 @@ int PsychUi::load(const std::string& folder, std::string& report, const std::vec
         if (!scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) || !atlas.parseSparrow(xml)) continue;
         menuItems_[i].tex = loadTex(png);
         if (!menuItems_[i].tex.id) continue;
-        auto collect = [&](const std::string& pref) {
-            std::vector<std::pair<int, Frame>> tmp;
-            for (const psych::AtlasFrame& a : atlas.frames) {
-                if (a.name.size() <= pref.size() || a.name.compare(0, pref.size(), pref) != 0) continue;
-                const std::string rest = a.name.substr(pref.size());
-                if (!std::all_of(rest.begin(), rest.end(), [](char ch) { return std::isdigit((unsigned char)ch); })) continue;
-                Frame fr;
-                fr.src = {a.x, a.y, a.w, a.h};
-                fr.fx = a.fx;
-                fr.fy = a.fy;
-                fr.fw = a.fw > 0 ? a.fw : a.w;
-                fr.fh = a.fh > 0 ? a.fh : a.h;
-                fr.rotated = a.rotated;
-                tmp.push_back({std::atoi(rest.c_str()), fr});
-            }
-            std::sort(tmp.begin(), tmp.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-            std::vector<Frame> out;
-            for (const auto& p : tmp) out.push_back(p.second);
-            return out;
-        };
-        menuItems_[i].basic = collect(key + " basic");
-        if (menuItems_[i].basic.empty()) menuItems_[i].basic = collect(key + " idle");
-        menuItems_[i].white = collect(key + " white");
-        if (menuItems_[i].white.empty()) menuItems_[i].white = collect(key + " selected");
+        menuItems_[i].basic = collectAtlas(atlas, key + " basic");
+        if (menuItems_[i].basic.empty()) menuItems_[i].basic = collectAtlas(atlas, key + " idle");
+        menuItems_[i].white = collectAtlas(atlas, key + " white");
+        if (menuItems_[i].white.empty()) menuItems_[i].white = collectAtlas(atlas, key + " selected");
         if (menuItems_[i].basic.empty() && menuItems_[i].white.empty()) unloadTex(menuItems_[i].tex);
         else ++found;
     }
+
+    // CheckboxThingie (checkboxanim.png/.xml)
+    if (const std::string png = findAny(f, {"images/checkboxanim.png"}); !png.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            checkbox_.tex = loadTex(png);
+            if (checkbox_.tex.id) {
+                checkbox_.unchecked = collectAtlas(atlas, "checkbox");
+                checkbox_.anim = collectAtlas(atlas, "checkbox anim");
+                checkbox_.animRev = collectAtlas(atlas, "checkbox anim reverse");
+                checkbox_.checked = collectAtlas(atlas, "checkbox finish");
+                ++found;
+            }
+        }
+    }
+
+    // Title Screen (logoBumpin, gfDanceTitle + json, titleEnter, newgrounds_logo, introText.txt)
+    if (const std::string png = findAny(f, {"images/logoBumpin.png"}); !png.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            titleLogo_.tex = loadTex(png);
+            if (titleLogo_.tex.id) {
+                titleLogo_.frames = collectAtlas(atlas, "logo bumpin");
+                if (titleLogo_.frames.empty()) unloadTex(titleLogo_.tex);
+                else ++found;
+            }
+        }
+    }
+    if (const std::string png = findAny(f, {"images/gfDanceTitle.png"}); !png.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            titleGf_.tex = loadTex(png);
+            if (titleGf_.tex.id) {
+                titleGf_.frames = collectAtlas(atlas, "gfDance");
+                if (titleGf_.frames.empty()) unloadTex(titleGf_.tex);
+                else ++found;
+            }
+        }
+    }
+    if (const std::string jsPath = findAny(f, {"images/gfDanceTitle.json"}); !jsPath.empty()) {
+        std::string txt;
+        json::Document doc;
+        if (scene::readFile(jsPath, txt) && doc.parse(txt)) {
+            const json::Value& r = doc.root();
+            titleLogoX_ = float(json::Document::num(doc.get(r, "titlex"), -150.0));
+            titleLogoY_ = float(json::Document::num(doc.get(r, "titley"), -100.0));
+            titleGfX_ = float(json::Document::num(doc.get(r, "gfx"), 512.0));
+            titleGfY_ = float(json::Document::num(doc.get(r, "gfy"), 40.0));
+            titleStartX_ = float(json::Document::num(doc.get(r, "startx"), 100.0));
+            titleStartY_ = float(json::Document::num(doc.get(r, "starty"), 576.0));
+            titleBpm_ = std::max(40.0, json::Document::num(doc.get(r, "bpm"), 102.0));
+        }
+    }
+    if (const std::string png = findAny(f, {"images/titleEnter.png"}); !png.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            titleEnter_.tex = loadTex(png);
+            if (titleEnter_.tex.id) {
+                titleEnter_.idle = collectAtlas(atlas, "ENTER IDLE");
+                if (titleEnter_.idle.empty()) titleEnter_.idle = collectAtlas(atlas, "Press Enter to Begin");
+                titleEnter_.pressed = collectAtlas(atlas, "ENTER PRESSED");
+                if (titleEnter_.pressed.empty()) titleEnter_.pressed = collectAtlas(atlas, "ENTER PRESSED");
+                titleEnter_.freeze = collectAtlas(atlas, "ENTER FREEZE");
+                ++found;
+            }
+        }
+    }
+    newgroundsLogo_ = loadTex(findAny(f, {"images/newgrounds_logo.png"}));
+    if (newgroundsLogo_.id) ++found;
+    if (const std::string introPath = findAny(f, {"data/introText.txt"}); !introPath.empty()) {
+        std::string txt;
+        if (scene::readFile(introPath, txt)) {
+            std::istringstream iss(txt);
+            std::string line;
+            while (std::getline(iss, line)) {
+                while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+                const size_t sep = line.find("--");
+                if (sep != std::string::npos) introTexts_.push_back({line.substr(0, sep), line.substr(sep + 2)});
+            }
+        }
+    }
+
+    // Story Mode assets
+    menuTracks_ = loadTex(findAny(f, {"images/Menu_Tracks.png"}));
+    if (menuTracks_.id) ++found;
+    storyWeeks_[0] = loadTex(findAny(f, {"images/storymenu/tutorial.png"}));
+    storyWeeks_[1] = loadTex(findAny(f, {"images/storymenu/week1.png"}));
+    for (const Texture2D& t : storyWeeks_)
+        if (t.id) ++found;
+    storyDiffs_[0] = loadTex(findAny(f, {"images/menudifficulties/easy.png"}));
+    storyDiffs_[1] = loadTex(findAny(f, {"images/menudifficulties/normal.png"}));
+    storyDiffs_[2] = loadTex(findAny(f, {"images/menudifficulties/hard.png"}));
+    for (const Texture2D& t : storyDiffs_)
+        if (t.id) ++found;
+    storyStageBg_ = loadTex(findAny(f, {"images/menubackgrounds/menu_stage.png"}));
+    if (storyStageBg_.id) ++found;
+    if (const std::string png = findAny(f, {"images/campaign_menu_UI_assets.png"}); !png.empty()) {
+        std::string xml;
+        psych::Atlas atlas;
+        if (scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) && atlas.parseSparrow(xml)) {
+            campaignUi_.tex = loadTex(png);
+            if (campaignUi_.tex.id) {
+                campaignUi_.arrowLeft = collectAtlas(atlas, "arrow left");
+                campaignUi_.pushLeft = collectAtlas(atlas, "arrow push left");
+                campaignUi_.arrowRight = collectAtlas(atlas, "arrow right");
+                campaignUi_.pushRight = collectAtlas(atlas, "arrow push right");
+                campaignUi_.lock = collectAtlas(atlas, "lock");
+                ++found;
+            }
+        }
+    }
+    struct StoryCharDef {
+        const char* jsonName;
+        const char* defImg;
+        const char* defIdle;
+        const char* defConfirm;
+        float defOffX, defOffY;
+    };
+    static const StoryCharDef kStoryChars[3] = {
+        {"dad", "Menu_Dad", "M Dad Idle", "M Dad Idle", 0.0f, 0.0f},
+        {"bf", "Menu_BF", "M BF Idle", "M bf HEY", 15.0f, -40.0f},
+        {"gf", "Menu_GF", "M GF Idle", "M GF Idle", 0.0f, -25.0f},
+    };
+    for (int i = 0; i < 3; ++i) {
+        std::string imgName = kStoryChars[i].defImg;
+        std::string idleAnim = kStoryChars[i].defIdle;
+        std::string confirmAnim = kStoryChars[i].defConfirm;
+        storyChars_[i].offX = kStoryChars[i].defOffX;
+        storyChars_[i].offY = kStoryChars[i].defOffY;
+        storyChars_[i].scale = 1.0f;
+        if (const std::string jp = findAny(f, {std::string("images/menucharacters/") + kStoryChars[i].jsonName + ".json"}); !jp.empty()) {
+            std::string txt;
+            json::Document doc;
+            if (scene::readFile(jp, txt) && doc.parse(txt)) {
+                const json::Value& r = doc.root();
+                imgName = std::string(doc.strOr(doc.get(r, "image"), imgName));
+                idleAnim = std::string(doc.strOr(doc.get(r, "idle_anim"), idleAnim));
+                confirmAnim = std::string(doc.strOr(doc.get(r, "confirm_anim"), confirmAnim));
+                storyChars_[i].scale = float(json::Document::num(doc.get(r, "scale"), 1.0));
+                if (const json::Value* pos = doc.get(r, "position"); pos && doc.size(*pos) >= 2) {
+                    storyChars_[i].offX = float(json::Document::num(&doc.at(*pos, 0), storyChars_[i].offX));
+                    storyChars_[i].offY = float(json::Document::num(&doc.at(*pos, 1), storyChars_[i].offY));
+                }
+            }
+        }
+        const std::string png = findAny(f, {"images/menucharacters/" + imgName + ".png"});
+        if (png.empty()) continue;
+        std::string xml;
+        psych::Atlas atlas;
+        if (!scene::readFile(png.substr(0, png.size() - 4) + ".xml", xml) || !atlas.parseSparrow(xml)) continue;
+        storyChars_[i].tex = loadTex(png);
+        if (!storyChars_[i].tex.id) continue;
+        storyChars_[i].idle = collectAtlas(atlas, idleAnim);
+        storyChars_[i].confirm = collectAtlas(atlas, confirmAnim);
+        if (storyChars_[i].idle.empty()) unloadTex(storyChars_[i].tex);
+        else ++found;
+    }
+
     auto sound = [&](Sfx id, const std::string& name) {
         const std::string p = findAny(f, {"sounds/" + name + ".ogg", "sounds/" + name + ".mp3", "sounds/" + name + ".wav"});
         if (!p.empty()) {
@@ -451,8 +675,48 @@ void PsychUi::unload() {
         ms.basic.clear();
         ms.white.clear();
     }
+    unloadTex(checkbox_.tex);
+    checkbox_.unchecked.clear();
+    checkbox_.anim.clear();
+    checkbox_.animRev.clear();
+    checkbox_.checked.clear();
+    unloadTex(titleLogo_.tex);
+    titleLogo_.frames.clear();
+    unloadTex(titleGf_.tex);
+    titleGf_.frames.clear();
+    unloadTex(titleEnter_.tex);
+    titleEnter_.idle.clear();
+    titleEnter_.pressed.clear();
+    titleEnter_.freeze.clear();
+    unloadTex(newgroundsLogo_);
+    introTexts_.clear();
+    titleLogoX_ = -150.0f;
+    titleLogoY_ = -100.0f;
+    titleGfX_ = 512.0f;
+    titleGfY_ = 40.0f;
+    titleStartX_ = 100.0f;
+    titleStartY_ = 576.0f;
+    titleBpm_ = 102.0;
+    unloadTex(menuTracks_);
+    for (Texture2D& t : storyWeeks_) unloadTex(t);
+    for (Texture2D& t : storyDiffs_) unloadTex(t);
+    unloadTex(storyStageBg_);
+    unloadTex(campaignUi_.tex);
+    campaignUi_.arrowLeft.clear();
+    campaignUi_.pushLeft.clear();
+    campaignUi_.arrowRight.clear();
+    campaignUi_.pushRight.clear();
+    campaignUi_.lock.clear();
+    for (StoryCharSheet& sc : storyChars_) {
+        unloadTex(sc.tex);
+        sc.idle.clear();
+        sc.confirm.clear();
+    }
     letters_.clear();
-    letterKnown_.fill(false);
+    boldKnown_.fill(false);
+    normalKnown_.fill(false);
+    for (Glyph& g : boldGlyphs_) g.frames.clear();
+    for (Glyph& g : normalGlyphs_) g.frames.clear();
     pauseMusic_.clear();
     teaTime_.clear();
     fontScale_ = fontAscent_ = 1.0f;
@@ -484,6 +748,33 @@ std::vector<PsychUi::Frame> PsychUi::frames(const std::string& prefix) const {
     std::vector<Frame> out;
     for (auto& p : found) out.push_back(p.second);
     return out;
+}
+
+void PsychUi::drawSheetFrameTopLeft(const Texture2D& tex, const Frame& f, Vector2 pos, float scale, Color tint) {
+    const float w = f.rotated ? f.src.height : f.src.width;
+    const float h = f.rotated ? f.src.width : f.src.height;
+    const float dx = pos.x - f.fx * scale;
+    const float dy = pos.y - f.fy * scale;
+    if (f.rotated) {
+        const Rectangle dst{dx + w * scale * 0.5f, dy + h * scale * 0.5f, f.src.width * scale, f.src.height * scale};
+        DrawTexturePro(tex, f.src, dst, {dst.width * 0.5f, dst.height * 0.5f}, -90.0f, tint);
+    } else {
+        DrawTexturePro(tex, f.src, {dx, dy, w * scale, h * scale}, {0, 0}, 0.0f, tint);
+    }
+}
+
+void PsychUi::drawSheetFrameCentered(const Texture2D& tex, const Frame& f, Vector2 center, float scale, Color tint) {
+    const float w = f.rotated ? f.src.height : f.src.width;
+    const float h = f.rotated ? f.src.width : f.src.height;
+    const float ox = (-f.fx + w * 0.5f - f.fw * 0.5f) * scale;
+    const float oy = (-f.fy + h * 0.5f - f.fh * 0.5f) * scale;
+    if (f.rotated) {
+        const Rectangle dst{center.x + ox, center.y + oy, f.src.width * scale, f.src.height * scale};
+        DrawTexturePro(tex, f.src, dst, {dst.width * 0.5f, dst.height * 0.5f}, -90.0f, tint);
+    } else {
+        const Rectangle dst{center.x + ox, center.y + oy, w * scale, h * scale};
+        DrawTexturePro(tex, f.src, dst, {dst.width * 0.5f, dst.height * 0.5f}, 0.0f, tint);
+    }
 }
 
 bool PsychUi::drawFrame(const Frame& f, Vector2 c, float scale, float alpha, float angle, bool flipY) const {
@@ -685,10 +976,10 @@ Vector2 PsychUi::timeBarSize() const {
     return timeBar_.id ? Vector2{float(timeBar_.width), float(timeBar_.height)} : Vector2{400, 19};
 }
 
-bool PsychUi::timeBar(Rectangle frame, float frac, float alpha, float frameAlpha) const {
+bool PsychUi::timeBar(Rectangle frame, float frac, float alpha, float frameAlpha, Color fillCol, Color backCol) const {
     if (!active_) return false;
     if (frameAlpha < 0) frameAlpha = alpha;
-    // Psych: timeBar.png around a white filled part and a black empty part.
+    // Psych: timeBar.png around a white filled part and a black empty part (or custom setTimeBarColors).
     const float in = timeOnTop_ ? 3.0f : 4.0f;
     const Rectangle bar{frame.x + in, frame.y + in, frame.width - 2 * in, frame.height - 2 * in};
     const Rectangle src{0, 0, float(timeBar_.width), float(timeBar_.height)};
@@ -697,8 +988,8 @@ bool PsychUi::timeBar(Rectangle frame, float frac, float alpha, float frameAlpha
         else DrawRectangleRec(frame, gfx::fade(BLACK, frameAlpha));
     }
     const float fill = bar.width * std::clamp(frac, 0.0f, 1.0f);
-    DrawRectangleRec({bar.x, bar.y, fill, bar.height}, gfx::fade(WHITE, alpha));
-    DrawRectangleRec({bar.x + fill, bar.y, bar.width - fill, bar.height}, gfx::fade(BLACK, alpha));
+    DrawRectangleRec({bar.x, bar.y, fill, bar.height}, gfx::fade(fillCol, alpha));
+    DrawRectangleRec({bar.x + fill, bar.y, bar.width - fill, bar.height}, gfx::fade(backCol, alpha));
     if (timeOnTop_ && timeBar_.id) DrawTexturePro(timeBar_, src, frame, {0, 0}, 0, gfx::fade(WHITE, frameAlpha));
     return true;
 }
@@ -739,86 +1030,173 @@ float PsychUi::textWidth(const std::string& s, float size) const {
 
 float PsychUi::lineHeight(float size) const { return size * fontScale_; }
 
-// Alphabet's bold letters: "A bold0000" in the original game, "a bold
-// instance 10000" in Psych 0.7 and later; symbols go by the character itself
-// ("& bold") or by name ("question bold", "question mark bold"...).
-const PsychUi::Frame* PsychUi::letter(char c) const {
+// --------------------------------------------------------------- Alphabet --
+
+const PsychUi::Glyph* PsychUi::glyph(char c, bool bold) const {
     const unsigned char u = (unsigned char)c;
-    if (u >= letterOf_.size()) return findLetter(c);
-    if (!letterKnown_[u]) {
-        letterOf_[u] = findLetter(c);
-        letterKnown_[u] = true;
+    if (u >= 128) return nullptr;
+    auto& known = bold ? boldKnown_ : normalKnown_;
+    auto& table = bold ? boldGlyphs_ : normalGlyphs_;
+    if (!known[u]) {
+        table[u] = findGlyph(c, bold);
+        known[u] = true;
     }
-    return letterOf_[u];
+    return table[u].frames.empty() ? nullptr : &table[u];
 }
 
-const PsychUi::Frame* PsychUi::findLetter(char c) const {
+PsychUi::Glyph PsychUi::findGlyph(char c, bool bold) const {
+    Glyph g;
+    alphaOffset(c, bold, g.offX, g.offY);
     std::vector<std::string> wants;
+    const std::string style = bold ? " bold" : " normal";
     if (std::isalpha((unsigned char)c)) {
-        wants = {std::string(1, char(std::toupper((unsigned char)c))) + " bold",
-                 std::string(1, char(std::tolower((unsigned char)c))) + " bold"};
+        const char lo = char(std::tolower((unsigned char)c));
+        const char up = char(std::toupper((unsigned char)c));
+        if (bold) {
+            wants = {std::string(1, lo) + " bold", std::string(1, up) + " bold"};
+        } else if (std::isupper((unsigned char)c)) {
+            wants = {std::string(1, lo) + " uppercase", std::string(1, up) + " uppercase",
+                     std::string(1, lo) + " bold", std::string(1, up) + " bold"};
+        } else {
+            wants = {std::string(1, lo) + " lowercase", std::string(1, lo) + " bold"};
+        }
     } else if (std::isdigit((unsigned char)c)) {
-        wants = {std::string(1, c) + " bold"};
+        wants = {std::string(1, c) + style, std::string(1, c) + " bold"};
     } else {
         static const std::pair<char, std::vector<const char*>> names[] = {
-            {'?', {"question", "question mark"}}, {'!', {"exclamation", "exclamation point"}}, {'.', {"period"}},
-            {',', {"comma"}}, {'\'', {"apostrophe"}}, {'"', {"quote"}}, {'-', {"dash"}}, {'&', {"amp"}},
-            {'(', {"start parentheses"}}, {')', {"end parentheses"}}, {'/', {"forward slash"}}};
-        wants = {std::string(1, c) + " bold"};
+            {'?', {"question", "question mark"}}, {'!', {"exclamation", "exclamation point"}},
+            {'.', {"period"}}, {',', {"comma"}}, {'\'', {"apostrophe"}}, {'"', {"quote"}},
+            {'/', {"forward slash"}}, {'\\', {"back slash"}}, {'-', {"dash"}},
+            {'&', {"amp"}}, {'(', {"start parentheses"}}, {')', {"end parentheses"}}};
+        wants.push_back(std::string(1, c) + style);
         for (const auto& [ch, list] : names)
             if (ch == c)
-                for (const char* n : list) wants.push_back(std::string(n) + " bold");
+                for (const char* n : list) wants.push_back(std::string(n) + style);
+        if (!bold) {
+            wants.push_back(std::string(1, c) + " bold");
+            for (const auto& [ch, list] : names)
+                if (ch == c)
+                    for (const char* n : list) wants.push_back(std::string(n) + " bold");
+        }
     }
-    for (const std::string& want : wants)
+    for (const std::string& want : wants) {
+        std::vector<std::pair<int, Frame>> matched;
         for (const auto& [name, fr] : letters_) {
             if (name.size() <= want.size() || name.compare(0, want.size(), want) != 0) continue;
-            const std::string rest = name.substr(want.size());
-            const bool frameNo = std::all_of(rest.begin(), rest.end(), [](char d) { return std::isdigit((unsigned char)d); });
-            if (frameNo || rest.rfind(" instance", 0) == 0) return &fr;
+            std::string rest = name.substr(want.size());
+            if (rest.rfind(" instance ", 0) == 0) {
+                // e.g. " instance 10000": strip " instance 1" prefix to keep frame index
+                const size_t digitsStart = rest.find_first_of("0123456789");
+                if (digitsStart == std::string::npos) continue;
+                const std::string tail = rest.substr(digitsStart);
+                if (!std::all_of(tail.begin(), tail.end(), [](char d) { return std::isdigit((unsigned char)d); })) continue;
+                matched.push_back({std::atoi(tail.c_str()), fr});
+            } else if (std::all_of(rest.begin(), rest.end(), [](char d) { return std::isdigit((unsigned char)d); })) {
+                matched.push_back({std::atoi(rest.c_str()), fr});
+            }
         }
-    return nullptr;
+        if (!matched.empty()) {
+            std::sort(matched.begin(), matched.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            g.frames.reserve(matched.size());
+            for (const auto& p : matched) g.frames.push_back(p.second);
+            return g;
+        }
+    }
+    return g;
 }
 
-float PsychUi::alphabet(const std::string& s, float x, float y, float height, float alpha) const {
+float PsychUi::alphabet(const std::string& s, float x, float y, float height, float alpha, bool bold, Color tint) const {
     if (!active_ || !alphabet_.id) return -1;
-    const Frame* ref = letter('A');
-    const float scale = height / std::max(1.0f, ref ? ref->fh : 70.0f);
+    const Glyph* ref = glyph('A', true);
+    const float refH = (ref && !ref->frames.empty()) ? ref->frames[0].fh : 68.0f;
+    const float scale = height / std::max(1.0f, refH);
+    const int animTick = int(std::max(0.0, GetTime()) * 24.0);
+    const Color col = gfx::fade(tint, alpha);
     float pen = x;
     for (char c : s) {
-        if (c == ' ') { pen += 40.0f * scale; continue; }
-        const Frame* f = letter(c);
-        if (!f) { pen += 40.0f * scale; continue; }
-        // Letters sit on a shared baseline: the bottom of their untrimmed box.
-        const float w = f->rotated ? f->src.height : f->src.width, h = f->rotated ? f->src.width : f->src.height;
-        const float dx = pen - f->fx * scale, dy = y + (height - f->fh * scale) - f->fy * scale;
-        if (f->rotated)
-            DrawTexturePro(alphabet_, f->src, {dx + w * scale * 0.5f, dy + h * scale * 0.5f, f->src.width * scale, f->src.height * scale},
-                           {f->src.width * scale * 0.5f, f->src.height * scale * 0.5f}, -90.0f, gfx::fade(WHITE, alpha));
+        if (c == ' ') {
+            pen += 28.0f * scale;
+            continue;
+        }
+        const Glyph* g = glyph(c, bold);
+        if (!g || g->frames.empty()) {
+            pen += 28.0f * scale;
+            continue;
+        }
+        const Frame& f = g->frames[size_t(animTick % int(g->frames.size()))];
+        // Letters sit on a shared baseline (y + height), shifted by Psych's AlphaCharacter offset.
+        const float w = f.rotated ? f.src.height : f.src.width;
+        const float h = f.rotated ? f.src.width : f.src.height;
+        const float dx = pen + (g->offX - f.fx) * scale;
+        const float dy = y + (height - f.fh * scale) - (g->offY + f.fy) * scale;
+        if (f.rotated)
+            DrawTexturePro(alphabet_, f.src, {dx + w * scale * 0.5f, dy + h * scale * 0.5f, f.src.width * scale, f.src.height * scale},
+                           {f.src.width * scale * 0.5f, f.src.height * scale * 0.5f}, -90.0f, col);
         else
-            DrawTexturePro(alphabet_, f->src, {dx, dy, w * scale, h * scale}, {0, 0}, 0, gfx::fade(WHITE, alpha));
-        pen += f->fw * scale;
+            DrawTexturePro(alphabet_, f.src, {dx, dy, w * scale, h * scale}, {0, 0}, 0, col);
+        pen += f.fw * scale;
     }
     return pen - x;
 }
 
-float PsychUi::alphabetWidth(const std::string& s, float height) const {
+float PsychUi::alphabetWidth(const std::string& s, float height, bool bold) const {
     if (!active_ || !alphabet_.id) return -1;
-    const Frame* ref = letter('A');
-    const float scale = height / std::max(1.0f, ref ? ref->fh : 70.0f);
+    const Glyph* ref = glyph('A', true);
+    const float refH = (ref && !ref->frames.empty()) ? ref->frames[0].fh : 68.0f;
+    const float scale = height / std::max(1.0f, refH);
     float pen = 0;
     for (char c : s) {
-        if (c == ' ') { pen += 40.0f * scale; continue; }
-        const Frame* f = letter(c);
-        pen += (f ? f->fw : 40.0f) * scale;
+        if (c == ' ') {
+            pen += 28.0f * scale;
+            continue;
+        }
+        const Glyph* g = glyph(c, bold);
+        pen += (g && !g->frames.empty() ? g->frames[0].fw : 28.0f) * scale;
     }
     return pen;
 }
 
-float PsychUi::alphabetCentered(const std::string& s, float cx, float y, float height, float alpha) const {
-    const float w = alphabetWidth(s, height);
+float PsychUi::alphabetCentered(const std::string& s, float cx, float y, float height, float alpha, bool bold, Color tint) const {
+    const float w = alphabetWidth(s, height, bold);
     if (w < 0) return -1;
-    return alphabet(s, cx - w * 0.5f, y, height, alpha);
+    return alphabet(s, cx - w * 0.5f, y, height, alpha, bold, tint);
 }
+
+// --------------------------------------------------------- CheckboxThingie --
+
+bool PsychUi::drawCheckbox(Vector2 pos, bool checked, double changeElapsed, float scale, float alpha) const {
+    if (!active_ || !checkbox_.tex.id) return false;
+    const std::vector<Frame>* seq = nullptr;
+    float pivX = 0.0f, pivY = 0.0f;
+    size_t idx = 0;
+    if (changeElapsed >= 0.0) {
+        const auto& anim = checked ? checkbox_.anim : checkbox_.animRev;
+        const size_t fi = size_t(changeElapsed * 24.0);
+        if (!anim.empty() && fi < anim.size()) {
+            seq = &anim;
+            idx = fi;
+            pivX = checked ? 38.45f : 28.55f;
+            pivY = checked ? 25.30f : 29.60f;
+        }
+    }
+    if (!seq) {
+        if (checked && !checkbox_.checked.empty()) {
+            seq = &checkbox_.checked;
+            pivX = 3.4f;
+            pivY = 11.65f;
+        } else if (!checkbox_.unchecked.empty()) {
+            seq = &checkbox_.unchecked;
+            pivX = 0.0f;
+            pivY = 0.0f;
+        }
+    }
+    if (!seq || seq->empty()) return false;
+    const Frame& f = (*seq)[std::min(idx, seq->size() - 1)];
+    drawSheetFrameTopLeft(checkbox_.tex, f, {pos.x - pivX * scale, pos.y - pivY * scale}, scale, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+// ------------------------------------------------------- Menu & Main Menu --
 
 bool PsychUi::drawMenuBg(int variant, Color tint, float scrollY, float scale) const {
     if (!active_) return false;
@@ -855,19 +1233,129 @@ bool PsychUi::drawMainMenuItem(int which, Vector2 center, bool selected, double 
     const std::vector<Frame>& seq = selected ? (ms.white.empty() ? ms.basic : ms.white) : (ms.basic.empty() ? ms.white : ms.basic);
     if (seq.empty()) return false;
     const Frame& f = seq[size_t(int(std::max(0.0, now) * 24.0) % int(seq.size()))];
-    const float scale = selected ? 0.85f : 0.72f;
-    const float w = f.rotated ? f.src.height : f.src.width;
-    const float h = f.rotated ? f.src.width : f.src.height;
-    const float ox = (-f.fx + w * 0.5f - f.fw * 0.5f) * scale;
-    const float oy = (-f.fy + h * 0.5f - f.fh * 0.5f) * scale;
-    const Color tint = gfx::fade(WHITE, alpha);
-    if (f.rotated) {
-        const Rectangle dst{center.x + ox, center.y + oy, f.src.width * scale, f.src.height * scale};
-        DrawTexturePro(ms.tex, f.src, dst, {dst.width * 0.5f, dst.height * 0.5f}, -90.0f, tint);
+    const float scale = selected ? 0.92f : 0.80f;
+    drawSheetFrameCentered(ms.tex, f, center, scale, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+// ----------------------------------------------------------- Title Screen --
+
+bool PsychUi::drawTitleLogo(double beatElapsed, float alpha) const {
+    if (!active_ || !titleLogo_.tex.id || titleLogo_.frames.empty()) return false;
+    const size_t fi = std::min(titleLogo_.frames.size() - 1, size_t(std::max(0.0, beatElapsed) * 24.0));
+    drawSheetFrameTopLeft(titleLogo_.tex, titleLogo_.frames[fi], {titleLogoX_, titleLogoY_}, 1.0f, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawTitleGf(bool danceRight, double beatElapsed, float alpha) const {
+    if (!active_ || !titleGf_.tex.id || titleGf_.frames.empty()) return false;
+    const int n = int(titleGf_.frames.size());
+    int fi = 0;
+    if (n >= 30) {
+        // Psych TitleState.hx: danceLeft = [30, 0..14], danceRight = [15..29] at 24fps.
+        const int step = std::min(14, int(std::max(0.0, beatElapsed) * 24.0));
+        fi = danceRight ? (15 + step) : (step == 0 ? 29 : step - 1);
     } else {
-        const Rectangle dst{center.x + ox, center.y + oy, w * scale, h * scale};
-        DrawTexturePro(ms.tex, f.src, dst, {dst.width * 0.5f, dst.height * 0.5f}, 0.0f, tint);
+        fi = std::min(n - 1, int(std::max(0.0, beatElapsed) * 24.0));
     }
+    drawSheetFrameTopLeft(titleGf_.tex, titleGf_.frames[size_t(fi)], {titleGfX_, titleGfY_}, 1.0f, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawTitleEnter(bool pressed, bool flashing, double now, double pressedAt, float alpha) const {
+    if (!active_ || !titleEnter_.tex.id) return false;
+    const std::vector<Frame>* seq = nullptr;
+    Color tint = WHITE;
+    float a = alpha;
+    size_t idx = 0;
+    if (pressed) {
+        if (flashing && !titleEnter_.pressed.empty()) {
+            seq = &titleEnter_.pressed;
+            idx = size_t(int(std::max(0.0, now - pressedAt) * 24.0) % int(seq->size()));
+            tint = WHITE;
+        } else if (!titleEnter_.freeze.empty()) {
+            seq = &titleEnter_.freeze;
+            tint = Color{51, 255, 255, 255};
+        } else if (!titleEnter_.idle.empty()) {
+            seq = &titleEnter_.idle;
+            tint = Color{51, 255, 255, 255};
+        }
+    } else {
+        seq = !titleEnter_.idle.empty() ? &titleEnter_.idle : &titleEnter_.freeze;
+        // Psych TitleState.hx: titleTimer oscillates 0..2s, ping-ponging 0xFF33FFFF <-> 0xFF3333CC and alpha 1.0 <-> 0.64.
+        double tt = std::fmod(std::max(0.0, now), 2.0);
+        if (tt > 1.0) tt = 2.0 - tt;
+        const float u = float(tt * tt * (3.0 - 2.0 * tt));  // smooth quad-like ease
+        tint = gfx::mix(Color{51, 255, 255, 255}, Color{51, 51, 204, 255}, u);
+        a *= (1.0f - 0.36f * u);
+    }
+    if (!seq || seq->empty()) return false;
+    drawSheetFrameTopLeft(titleEnter_.tex, (*seq)[std::min(idx, seq->size() - 1)], {titleStartX_, titleStartY_}, 1.0f, gfx::fade(tint, a));
+    return true;
+}
+
+bool PsychUi::drawNewgroundsLogo(Vector2 center, float scale, float alpha) const {
+    if (!active_ || !newgroundsLogo_.id) return false;
+    const float w = float(newgroundsLogo_.width) * scale;
+    const float h = float(newgroundsLogo_.height) * scale;
+    DrawTexturePro(newgroundsLogo_, {0, 0, float(newgroundsLogo_.width), float(newgroundsLogo_.height)},
+                   {center.x - w * 0.5f, center.y - h * 0.5f, w, h}, {0, 0}, 0.0f, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+// ------------------------------------------------------------- Story Mode --
+
+bool PsychUi::drawTracksHeader(Vector2 pos, float alpha) const {
+    if (!active_ || !menuTracks_.id) return false;
+    DrawTexturePro(menuTracks_, {0, 0, float(menuTracks_.width), float(menuTracks_.height)},
+                   {pos.x, pos.y, float(menuTracks_.width), float(menuTracks_.height)}, {0, 0}, 0.0f, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawStoryWeekTitle(int weekIdx, Vector2 center, float alpha, Color tint) const {
+    if (!active_ || weekIdx < 0 || weekIdx >= 2 || !storyWeeks_[weekIdx].id) return false;
+    const Texture2D& t = storyWeeks_[weekIdx];
+    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)},
+                   {center.x - t.width * 0.5f, center.y - t.height * 0.5f, float(t.width), float(t.height)}, {0, 0}, 0.0f,
+                   gfx::fade(tint, alpha));
+    return true;
+}
+
+bool PsychUi::drawDifficulty(int diffIdx, Vector2 center, float alpha, float scale) const {
+    if (!active_ || diffIdx < 0 || diffIdx >= 3 || !storyDiffs_[diffIdx].id) return false;
+    const Texture2D& t = storyDiffs_[diffIdx];
+    const float w = float(t.width) * scale, h = float(t.height) * scale;
+    DrawTexturePro(t, {0, 0, float(t.width), float(t.height)}, {center.x - w * 0.5f, center.y - h * 0.5f, w, h}, {0, 0}, 0.0f,
+                   gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawCampaignArrow(bool right, bool pushed, Vector2 pos, float alpha) const {
+    if (!active_ || !campaignUi_.tex.id) return false;
+    const std::vector<Frame>& seq = right ? (pushed && !campaignUi_.pushRight.empty() ? campaignUi_.pushRight : campaignUi_.arrowRight)
+                                          : (pushed && !campaignUi_.pushLeft.empty() ? campaignUi_.pushLeft : campaignUi_.arrowLeft);
+    if (seq.empty()) return false;
+    drawSheetFrameCentered(campaignUi_.tex, seq[0], pos, 1.0f, gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawStoryStageBg(Rectangle rect, float alpha) const {
+    if (!active_ || !storyStageBg_.id) return false;
+    DrawTexturePro(storyStageBg_, {0, 0, float(storyStageBg_.width), float(storyStageBg_.height)}, rect, {0, 0}, 0.0f,
+                   gfx::fade(WHITE, alpha));
+    return true;
+}
+
+bool PsychUi::drawStoryChar(int which, Vector2 pos, double beatElapsed, bool hey, double heyElapsed, float alpha) const {
+    if (!active_ || which < 0 || which >= 3) return false;
+    const StoryCharSheet& sc = storyChars_[which];
+    if (!sc.tex.id) return false;
+    const std::vector<Frame>& seq = (hey && !sc.confirm.empty()) ? sc.confirm : sc.idle;
+    if (seq.empty()) return false;
+    const double t = hey ? heyElapsed : beatElapsed;
+    const size_t fi = std::min(seq.size() - 1, size_t(std::max(0.0, t) * 24.0));
+    const float s = 0.9f * sc.scale;
+    drawSheetFrameTopLeft(sc.tex, seq[fi], {pos.x - sc.offX, pos.y - sc.offY}, s, gfx::fade(WHITE, alpha));
     return true;
 }
 

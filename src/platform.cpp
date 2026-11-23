@@ -348,12 +348,90 @@ void resetText() {
     j.env->DeleteLocalRef(cls);
 }
 
+static std::string callStringMethod(const char* name) {
+    Jni j;
+    if (!j.env) return {};
+    jclass cls = activityClass(j.env);
+    if (!cls) return {};
+    std::string out;
+    if (jmethodID m = j.env->GetMethodID(cls, name, "()Ljava/lang/String;")) {
+        auto r = static_cast<jstring>(j.env->CallObjectMethod(GetAndroidApp()->activity->clazz, m));
+        std::string err;
+        if (!j.failed(err, name) && r) {
+            const char* u = j.env->GetStringUTFChars(r, nullptr);
+            if (u) out = u;
+            j.env->ReleaseStringUTFChars(r, u);
+        }
+        if (r) j.env->DeleteLocalRef(r);
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+    return out;
+}
+
+std::string configuredStorageDir() { return callStringMethod("getConfiguredStorageDir"); }
+std::string defaultStorageDir() { return callStringMethod("getDefaultStorageDir"); }
+std::string privateStorageDir() { return callStringMethod("getPrivateStorageDir"); }
+
+bool hasExternalStorageAccess() {
+    Jni j;
+    if (!j.env) return false;
+    jclass cls = activityClass(j.env);
+    if (!cls) return false;
+    bool ok = false;
+    if (jmethodID m = j.env->GetMethodID(cls, "hasStorageAccess", "()Z")) {
+        ok = j.env->CallBooleanMethod(GetAndroidApp()->activity->clazz, m) == JNI_TRUE;
+        std::string err;
+        if (j.failed(err, "hasStorageAccess")) ok = false;
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+    return ok;
+}
+
+void requestExternalStorageAccess() {
+    Jni j;
+    if (!j.env) return;
+    jclass cls = activityClass(j.env);
+    if (!cls) return;
+    if (jmethodID m = j.env->GetMethodID(cls, "requestStoragePermission", "()V")) {
+        j.env->CallVoidMethod(GetAndroidApp()->activity->clazz, m);
+        std::string err;
+        j.failed(err, "requestStoragePermission");
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+}
+
+bool setStorageDir(const std::string& path) {
+    Jni j;
+    if (!j.env) return false;
+    jclass cls = activityClass(j.env);
+    if (!cls) return false;
+    bool ok = false;
+    if (jmethodID m = j.env->GetMethodID(cls, "setStorageDir", "(Ljava/lang/String;)Z")) {
+        jstring jp = j.env->NewStringUTF(path.c_str());
+        ok = j.env->CallBooleanMethod(GetAndroidApp()->activity->clazz, m, jp) == JNI_TRUE;
+        j.env->DeleteLocalRef(jp);
+        std::string err;
+        if (j.failed(err, "setStorageDir")) ok = false;
+    }
+    j.env->ExceptionClear();
+    j.env->DeleteLocalRef(cls);
+    return ok;
+}
+
 std::string dataDir() {
+    std::string s = callStringMethod("getStorageDir");
     android_app* app = GetAndroidApp();
-    const char* p = app && app->activity ? app->activity->externalDataPath : nullptr;
-    std::string s = p ? p : "";
     std::error_code ec;
     if (!s.empty()) fs::create_directories(s, ec);
+    if (s.empty() || ec) {
+        const char* p = app && app->activity ? app->activity->externalDataPath : nullptr;
+        s = p ? p : "";
+        ec.clear();
+        if (!s.empty()) fs::create_directories(s, ec);
+    }
     if (s.empty() || ec) s = app && app->activity && app->activity->internalDataPath ? app->activity->internalDataPath : ".";
     if (s.back() != '/') s += '/';
     logInfo("data folder: " + s);
@@ -369,7 +447,10 @@ void prepareDataDir(const std::string& base) {
     if (!app || !app->activity || !app->activity->assetManager) return;
     AAssetManager* mgr = app->activity->assetManager;
     for (const char* d : {
-             "assets/fonts", "assets/shared/images", "assets/shared/images/mainmenu",
+             "assets/fonts", "assets/shared/data",
+             "assets/shared/images", "assets/shared/images/mainmenu",
+             "assets/shared/images/storymenu", "assets/shared/images/menudifficulties",
+             "assets/shared/images/menubackgrounds", "assets/shared/images/menucharacters",
              "assets/shared/images/noteSkins", "assets/shared/images/noteSplashes",
              "assets/shared/images/characters", "assets/shared/images/icons",
              "assets/shared/characters", "assets/shared/stages",
@@ -532,6 +613,12 @@ bool touchEvents() { return false; }
 void takeTouchEvents(std::vector<TouchEvent>&) {}
 void log(const std::string&) {}
 std::string dataDir() { return ""; }
+std::string configuredStorageDir() { return ""; }
+std::string defaultStorageDir() { return ""; }
+std::string privateStorageDir() { return ""; }
+bool hasExternalStorageAccess() { return true; }
+void requestExternalStorageAccess() {}
+bool setStorageDir(const std::string&) { return false; }
 std::string userDir() {
 #if defined(_WIN32)
     const wchar_t* app = _wgetenv(L"APPDATA");

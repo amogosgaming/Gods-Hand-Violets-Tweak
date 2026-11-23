@@ -212,34 +212,76 @@ void draw(Rectangle box, int layers) {
 
 Image render(int size, int layers, bool rounded) { return renderFor(size, layers, rounded, CharId::Hand); }
 
-void applyToWindow() {
+static Image loadPsychIcon(const std::string& baseDir, const char* name) {
+    std::vector<std::string> roots;
+    if (!baseDir.empty()) {
+        std::string b = baseDir;
+        if (b.back() != '/' && b.back() != '\\') b += '/';
+        roots.push_back(b + "assets/shared/images/");
+        roots.push_back(b + "assets/images/");
+    }
+    roots.push_back("assets/shared/images/");
+    roots.push_back("assets/images/");
+    for (const std::string& r : roots) {
+        const std::string p = r + name;
+        if (FileExists(p.c_str())) {
+            Image img = LoadImage(p.c_str());
+            if (img.data) {
+                ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+                return img;
+            }
+        }
+    }
+    return Image{};
+}
+
+void applyToWindow(const std::string& baseDir) {
     if (platform::kAndroid) return;  // the launcher's icon is the APK's
 #if defined(_WIN32)
+    (void)baseDir;
     // The program's own icon resource (GLFW_ICON, src/windows/godshand.rc)
-    // is the window's already, with a picture drawn for each size.
+    // is the window's already, built from Psych Engine's icons.
 #elif defined(__APPLE__)
-    Image big = render(512, Both, true);
+    Image big = loadPsychIcon(baseDir, "iconOG.png");
+    if (!big.data) big = render(512, Both, true);
+    else if (big.width != 512 || big.height != 512) ImageResize(&big, 512, 512);
     setDockIcon(big);
     UnloadImage(big);
 #else
-    // X11 picks the size it needs from these (Wayland uses the .desktop
-    // file's). 128 pixels at most: taskbars and window switchers show less,
-    // and the game starts a little sooner.
-    static const int kSizes[] = {16, 24, 32, 48, 64, 128};
+    // X11 picks the size it needs from these (Wayland uses the .desktop file's).
     std::vector<Image> icons;
-    Image big = render(128, Both, true);
-    for (int s : kSizes) {
-        Image copy = ImageCopy(big);
-        if (s != 128) ImageResize(&copy, s, s);
-        icons.push_back(copy);
+    Image og = loadPsychIcon(baseDir, "iconOG.png");
+    auto addSize = [&](int s, const char* exact) {
+        Image img = exact ? loadPsychIcon(baseDir, exact) : Image{};
+        if (!img.data && og.data) {
+            img = ImageCopy(og);
+            if (img.width != s || img.height != s) ImageResize(&img, s, s);
+        }
+        if (img.data) icons.push_back(img);
+    };
+    addSize(16, "icon16.png");
+    addSize(24, nullptr);
+    addSize(32, "icon32.png");
+    addSize(48, nullptr);
+    addSize(64, "icon64.png");
+    addSize(128, nullptr);
+    if (icons.empty()) {
+        static const int kSizes[] = {16, 24, 32, 48, 64, 128};
+        Image big = render(128, Both, true);
+        for (int s : kSizes) {
+            Image copy = ImageCopy(big);
+            if (s != 128) ImageResize(&copy, s, s);
+            icons.push_back(copy);
+        }
+        UnloadImage(big);
     }
     SetWindowIcons(icons.data(), int(icons.size()));
     for (Image& i : icons) UnloadImage(i);
-    UnloadImage(big);
+    if (og.data) UnloadImage(og);
 #endif
 }
 
-bool exportAll(const std::string& dir) {
+bool exportAll(const std::string& dir, const std::string& baseDir) {
     std::string d = dir.empty() ? std::string(".") : dir;
     if (d.back() != '/' && d.back() != '\\') d += '/';
     MakeDirectory(d.c_str());
@@ -248,10 +290,28 @@ bool exportAll(const std::string& dir) {
         ok = ExportImage(img, (d + name).c_str()) && ok;
         UnloadImage(img);
     };
+    Image og = loadPsychIcon(baseDir, "iconOG.png");
+    if (og.data) {
+        Image sq = ImageCopy(og);
+        ImageResize(&sq, 1024, 1024);
+        Image rd = ImageCopy(sq);
+        roundCorners(rd);
+        save(rd, "icon-1024.png");
+        save(sq, "icon-square-1024.png");
+        Image bg = GenImageColor(1024, 1024, Color{24, 12, 44, 255});
+        save(bg, "android-background-1024.png");
+        Image fg = GenImageColor(1024, 1024, BLANK);
+        Image scaled = ImageCopy(og);
+        const int sz = 626;
+        ImageResize(&scaled, sz, sz);
+        ImageDraw(&fg, scaled, {0, 0, float(sz), float(sz)}, {(1024.0f - sz) * 0.5f, (1024.0f - sz) * 0.5f, float(sz), float(sz)}, WHITE);
+        UnloadImage(scaled);
+        save(fg, "android-foreground-1024.png");
+        UnloadImage(og);
+        return ok;
+    }
     save(render(1024, Both, true), "icon-1024.png");
     save(render(1024, Both, false), "icon-square-1024.png");
-    // Android's adaptive icon: 108 x 108 dp layers of which a launcher shows
-    // the middle 72 dp, and the figure stays within the middle 66 dp.
     save(renderFor(1024, Background, false, CharId::Hand, 72.0f / 108.0f), "android-background-1024.png");
     save(renderFor(1024, Foreground, false, CharId::Hand, 0.62f), "android-foreground-1024.png");
     return ok;

@@ -1,8 +1,9 @@
-// God's Hand of Principality and Demise. Copyright (c) 2026 deatuamae67-crypto.
+// Astralis Engine. Copyright (c) 2026 deatuamae67-crypto.
 // All rights reserved; see LICENSE. Forking is not allowed: contribute through issues.
 
 package com.godshand.game;
 
+import android.Manifest;
 import android.app.AlertDialog;
 import android.app.NativeActivity;
 import android.content.ClipData;
@@ -10,6 +11,8 @@ import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
@@ -18,6 +21,7 @@ import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
 import android.view.WindowManager;
@@ -37,35 +41,38 @@ import java.util.Set;
 
 /**
  * The game itself is native code (libgodshand.so, started by NativeActivity).
- * This class only hides the system bars, lets the player import mod zips
- * with the system file picker (Freeplay: IMPORT ZIP) and copies the pieces of
- * the Psych Engine interface out of a folder they choose (Options).
+ * This activity hides system bars, manages user-configurable external storage
+ * (defaulting to /storage/emulated/0/.astralis with clean fallback to app-private
+ * storage), imports mod zips, and publishes rendered videos.
  */
 public class GameActivity extends NativeActivity {
     private static final int PICK_ZIPS = 4201;
     private static final int PICK_FOLDER = 4202;
+    private static final int REQ_STORAGE_PERM = 4203;
+    private static final String PREFS_NAME = "astralis_prefs";
+    private static final String PREF_STORAGE_DIR = "storage_dir";
 
     /** Files the Psych Engine interface uses (lower case), wherever they are in the folder. */
     private static final Set<String> PSYCH_FILES = new HashSet<>(Arrays.asList(
             "note_assets.png", "note_assets.xml", "sick.png", "good.png", "bad.png", "shit.png",
             "num0.png", "num1.png", "num2.png", "num3.png", "num4.png", "num5.png", "num6.png", "num7.png", "num8.png",
-            "num9.png", "ready.png", "set.png", "go.png", "healthbar.png", "vcr.ttf", "scrollmenu.ogg", "confirmmenu.ogg",
+            "num9.png", "ready.png", "set.png", "go.png", "healthbar.png", "timebar.png", "vcr.ttf",
+            "alphabet.png", "alphabet.xml", "checkboxanim.png", "checkboxanim.xml",
+            "logobumpin.png", "logobumpin.xml", "gfdancetitle.png", "gfdancetitle.xml", "gfdancetitle.json",
+            "titleenter.png", "titleenter.xml", "scrollmenu.ogg", "confirmmenu.ogg",
             "cancelmenu.ogg", "intro3.ogg", "intro2.ogg", "intro1.ogg", "introgo.ogg", "missnote1.ogg", "hitsound.ogg",
-            "fnf_loss_sfx.ogg", "freakymenu.ogg"));
+            "fnf_loss_sfx.ogg", "freakymenu.ogg", "breakfast.ogg", "tea-time.ogg"));
     /** Folders with nothing of the interface in them (and often very large). */
     private static final Set<String> SKIP_DIRS = new HashSet<>(Arrays.asList(
             "mods", "songs", "videos", "characters", "stages", "weeks", "data", "shaders", "scripts", "custom_events",
             "custom_notetypes", "week1", "week2", "week3", "week4", "week5", "week6", "week7", "manifest", "lime", "flixel",
-            "obj", "export", ".git", "dialogue", "menucharacters", "menubackgrounds", "storymenu", "credits", "icons"));
+            "obj", "export", ".git", "dialogue", "credits", "icons"));
 
     /** Read by the game: 0 idle, 1 picking, 2 copying, 3 done, 4 nothing imported. */
     public static volatile int importState = 0;
     /** Zips copied into mods/ by the last import. */
     public static volatile int importCount = 0;
-    /**
-     * Command-line options for the game, from the intent that started it
-     * (am start ... --es args "--autoplay builtin:x --render"): the emulator test.
-     */
+    /** Command-line options passed via intent (--es args "..."). */
     public static volatile String launchArgs = "";
     /** A line of text asked with askText: 0 idle, 1 asking, 2 typed (textResult), 3 cancelled. */
     public static volatile int textState = 0;
@@ -80,8 +87,129 @@ public class GameActivity extends NativeActivity {
         hideSystemBars();
     }
 
+    /** Default user-accessible storage folder: /storage/emulated/0/.astralis */
+    @SuppressWarnings("deprecation")
+    public String getDefaultStorageDir() {
+        File ext = Environment.getExternalStorageDirectory();
+        if (ext != null) return new File(ext, ".astralis").getAbsolutePath();
+        return "/storage/emulated/0/.astralis";
+    }
+
+    /** App-private external storage folder: /storage/emulated/0/Android/data/<pkg>/files */
+    public String getPrivateStorageDir() {
+        File base = getExternalFilesDir(null);
+        if (base == null) base = getFilesDir();
+        return base.getAbsolutePath();
+    }
+
+    /** Configured storage path (may require external storage permission before it becomes active). */
+    public String getConfiguredStorageDir() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String saved = prefs.getString(PREF_STORAGE_DIR, "");
+        if (saved == null || saved.trim().isEmpty()) return getDefaultStorageDir();
+        return saved.trim();
+    }
+
+    /** True when the app can read/write arbitrary external storage folders like /storage/emulated/0/.astralis. */
+    public boolean hasStorageAccess() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            return Environment.isExternalStorageManager();
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    private boolean isDirWritable(File dir) {
+        if (dir == null) return false;
+        try {
+            if (!dir.exists() && !dir.mkdirs()) return false;
+            if (!dir.isDirectory()) return false;
+            File probe = new File(dir, ".astralis_probe");
+            try (FileOutputStream out = new FileOutputStream(probe)) {
+                out.write(1);
+            }
+            probe.delete();
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Active writable storage folder used by native code, mod importer, and settings. */
+    public File getStorageFile() {
+        String configured = getConfiguredStorageDir();
+        String privPath = getPrivateStorageDir();
+        File priv = new File(privPath);
+        if (configured.equals(privPath)) {
+            priv.mkdirs();
+            return priv;
+        }
+        File target = new File(configured);
+        if (hasStorageAccess() && isDirWritable(target)) return target;
+        if (isDirWritable(target)) return target;
+        priv.mkdirs();
+        return priv;
+    }
+
+    /** Called from native code (platform::dataDir). */
+    public String getStorageDir() {
+        return getStorageFile().getAbsolutePath();
+    }
+
+    /** Saves a new storage path (relative paths are placed under /storage/emulated/0/). */
+    @SuppressWarnings("deprecation")
+    public boolean setStorageDir(String path) {
+        if (path == null) return false;
+        String clean = path.trim();
+        while (clean.length() > 1 && clean.endsWith("/")) clean = clean.substring(0, clean.length() - 1);
+        if (clean.isEmpty()) clean = getDefaultStorageDir();
+        if (!clean.startsWith("/")) {
+            File ext = Environment.getExternalStorageDirectory();
+            clean = new File(ext != null ? ext : new File("/storage/emulated/0"), clean).getAbsolutePath();
+        }
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putString(PREF_STORAGE_DIR, clean).apply();
+        File f = new File(clean);
+        if (hasStorageAccess()) f.mkdirs();
+        return true;
+    }
+
+    /** Opens the Android storage permission prompt / All Files Access settings page. */
+    public void requestStoragePermission() {
+        runOnUiThread(new StoragePermRequester(this));
+    }
+
+    private static final class StoragePermRequester implements Runnable {
+        private final GameActivity activity;
+
+        StoragePermRequester(GameActivity activity) {
+            this.activity = activity;
+        }
+
+        @Override
+        public void run() {
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    Intent i = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    i.setData(Uri.parse("package:" + activity.getPackageName()));
+                    activity.startActivity(i);
+                } catch (Exception e) {
+                    try {
+                        activity.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                    } catch (Exception ignored) { }
+                }
+            } else if (Build.VERSION.SDK_INT >= 23) {
+                activity.requestPermissions(
+                        new String[] {Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                        REQ_STORAGE_PERM);
+            }
+        }
+    }
+
     /**
-     * Rendering mode: copies a finished video into Movies/GodsHand (Android 10
+     * Rendering mode: copies a finished video into Movies/Astralis (Android 10
      * and later), where the gallery shows it. Returns where it went, or "" (the
      * video then stays in the game's own folder). Called from the game thread.
      */
@@ -93,7 +221,7 @@ public class GameActivity extends NativeActivity {
             ContentValues v = new ContentValues();
             v.put(MediaStore.Video.Media.DISPLAY_NAME, name);
             v.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-            v.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/GodsHand");
+            v.put(MediaStore.Video.Media.RELATIVE_PATH, Environment.DIRECTORY_MOVIES + "/Astralis");
             v.put(MediaStore.Video.Media.IS_PENDING, 1);
             uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, v);
             if (uri == null) return "";
@@ -105,7 +233,7 @@ public class GameActivity extends NativeActivity {
             v.clear();
             v.put(MediaStore.Video.Media.IS_PENDING, 0);
             resolver.update(uri, v, null, null);
-            return Environment.DIRECTORY_MOVIES + "/GodsHand/" + name;
+            return Environment.DIRECTORY_MOVIES + "/Astralis/" + name;
         } catch (Exception e) {
             if (uri != null) {
                 try { resolver.delete(uri, null, null); } catch (Exception ignored) { }
@@ -128,7 +256,7 @@ public class GameActivity extends NativeActivity {
                 | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
     }
 
-    /** Called from the game thread: a box with the on-screen keyboard (Freeplay's search). */
+    /** Called from the game thread: a box with the on-screen keyboard. */
     public void askText(final String title, final String initial) {
         textResult = "";
         textState = 1;
@@ -229,8 +357,7 @@ public class GameActivity extends NativeActivity {
 
         @Override
         public void run() {
-            File base = activity.getExternalFilesDir(null);
-            if (base == null) base = activity.getFilesDir();
+            File base = activity.getStorageFile();
             File out = new File(base, "psych-ui");
             deleteTree(out);
             out.mkdirs();
@@ -308,8 +435,7 @@ public class GameActivity extends NativeActivity {
 
         @Override
         public void run() {
-            File base = activity.getExternalFilesDir(null);
-            if (base == null) base = activity.getFilesDir();
+            File base = activity.getStorageFile();
             File dir = new File(base, "mods");
             dir.mkdirs();
             int n = 0;

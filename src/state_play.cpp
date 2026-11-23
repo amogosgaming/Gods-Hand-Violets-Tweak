@@ -374,7 +374,6 @@ void PlayState::draw() {
 
     gfx::beginCanvas();
     drawVisualizer();
-    drawWatermark();
     if (phase_ == Phase::Paused) drawPause();
     if (phase_ == Phase::Dead) drawDead();
     drawDebugLog();
@@ -1747,9 +1746,9 @@ void PlayState::drawHud() {
         const scene::Sprite* io = hudObject(name);
         Vector2 pos;
         float scale = bop;
-        if (io && look) {  // where the object is: its middle is 75 pixels in, whatever its scale
-            pos = {io->x + 75, io->y + 75};
+        if (io && look) {  // Flixel updateHitbox(): io->x is the left edge of the scaled 150*scale box
             scale = io->scaleX;
+            pos = {io->x + 75.0f * scale, io->y + 75.0f};
         } else {
             pos = look ? Vector2{i == 0 ? split - 75.0f * bop + 23.0f : split + 75.0f * bop - 26.0f, frame.y}
                        : Vector2{split + (i == 0 ? -36.0f : 36.0f), by + bh * 0.5f};
@@ -1879,9 +1878,14 @@ void PlayState::drawHud() {
             DrawRectangleRec({c.x - half, gfx::H * 0.55f, half * 2 - 4, gfx::H * 0.45f}, fade(col, touchDown_[l] ? 0.28f : 0.09f));
         }
     }
-    if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && scoreShown))
-        gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, home.y + 67, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
-    if (rate_ != 1.0) gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
+    if (cfg_.practice && !replaying_ && !(s.noteCounter > 0 && scoreShown)) {
+        if (psychText) ui.text("PRACTICE MODE", gfx::W / 2, home.y + 66, 18, fade(kGold, 0.85f), 0, 1.25f);
+        else gfx::text(FontId::Ui, "PRACTICE MODE", gfx::W / 2, home.y + 67, 20, fade(kGold, 0.8f), Align::Center, 1.5f);
+    }
+    if (rate_ != 1.0) {
+        if (psychText) ui.text(TextFormat("%.2fx", rate_), bx + bw + 60, by - 2, 22, kGold, -1, 1.25f);
+        else gfx::text(FontId::Ui, TextFormat("%.2fx", rate_), bx + bw + 60, by - 4, 24, kGold, Align::Left, 1.5f);
+    }
 
     // song progress (Options: time left, time elapsed, song name or off)
     float tbAlpha = 1, ttAlpha = 1, tbgAlpha = 1;
@@ -1901,8 +1905,7 @@ void PlayState::drawHud() {
         std::string timeText = songName ? name : fmtTime(s.timeBar == 1 ? elapsed : remain);
         if (tto && !tto->text.text.empty() && (look || tto->text.text != timeEngineText_)) timeText = tto->text.text;
         const Vector2 tbMoved = hudMoved("timeBar"), ttMoved = hudMoved("timeTxt");
-        const bool custom = timeBarBack_.a || timeBarFill_.a;  // setTimeBarColors()
-        if (!custom && look) {
+        if (look) {
             // Psych: hidden until the song starts, then fading in for 0.5 s
             // (circOut); in Psych songs the objects carry that.
             float in = 1;
@@ -1910,11 +1913,13 @@ void PlayState::drawHud() {
                 const float t = songStartAt_ < 0 ? 0.0f : std::min(1.0f, float(now - songStartAt_) / 0.5f);
                 in = std::sqrt(std::max(0.0f, 1.0f - (t - 1.0f) * (t - 1.0f)));
             }
+            const Color fillCol = timeBarFill_.a ? timeBarFill_ : WHITE;
+            const Color backCol = timeBarBack_.a ? timeBarBack_ : BLACK;
             const Vector2 tbs = L.timeBarSize;
             const Rectangle tframe{(gfx::W - tbs.x) * 0.5f + tbMoved.x, L.timeBarY + tbMoved.y, tbs.x, tbs.y};
             if (tbShown)
                 turned({tframe.x + tframe.width * 0.5f, tframe.y + tframe.height * 0.5f}, tbo ? tbo->angle : 0.0f, tbo ? tbo->scaleX : 1.0f,
-                       tbo ? tbo->scaleY : 1.0f, [&] { ui.timeBar(tframe, prog, in * tbAlpha, in * tbAlpha * tbgAlpha); });
+                       tbo ? tbo->scaleY : 1.0f, [&] { ui.timeBar(tframe, prog, in * tbAlpha, in * tbAlpha * tbgAlpha, fillCol, backCol); });
             const float tx = 42 + gfx::W / 2 - 248 + 200 + ttMoved.x, ty = (songName ? L.timeTxtY + 3 : L.timeTxtY) + ttMoved.y;
             if (ttShown)
                 turned({tx, ty + 16}, tto ? tto->angle : 0.0f, tto ? tto->scaleX : 1.0f, tto ? tto->scaleY : 1.0f, [&] {
@@ -2071,12 +2076,10 @@ void PlayState::drawPsychPause() {
         const float x = 90 + target * 20, y = 320 + target * 156;
         if (y < -100 || y > gfx::H + 40) continue;
         const float al = i == pauseSel_ ? 1.0f : 0.6f;
-        if (ui.alphabet(items[i], x, y, 70, al) < 0) ui.uiText(items[i], x, y, 64, fade(WHITE, al), -1, 2.0f);
+        if (ui.alphabet(items[i], x, y, 68.0f, al) < 0) ui.uiText(items[i], x, y, 64, fade(WHITE, al), -1, 2.0f);
     }
 }
 
-// The engine's watermark in the bottom-left corner, as JS Engine shows its
-// own: the engine and its version (Options: Watermark; hidden with the HUD).
 // ------------------------------------------------------- audio visualizer --
 
 // The top-right corner, 280 pixels wide: as high as the room over the arrows
@@ -2128,24 +2131,22 @@ void PlayState::drawVisualizer() const {
     vis_.draw(visualizerArea(), alpha);
 }
 
-void PlayState::drawWatermark() {
-    const Settings& s = app().settings;
-    if (!s.watermark || s.hideHud) return;
-    static const std::string text = std::string("Astralis v." GH_VERSION " ") + platform::kName;
-    const PsychUi& ui = psychUi();
-    if (psych_ && ui.active() && ui.font()) ui.text(text, 2, gfx::H - 22, 16, fade(WHITE, 0.85f), -1, 1.0f);
-    else gfx::text(FontId::Ui, text, 8, gfx::H - 26, 18, fade(kIvory, 0.75f), Align::Left, 1.2f);
-}
-
 void PlayState::drawDead() {
     App& a = app();
+    const PsychUi& ui = psychUi();
     const float t = float(a.now - deadAt_);
     DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(Color{20, 0, 6, 255}, std::min(0.85f, t * 1.2f)));
     const float al = saturate(t * 1.5f - 0.3f);
-    gfx::glowText(FontId::Title, "GAME OVER", gfx::W / 2, 220, 72, fade(Color{255, 80, 90, 255}, al),
-                  Color{255, 40, 60, 255});
-    gfx::text(FontId::Ui, a.touchMode ? "OK retry      BACK leave" : "ENTER retry      ESC leave", gfx::W / 2, 360, 34,
-              fade(kIvory, al), Align::Center, 2.0f);
+    const char* prompt = a.touchMode ? "OK retry      BACK leave" : "ENTER retry      ESC leave";
+    if (ui.active() || a.settings.psychUi) {
+        if (ui.alphabetCentered("GAME OVER", gfx::W * 0.5f, 220.0f, 76.0f, al, true, Color{255, 80, 90, 255}) < 0)
+            ui.uiText("GAME OVER", gfx::W * 0.5f, 220.0f, 72.0f, fade(Color{255, 80, 90, 255}, al), 0, 2.5f);
+        ui.uiText(prompt, gfx::W * 0.5f, 360.0f, 30.0f, fade(WHITE, al), 0, 2.0f);
+    } else {
+        gfx::glowText(FontId::Title, "GAME OVER", gfx::W / 2, 220, 72, fade(Color{255, 80, 90, 255}, al),
+                      Color{255, 40, 60, 255});
+        gfx::text(FontId::Ui, prompt, gfx::W / 2, 360, 34, fade(kIvory, al), Align::Center, 2.0f);
+    }
 }
 
 void PlayState::drawDebugOverlay() {

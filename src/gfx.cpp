@@ -182,7 +182,8 @@ float randf(float lo, float hi) { return lo + (hi - lo) * float(std::rand()) / f
 
 void init(const std::string& baseDir) {
     g_title = loadFont(baseDir + "assets/fonts/vcr.ttf", 96, g_titleOwned);
-    g_ui = loadFont(baseDir + "assets/fonts/vcr.ttf", 64, g_uiOwned);
+    const std::string sansPath = baseDir + "assets/fonts/sans.ttf";
+    g_ui = loadFont(FileExists(sansPath.c_str()) ? sansPath : (baseDir + "assets/fonts/vcr.ttf"), 64, g_uiOwned);
 
     Image gi = GenImageColor(128, 128, BLANK);
     Color* px = static_cast<Color*>(gi.data);

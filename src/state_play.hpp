@@ -138,7 +138,6 @@ private:
     void drawDead();
     void drawLoading();
     void drawDebugLog();
-    void drawWatermark();
     void syncScriptBpm();
     void updateVisualizer(double dt);
     void drawVisualizer() const;

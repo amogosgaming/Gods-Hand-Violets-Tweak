@@ -371,13 +371,13 @@ int App::run(int argc, char** argv) {
     sfxInit();
     applyVolumes();
     gfx::init(base);
-    if (!makeIconDir.empty()) {  // godshand --make-icon <folder>
-        const bool ok = appicon::exportAll(makeIconDir);
+    if (!makeIconDir.empty()) {  // --make-icon <folder>
+        const bool ok = appicon::exportAll(makeIconDir, base);
         CloseAudioDevice();
         CloseWindow();
         return ok ? 0 : 1;
     }
-    appicon::applyToWindow();  // the window's and the Dock's icon, in the game's own look
+    appicon::applyToWindow(base);  // the window's and the Dock's icon (Psych Engine icon)
     library.scan(base, [](const std::string& zip, double f) {
         // Unpacking a big mod pack takes a while: keep the window alive.
         BeginDrawing();

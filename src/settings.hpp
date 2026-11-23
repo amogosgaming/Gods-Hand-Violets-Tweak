@@ -55,7 +55,7 @@ struct Settings {
     int renderBitrate = 20;   // Mbps
     bool renderAudio = true;
     bool extraKeys = true;     // OFF: every chart has 4 keys, like Psych and JS Engine
-    int noteCounter = 1;       // HUD note counter: 0 off, 1 your side, 2 both sides
+    int noteCounter = 0;       // HUD note counter: 0 off, 1 your side, 2 both sides
     // Mod script errors and warnings on screen: 0 always, 1 only for scripts
     // that set luaDebugMode (as in Psych), 2 never.
     int luaErrors = 0;
@@ -70,8 +70,7 @@ struct Settings {
     float healthBarAlpha = 1.0f;
     // Psych Engine's own options (Visuals and UI, Gameplay).
     bool hideHud = false;       // health bar, icons, score line and ratings hidden
-    bool watermark = true;      // "Astralis Engine (version)" in the bottom-left corner of songs
-    bool visualizer = true;     // the audio visualizer in the top-right corner of songs
+    bool visualizer = false;    // optional audio visualizer in the top-right corner of songs
     bool scoreZoom = true;      // the score line grows a little on each note you hit
     bool botplayText = true;    // BOTPLAY (or REPLAY) on screen while the game plays by itself
     bool comboStacking = true;  // ratings and combo numbers pile up (OFF: only the latest)
@@ -97,7 +96,7 @@ struct Settings {
                                  {0xF9393F, 0xFFFFFF, 0x651038}};
     std::string psychFolder;   // a Psych Engine / JS Engine copy to take that interface from
     bool fullscreen = false;
-    bool showTimings = true;
+    bool showTimings = false;
     bool opponentStrums = true;
     bool touchControls = false;  // on-screen lanes (the mouse acts as a finger)
     int fpsCap = 240;          // 0 = unlimited

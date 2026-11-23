@@ -47,7 +47,10 @@ Color diffColor(const std::string& d) {
 void hints(const char* s) {
     if (app().touchMode) return;  // the on-screen buttons speak for themselves
     DrawRectangleRec({0, gfx::H - 40, gfx::W, 40}, Color{0, 0, 0, 150});
-    gfx::text(FontId::Ui, s, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
+    if (app().psychMenusActive())
+        psychUi().uiText(s, gfx::W * 0.5f, gfx::H - 31.0f, 18.0f, Color{220, 214, 235, 255}, 0, 1.25f);
+    else
+        gfx::text(FontId::Ui, s, gfx::W / 2, gfx::H - 33, 22, Color{220, 214, 235, 255}, Align::Center);
 }
 
 std::vector<std::string> wrap(const std::string& s, size_t width) {
@@ -118,6 +121,8 @@ void waitForBackgroundJobs() {
 
 // ------------------------------------------------------------------ Title --
 
+static bool gTitleIntroSeen = false;
+
 class TitleState : public State {
 public:
     TouchLayout touchLayout() const override {
@@ -126,16 +131,53 @@ public:
         t.tapCode = KEY_ENTER;
         return t;
     }
+    void enter() override {
+        const App& a = app();
+        startAt_ = a.now;
+        beatAt_ = a.now;
+        lastBeat_ = -1;
+        danceRight_ = false;
+        leaving_ = false;
+        introDone_ = gTitleIntroSeen || !a.psychMenusActive();
+        flash_ = 0.0f;
+        const auto& intros = psychUi().introTexts();
+        if (!intros.empty()) {
+            const size_t idx = size_t(std::llabs(static_cast<long long>(a.now * 1000.0)) + 17) % intros.size();
+            wacky_ = intros[idx];
+        } else {
+            wacky_ = {"ASTRALIS ENGINE", "NATIVE C++20"};
+        }
+    }
+    void skipIntro() {
+        if (introDone_) return;
+        introDone_ = true;
+        gTitleIntroSeen = true;
+        flash_ = 1.0f;
+        beatAt_ = app().now;
+    }
     void update(double) override {
         App& a = app();
-        flash_ = std::max(0.0f, flash_ - float(a.dt) * 1.8f);
-        if (!leaving_ && (a.input.accept() || a.input.firstPressed() != 0) && !a.input.pressed(KEY_F11)) {
+        flash_ = std::max(0.0f, flash_ - float(a.dt) * 1.4f);
+        const double bpm = std::max(60.0, psychUi().titleBpm());
+        const int curBeat = int(std::floor(std::max(0.0, a.now - startAt_) * (bpm / 60.0)));
+        if (curBeat != lastBeat_) {
+            lastBeat_ = curBeat;
+            beatAt_ = a.now;
+            danceRight_ = !danceRight_;
+            if (!introDone_ && curBeat >= 16) skipIntro();
+        }
+        const bool hit = (a.input.accept() || a.input.firstPressed() != 0) && !a.input.pressed(KEY_F11);
+        if (!introDone_) {
+            if (hit) skipIntro();
+            return;
+        }
+        if (!leaving_ && hit) {
             leaving_ = true;
             leaveAt_ = a.now;
             flash_ = 1.0f;
             sfxPlay(Sfx::Confirm);
         }
-        if (leaving_ && a.now - leaveAt_ > 0.75) a.change(makeMainMenu());
+        if (leaving_ && a.now - leaveAt_ > 1.0) a.change(makeMainMenu());
     }
     void draw() override {
         App& a = app();
@@ -145,20 +187,57 @@ public:
         if (a.psychMenusActive()) {
             const PsychUi& ui = psychUi();
             DrawRectangleRec({0, 0, gfx::W, gfx::H}, BLACK);
-            gfx::glow({gfx::W * 0.5f, gfx::H * 0.44f}, 320.0f + 50.0f * pulse, fade(Color{110, 90, 210, 255}, 0.22f + 0.12f * pulse));
-            const float s = 1.0f + 0.045f * pulse;
-            if (ui.alphabetCentered("ASTRALIS", gfx::W * 0.5f, 185.0f - 10.0f * pulse, 92.0f * s, 1.0f) < 0)
-                ui.uiText("ASTRALIS", gfx::W * 0.5f, 175.0f - 8.0f * pulse, 92.0f * s, WHITE, 0, 3.0f);
-            if (ui.alphabetCentered("ENGINE", gfx::W * 0.5f, 296.0f, 36.0f, 0.9f) < 0)
-                ui.uiText("ENGINE", gfx::W * 0.5f, 298.0f, 30.0f, kIvory, 0, 2.0f);
-            const float blink = leaving_ ? (std::fmod(float(now) * 14.0f, 2.0f) < 1.0f ? 1.0f : 0.15f)
-                                         : 0.45f + 0.55f * (0.5f + 0.5f * std::sin(float(now) * 3.5f));
-            const char* prompt = a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN";
-            const Color pc = leaving_ ? Color{51, 255, 255, 255} : Color{51, 51, 204, 255};
-            ui.uiText(prompt, gfx::W * 0.5f, 520.0f, 38.0f, fade(leaving_ ? pc : gfx::mix(pc, WHITE, blink), blink), 0, 2.5f);
-            ui.uiText("Astralis Engine v" GH_VERSION, 14.0f, gfx::H - 34.0f, 18.0f, fade(WHITE, 0.75f), -1, 1.5f);
+            if (!introDone_) {
+                auto drawLines = [&](std::initializer_list<std::string> lines, float yOff = 0.0f) {
+                    int idx = 0;
+                    for (const std::string& l : lines) {
+                        const float y = 200.0f + float(idx) * 68.0f + yOff;
+                        if (ui.alphabetCentered(l, gfx::W * 0.5f, y, 66.0f, 1.0f) < 0)
+                            ui.uiText(l, gfx::W * 0.5f, y, 56.0f, WHITE, 0, 2.5f);
+                        ++idx;
+                    }
+                };
+                const int b = std::max(0, lastBeat_);
+                if (b >= 1 && b < 4) {
+                    if (b == 1) drawLines({"PSYCH ENGINE BY", "SHADOW MARIO"});
+                    else if (b == 2) drawLines({"PSYCH ENGINE BY", "SHADOW MARIO", "RIVEREN"});
+                    else drawLines({"PSYCH ENGINE BY", "SHADOW MARIO", "RIVEREN", "ASTRALIS PORT"});
+                } else if (b >= 5 && b < 8) {
+                    if (b == 5) drawLines({"NOT ASSOCIATED", "WITH"}, -40.0f);
+                    else if (b == 6) drawLines({"NOT ASSOCIATED", "WITH", "NEWGROUNDS"}, -40.0f);
+                    else {
+                        drawLines({"NOT ASSOCIATED", "WITH", "NEWGROUNDS"}, -40.0f);
+                        ui.drawNewgroundsLogo({gfx::W * 0.5f, 510.0f}, 0.8f, 1.0f);
+                    }
+                } else if (b >= 9 && b < 12) {
+                    if (b == 9) drawLines({wacky_.first});
+                    else drawLines({wacky_.first, wacky_.second});
+                } else if (b >= 13) {
+                    if (b == 13) drawLines({"FRIDAY"});
+                    else if (b == 14) drawLines({"FRIDAY", "NIGHT"});
+                    else drawLines({"FRIDAY", "NIGHT", "FUNKIN"});
+                }
+                gfx::endCanvas();
+                return;
+            }
+            const double beatElapsed = std::max(0.0, now - beatAt_);
+            const bool drewGf = ui.drawTitleGf(danceRight_, beatElapsed, 1.0f);
+            const bool drewLogo = ui.drawTitleLogo(beatElapsed, 1.0f);
+            const bool drewEnter = ui.drawTitleEnter(leaving_, a.settings.flashing, now, leaveAt_, 1.0f);
+            if (!drewGf && !drewLogo) {
+                const float s = 1.0f + 0.045f * pulse;
+                if (ui.alphabetCentered("ASTRALIS", gfx::W * 0.5f, 185.0f - 10.0f * pulse, 92.0f * s, 1.0f) < 0)
+                    ui.uiText("ASTRALIS", gfx::W * 0.5f, 175.0f - 8.0f * pulse, 92.0f * s, WHITE, 0, 3.0f);
+            }
+            if (!drewEnter) {
+                const float blink = leaving_ ? (std::fmod(float(now) * 14.0f, 2.0f) < 1.0f ? 1.0f : 0.15f)
+                                             : 0.45f + 0.55f * (0.5f + 0.5f * std::sin(float(now) * 3.5f));
+                const char* prompt = a.touchMode ? "TAP TO BEGIN" : "PRESS ENTER TO BEGIN";
+                const Color pc = leaving_ ? Color{51, 255, 255, 255} : Color{51, 51, 204, 255};
+                ui.uiText(prompt, gfx::W * 0.5f, 576.0f, 38.0f, fade(leaving_ ? pc : gfx::mix(pc, WHITE, blink), blink), 0, 2.5f);
+            }
             if (!a.mixer.audioOk())
-                ui.uiText("No audio device found - the game will run silently", gfx::W * 0.5f, 580.0f, 20.0f,
+                ui.uiText("No audio device found - the game will run silently", gfx::W * 0.5f, 672.0f, 20.0f,
                           Color{255, 160, 140, 255}, 0, 1.5f);
             if (flash_ > 0 && a.settings.flashing) DrawRectangleRec({0, 0, gfx::W, gfx::H}, fade(WHITE, flash_ * 0.85f));
             gfx::endCanvas();
@@ -181,9 +260,15 @@ public:
     }
 
 private:
+    bool introDone_ = false;
     bool leaving_ = false;
+    bool danceRight_ = false;
+    int lastBeat_ = -1;
+    double startAt_ = 0;
+    double beatAt_ = 0;
     double leaveAt_ = 0;
     float flash_ = 0;
+    std::pair<std::string, std::string> wacky_;
 };
 
 // -------------------------------------------------------------- Main menu --
@@ -310,12 +395,14 @@ public:
         std::vector<const char*> songKeys;
         std::vector<const char*> trackNames;
         Color banner;
+        bool hasStageBg;
+        bool hasDad;
     };
     static const std::vector<WeekDef>& weeks() {
         static const std::vector<WeekDef> w = {
-            {"week:tutorial", "TUTORIAL", "TEACHING TIME", {"tutorial"}, {"Tutorial"}, Color{249, 207, 81, 255}},
+            {"week:tutorial", "TUTORIAL", "TEACHING TIME", {"tutorial"}, {"Tutorial"}, Color{249, 207, 81, 255}, false, false},
             {"week:week1", "WEEK 1", "DADDY DEAREST", {"bopeebo", "fresh", "dad-battle"}, {"Bopeebo", "Fresh", "Dad Battle"},
-             Color{249, 207, 81, 255}},
+             Color{249, 207, 81, 255}, true, true},
         };
         return w;
     }
@@ -327,6 +414,12 @@ public:
             if (toLower(e.songKey) == k) return e.id;
         return "custom:songs/" + k;
     }
+    void enter() override {
+        beatAt_ = app().now;
+        lastBeat_ = -1;
+        diffChangedAt_ = -10.0;
+        go_ = false;
+    }
     void update(double dt) override {
         App& a = app();
         static const char* diffs[3] = {"Easy", "Normal", "Hard"};
@@ -336,24 +429,41 @@ public:
         animWeek_ = approach(animWeek_, float(week_), 12.0f, float(dt));
         int& d = a.storyDiff;
         d = clampv(d, 0, 2);
+
+        const double bpm = std::max(60.0, psychUi().titleBpm());
+        const int curBeat = int(std::floor(std::max(0.0, a.now) * (bpm / 60.0)));
+        if (curBeat != lastBeat_) {
+            lastBeat_ = curBeat;
+            beatAt_ = a.now;
+        }
+
+        if (go_) {
+            if (a.now - confirmAt_ >= 0.85) {
+                const WeekDef& w = ws[size_t(week_)];
+                std::vector<std::string> ids;
+                for (const char* sk : w.songKeys) ids.push_back(findSongId(a, sk));
+                if (!ids.empty()) {
+                    PlayRequest r;
+                    r.songId = ids[0];
+                    r.diff = diffs[d];
+                    r.story = true;
+                    for (size_t i = 1; i < ids.size(); ++i) r.storyQueue.push_back(ids[i]);
+                    a.change(makePlay(r));
+                }
+            }
+            return;
+        }
         if (a.input.up()) { week_ = (week_ + nw - 1) % nw; sfxPlay(Sfx::Scroll); }
         if (a.input.down()) { week_ = (week_ + 1) % nw; sfxPlay(Sfx::Scroll); }
-        if (a.input.left()) { d = (d + 2) % 3; sfxPlay(Sfx::Scroll); }
-        if (a.input.right()) { d = (d + 1) % 3; sfxPlay(Sfx::Scroll); }
+        if (a.input.left()) { d = (d + 2) % 3; diffChangedAt_ = a.now; sfxPlay(Sfx::Scroll); }
+        if (a.input.right()) { d = (d + 1) % 3; diffChangedAt_ = a.now; sfxPlay(Sfx::Scroll); }
         if (a.input.back()) { sfxPlay(Sfx::Cancel); a.change(makeMainMenu()); }
-        if (a.input.accept() && !go_) {
+        if (a.input.accept()) {
             const WeekDef& w = ws[size_t(week_)];
-            std::vector<std::string> ids;
-            for (const char* sk : w.songKeys) ids.push_back(findSongId(a, sk));
-            if (ids.empty()) return;
+            if (w.songKeys.empty()) return;
             go_ = true;
+            confirmAt_ = a.now;
             sfxPlay(Sfx::Confirm);
-            PlayRequest r;
-            r.songId = ids[0];
-            r.diff = diffs[d];
-            r.story = true;
-            for (size_t i = 1; i < ids.size(); ++i) r.storyQueue.push_back(ids[i]);
-            a.change(makePlay(r));
         }
     }
     void draw() override {
@@ -362,44 +472,68 @@ public:
         static const char* diffs[3] = {"Easy", "Normal", "Hard"};
         const auto& ws = weeks();
         const WeekDef& w = ws[size_t(clampv(week_, 0, int(ws.size()) - 1))];
-        const std::string d = diffs[clampv(a.storyDiff, 0, 2)];
+        const int diffIdx = clampv(a.storyDiff, 0, 2);
+        const std::string d = diffs[diffIdx];
         const ScoreEntry* best = a.scores.get(Scores::key(w.id, d));
         gfx::beginCanvas();
         const PsychUi& ui = psychUi();
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, BLACK);
-        ui.uiText(best ? ("WEEK SCORE: " + fmtThousands(best->score)) : std::string("WEEK SCORE: 0"), 18.0f, 12.0f, 30.0f, WHITE, -1, 2.0f);
-        ui.uiText(w.motto, gfx::W - 18.0f, 12.0f, 30.0f, fade(WHITE, 0.72f), 1, 2.0f);
-        DrawRectangleRec({0, 56, gfx::W, 386}, w.banner);
-        // Clean Psych-style Story Mode banner heading & week emblem.
-        const float pulse = menuPulse();
-        const float titleY = 178.0f - 6.0f * pulse;
-        if (ui.alphabetCentered(w.title, gfx::W * 0.5f, titleY, 82.0f, 1.0f) < 0)
-            ui.uiText(w.title, gfx::W * 0.5f, titleY, 76.0f, WHITE, 0, 3.0f);
-        ui.uiText(w.motto, gfx::W * 0.5f, 290.0f, 30.0f, Color{34, 24, 52, 255}, 0, 0.0f);
-        ui.uiText(week_ == 0 ? "Girlfriend  vs  Boyfriend" : "Daddy Dearest  vs  Boyfriend", gfx::W * 0.5f, 344.0f, 24.0f,
-                  Color{54, 34, 72, 255}, 0, 0.0f);
 
-        const Color pink{229, 87, 119, 255};
-        ui.uiText("TRACKS", 190.0f, 466.0f, 30.0f, pink, 0, 2.0f);
-        for (size_t i = 0; i < w.trackNames.size(); ++i)
-            ui.uiText(w.trackNames[i], 190.0f, 510.0f + float(i) * 36.0f, 26.0f, pink, 0, 1.5f);
-
-        // Selectable week list in the center, Psych-style.
+        // Week title sprites drawn before the top banner so scrolling slides cleanly behind it (Psych StoryMenuState.hx).
         for (int i = 0; i < int(ws.size()); ++i) {
-            const float wy = 508.0f + (float(i) - animWeek_) * 84.0f;
-            if (wy < 452.0f || wy > gfx::H - 44.0f) continue;
+            const float wy = 516.0f + (float(i) - animWeek_) * 120.0f;
+            if (wy < 360.0f || wy > gfx::H + 80.0f) continue;
             const bool on = i == week_;
-            const float alpha = on ? 1.0f : 0.45f;
-            if (ui.alphabetCentered(ws[size_t(i)].title, 640.0f, wy, on ? 56.0f : 44.0f, alpha) < 0)
-                ui.uiText(ws[size_t(i)].title, 640.0f, wy, on ? 48.0f : 38.0f, fade(WHITE, alpha), 0, 2.5f);
+            const float alpha = on ? 1.0f : 0.6f;
+            const bool flashCyan = go_ && on && a.settings.flashing && std::fmod(float(now - confirmAt_) * 16.0f, 2.0f) < 1.0f;
+            const Color tint = flashCyan ? Color{51, 255, 255, 255} : WHITE;
+            if (!ui.drawStoryWeekTitle(i, {gfx::W * 0.5f, wy}, alpha, tint)) {
+                if (ui.alphabetCentered(ws[size_t(i)].title, gfx::W * 0.5f, wy - 28.0f, on ? 56.0f : 44.0f, alpha, true, tint) < 0)
+                    ui.uiText(ws[size_t(i)].title, gfx::W * 0.5f, wy - 22.0f, on ? 48.0f : 38.0f, fade(tint, alpha), 0, 2.5f);
+            }
         }
 
-        const Color dc = diffColor(d);
-        const float bob = std::sin(float(now) * 4.0f) * 4.0f;
-        const std::string diffUpper = toLower(d) == "hard" ? "HARD" : (d == "Easy" ? "EASY" : "NORMAL");
-        ui.uiText("<", 890.0f - bob, 514.0f, 44.0f, WHITE, 0, 2.0f);
-        ui.uiText(diffUpper, 1040.0f, 514.0f, 44.0f, dc, 0, 2.5f);
-        ui.uiText(">", 1190.0f + bob, 514.0f, 44.0f, WHITE, 0, 2.0f);
+        // Top black bar + yellow Psych Story banner (0..442).
+        DrawRectangleRec({0, 0, gfx::W, 56}, BLACK);
+        ui.uiText(best ? ("WEEK SCORE: " + fmtThousands(best->score)) : std::string("WEEK SCORE: 0"), 10.0f, 10.0f, 32.0f, WHITE, -1, 0.0f);
+        ui.uiText(w.motto, gfx::W - 10.0f, 10.0f, 32.0f, fade(WHITE, 0.7f), 1, 0.0f);
+        DrawRectangleRec({0, 56, gfx::W, 386}, w.banner);
+        if (w.hasStageBg) ui.drawStoryStageBg({0, 56, gfx::W, 386}, 1.0f);
+
+        // Psych Story Mode MenuCharacters (x = 1280 * 0.25 * (1 + slot) - 150, y = 70).
+        const double beatElapsed = std::max(0.0, now - beatAt_);
+        const double heyElapsed = go_ ? std::max(0.0, now - confirmAt_) : 0.0;
+        bool anyChar = false;
+        if (w.hasDad) anyChar |= ui.drawStoryChar(0, {170.0f, 70.0f}, beatElapsed, false, 0.0, 1.0f);
+        anyChar |= ui.drawStoryChar(1, {490.0f, 70.0f}, beatElapsed, go_, heyElapsed, 1.0f);
+        anyChar |= ui.drawStoryChar(2, {810.0f, 70.0f}, beatElapsed, false, 0.0, 1.0f);
+        if (!anyChar) {
+            if (ui.alphabetCentered(w.title, gfx::W * 0.5f, 178.0f, 82.0f, 1.0f) < 0)
+                ui.uiText(w.title, gfx::W * 0.5f, 178.0f, 76.0f, WHITE, 0, 3.0f);
+        }
+
+        // Bottom-left TRACKS header + pink track list (Psych StoryMenuState.hx).
+        const Color pink{229, 87, 119, 255};
+        if (!ui.drawTracksHeader({gfx::W * 0.07f, 442.0f + 56.0f}, 1.0f))
+            ui.uiText("TRACKS", 190.0f, 496.0f, 32.0f, pink, 0, 0.0f);
+        for (size_t i = 0; i < w.trackNames.size(); ++i)
+            ui.uiText(w.trackNames[i], 190.0f, 550.0f + float(i) * 32.0f, 32.0f, pink, 0, 0.0f);
+
+        // Bottom-right difficulty selector with campaign_menu_UI_assets arrows & menudifficulties/*.png.
+        const bool pushLeft = a.input.isDown(KEY_LEFT) || a.input.isDown(KEY_A);
+        const bool pushRight = a.input.isDown(KEY_RIGHT) || a.input.isDown(KEY_D);
+        const float diffT = saturate(float((now - diffChangedAt_) / 0.07));
+        const float diffY = 516.0f - 15.0f * (1.0f - diffT);
+        const float diffAlpha = 0.25f + 0.75f * diffT;
+        if (!ui.drawCampaignArrow(false, pushLeft, {898.0f, 516.0f}, 1.0f))
+            ui.uiText("<", 898.0f, 498.0f, 44.0f, WHITE, 0, 2.0f);
+        if (!ui.drawDifficulty(diffIdx, {1066.0f, diffY}, diffAlpha, 1.0f)) {
+            const std::string diffUpper = diffIdx == 2 ? "HARD" : (diffIdx == 0 ? "EASY" : "NORMAL");
+            ui.uiText(diffUpper, 1066.0f, diffY - 18.0f, 44.0f, fade(diffColor(d), diffAlpha), 0, 2.5f);
+        }
+        if (!ui.drawCampaignArrow(true, pushRight, {1234.0f, 516.0f}, 1.0f))
+            ui.uiText(">", 1234.0f, 498.0f, 44.0f, WHITE, 0, 2.0f);
+
         hints("UP/DOWN week   LEFT/RIGHT difficulty   ENTER start the week   ESC back");
         gfx::endCanvas();
     }
@@ -408,6 +542,10 @@ private:
     int week_ = 0;
     float animWeek_ = 0;
     bool go_ = false;
+    int lastBeat_ = -1;
+    double beatAt_ = 0;
+    double confirmAt_ = 0;
+    double diffChangedAt_ = -10.0;
 };
 
 // --------------------------------------------------------------- Freeplay --
@@ -490,9 +628,9 @@ public:
             if (dir || in.accept()) {
                 sfxPlay(Sfx::Scroll);
                 if (modSel_ == 0) m.rate = clampv(std::round((m.rate + 0.05 * (dir ? dir : 1)) * 20.0) / 20.0, 0.5, 2.0);
-                if (modSel_ == 1) m.botplay = !m.botplay;
-                if (modSel_ == 2) m.practice = !m.practice;
-                if (modSel_ == 3) m.mirror = !m.mirror;
+                if (modSel_ == 1) { m.botplay = !m.botplay; lastModToggleRow_ = 1; lastModToggleAt_ = a.now; }
+                if (modSel_ == 2) { m.practice = !m.practice; lastModToggleRow_ = 2; lastModToggleAt_ = a.now; }
+                if (modSel_ == 3) { m.mirror = !m.mirror; lastModToggleRow_ = 3; lastModToggleAt_ = a.now; }
                 if (modSel_ == 4) {
                     m.scrollType = (m.scrollType + (dir ? dir : 1) + 3) % 3;
                     m.scrollValue = m.scrollType == 2 ? 2.5 : 1.0;
@@ -849,33 +987,70 @@ private:
         const App& a = app();
         const Modifiers& m = a.mods;
         const bool psych = a.psychMenusActive();
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 165});
-        if (psych) DrawRectangleRec({340, 130, 600, 450}, Color{0, 0, 0, 225});
-        else DrawRectangleRounded({370, 140, 540, 430}, 0.08f, 12, Color{16, 10, 30, 245});
-        static const char* scrollTypes[3] = {"the chart's", "multiplied", "constant"};
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 175});
+        static const char* scrollTypes[3] = {"Chart", "Multiplicative", "Constant"};
+        if (psych) {
+            const PsychUi& ui = psychUi();
+            // Psych Engine GameplayChangersSubstate: Alphabet list + animated CheckboxThingie.
+            if (ui.alphabetCentered("GAMEPLAY CHANGERS", gfx::W * 0.5f, 36.0f, 52.0f, 1.0f) < 0)
+                ui.uiText("GAMEPLAY CHANGERS", gfx::W * 0.5f, 40.0f, 42.0f, WHITE, 0, 2.0f);
+            struct ModRow {
+                const char* label;
+                bool isBool;
+                bool bval;
+                std::string sval;
+                bool dimmed;
+            };
+            const ModRow items[kModRows] = {
+                {"Playback Rate", false, false, TextFormat("%.2fx", m.rate), false},
+                {"Botplay", true, m.botplay, {}, false},
+                {"Practice Mode", true, m.practice, {}, false},
+                {"Opponent Play", true, m.mirror, {}, false},
+                {"Scroll Type", false, false, scrollTypes[m.scrollType], false},
+                {"Scroll Speed", false, false,
+                 m.scrollType == 0 ? std::string("-")
+                                   : std::string(TextFormat(m.scrollType == 1 ? "x%.2f" : "%.1f", m.scrollValue)),
+                 m.scrollType == 0},
+            };
+            for (int i = 0; i < kModRows; ++i) {
+                const bool on = i == modSel_;
+                const float alpha = items[i].dimmed ? 0.35f : (on ? 1.0f : 0.6f);
+                const float y = 136.0f + float(i) * 80.0f;
+                const float x = items[i].isBool ? 290.0f : 210.0f;
+                if (items[i].isBool) {
+                    const double el = (lastModToggleRow_ == i) ? (a.now - lastModToggleAt_) : -1.0;
+                    if (!ui.drawCheckbox({x - 110.0f, y - 10.0f}, items[i].bval, el, 0.68f, alpha))
+                        ui.uiText(items[i].bval ? "[X]" : "[ ]", x - 90.0f, y + 6.0f, 32.0f, fade(WHITE, alpha), 0, 2.0f);
+                }
+                float lw = ui.alphabet(items[i].label, x, y, 52.0f, alpha, false);
+                if (lw < 0) {
+                    ui.uiText(items[i].label, x, y + 10.0f, 32.0f, fade(WHITE, alpha), -1, 2.0f);
+                    lw = ui.textWidth(items[i].label, 32.0f);
+                }
+                if (!items[i].isBool) {
+                    const float vx = x + lw + 48.0f;
+                    if (ui.alphabet(items[i].sval, vx, y, 50.0f, alpha, true) < 0)
+                        ui.uiText(items[i].sval, vx, y + 10.0f, 32.0f, fade(on ? kGold : WHITE, alpha), -1, 2.0f);
+                }
+            }
+            DrawRectangleRec({110, gfx::H - 96, gfx::W - 220, 48}, Color{0, 0, 0, 175});
+            ui.uiText("Scores are only saved at 1.00x or faster, without botplay or practice", gfx::W * 0.5f, gfx::H - 82.0f, 20.0f,
+                      fade(WHITE, 0.9f), 0, 1.5f);
+            return;
+        }
+        DrawRectangleRounded({370, 140, 540, 430}, 0.08f, 12, Color{16, 10, 30, 245});
         const std::string rows[kModRows] = {
             TextFormat("Playback rate   %.2fx", m.rate), std::string("Botplay   ") + (m.botplay ? "ON" : "OFF"),
             std::string("Practice (no death)   ") + (m.practice ? "ON" : "OFF"),
             std::string("Play as the opponent   ") + (m.mirror ? "ON" : "OFF"), std::string("Scroll speed   ") + scrollTypes[m.scrollType],
             m.scrollType == 0 ? std::string("Scroll value   -")
                               : std::string(TextFormat(m.scrollType == 1 ? "Scroll value   x%.2f" : "Scroll value   %.1f", m.scrollValue))};
-        if (psych) {
-            const PsychUi& ui = psychUi();
-            if (ui.alphabetCentered("GAMEPLAY CHANGERS", 640.0f, 146.0f, 38.0f, 1.0f) < 0)
-                ui.uiText("GAMEPLAY CHANGERS", 640.0f, 150.0f, 34.0f, WHITE, 0, 2.0f);
-            for (int i = 0; i < kModRows; ++i)
-                ui.uiText(rows[i], 640.0f, 220.0f + i * 50.0f, 26.0f,
-                          i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(WHITE, 0.4f) : WHITE), 0, 2.0f);
-            ui.uiText("Scores are only saved at 1.00x or faster, without botplay or practice", 640.0f, 536.0f, 16.0f,
-                      fade(WHITE, 0.7f), 0, 1.25f);
-        } else {
-            gfx::text(FontId::Title, "MODIFIERS", 640, 158, 38, kGold, Align::Center, 2.0f);
-            for (int i = 0; i < kModRows; ++i)
-                gfx::text(FontId::Ui, rows[i], 640, 222.0f + i * 50, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
-                          Align::Center, 1.5f);
-            gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 532, 18,
-                      fade(kIvory, 0.6f), Align::Center);
-        }
+        gfx::text(FontId::Title, "MODIFIERS", 640, 158, 38, kGold, Align::Center, 2.0f);
+        for (int i = 0; i < kModRows; ++i)
+            gfx::text(FontId::Ui, rows[i], 640, 222.0f + i * 50, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
+                      Align::Center, 1.5f);
+        gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 532, 18,
+                  fade(kIvory, 0.6f), Align::Center);
     }
 
     struct IconEntry {
@@ -995,6 +1170,8 @@ private:
     bool modsOpen_ = false;
     static constexpr int kModRows = 6;
     int modSel_ = 0;
+    int lastModToggleRow_ = -1;
+    double lastModToggleAt_ = -10.0;
     bool importing_ = false;
     std::string query_;        // the search (empty: every song)
     bool typing_ = false;      // typing it with the keyboard
