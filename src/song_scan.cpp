@@ -13,6 +13,7 @@
 
 #include "chart.hpp"
 #include "chart_binary.hpp"
+#include "chart_iutk.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
@@ -128,8 +129,9 @@ bool notSongFolder(const std::string& name) {
 
 bool chartName(const std::string& lowerName) {
     return endsWithI(lowerName, ".json") && lowerName != "mod.json" && lowerName != "pack.json" &&
-           lowerName.find("events") == std::string::npos && lowerName.find("-metadata") == std::string::npos &&
-           lowerName.rfind("autochart-", 0) != 0 && lowerName.find(".pfm.") == std::string::npos;
+           lowerName != "metadata.json" && lowerName.find("events") == std::string::npos &&
+           lowerName.find("-metadata") == std::string::npos && lowerName.rfind("autochart-", 0) != 0 &&
+           lowerName.find(".pfm.") == std::string::npos;
 }
 
 // Every chart format has one of these keys ("bpm" or "song" alone are also
@@ -212,6 +214,11 @@ std::string peekChartOpponent(const std::string& chartPath, const std::string& m
         }
     }
     if (chartPath.empty()) return {};
+    if (endsWithI(chartPath, kIutkChartExt) && isIutkChart(chartPath)) {
+        IutkInfo info;
+        if (inspectIutkChart(chartPath, info) && !info.meta.opponent.empty()) return info.meta.opponent;
+        return kIutkDefaultOpponent;
+    }
     if (endsWithI(chartPath, kBinaryChartExt)) {
         std::string skel;
         if (readBinarySkeleton(chartPath, skel)) {
@@ -245,12 +252,17 @@ std::string peekChartOpponent(const std::string& chartPath, const std::string& m
     return opp;
 }
 
-// A chart: Psych JSON, or a binary .ghc (which may be the only one there:
-// a chart of a billion notes kept without its JSON).
+// A chart: Psych JSON, a binary .ghc, or an iutk .bin ("FNC1").
 bool hasChartFile(const fs::path& dir) {
     for (const fs::path& f : listDir(dir, false)) {
         const std::string n = toLower(pathStr(f.filename()));
-        if (endsWithI(n, kBinaryChartExt) ? isBinaryChart(pathStr(f)) : chartName(n) && chartContent(f)) return true;
+        if (endsWithI(n, kBinaryChartExt)) {
+            if (isBinaryChart(pathStr(f))) return true;
+        } else if (endsWithI(n, kIutkChartExt)) {
+            if (isIutkChart(pathStr(f))) return true;
+        } else if (chartName(n) && chartContent(f)) {
+            return true;
+        }
     }
     return false;
 }
@@ -347,8 +359,13 @@ void findInner(const fs::path& root, int depth, std::vector<Root>& inner, std::v
 // their first and last bytes.
 bool looksLikeChart(const fs::path& f, ChartPeek& pk) {
     const std::string n = toLower(pathStr(f.filename()));
-    if (!chartName(n) || n.find("report") != std::string::npos) return false;
     const std::string p = pathStr(f);
+    if (endsWithI(n, kIutkChartExt)) {
+        if (!isIutkChart(p)) return false;
+        pk = peekChart(p);
+        return pk.isChart;
+    }
+    if (!chartName(n) || n.find("report") != std::string::npos) return false;
     pk = peekChart(p);
     if (fileSize(p) < (4u << 20)) {
         std::string text;
@@ -513,9 +530,13 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
             if (isBinaryChart(pathStr(f))) charts.push_back(f);
             continue;
         }
+        if (endsWithI(n, kIutkChartExt)) {  // iutk Engine binary chart (.bin)
+            if (isIutkChart(pathStr(f))) charts.push_back(f);
+            continue;
+        }
         if (!endsWithI(n, ".json")) continue;
         if (n.find("-metadata") != std::string::npos) { meta = f; continue; }
-        if (!chartName(n) || !chartContent(f)) continue;  // dialogue.json and the like
+        if (!chartName(n) || !chartContent(f)) continue;  // dialogue.json, metadata.json and the like
         if (endsWithI(n, "-chart.json")) vsliceChart = f;
         charts.push_back(f);
     }
@@ -560,16 +581,31 @@ void scanSongFolder(std::vector<SongEntry>& songs, const std::string& dirS, cons
         e.metaPath = pathStr(meta);
     } else {
         std::vector<std::pair<std::string, std::string>> found;
+        bool titleFromMeta = false;
         for (const fs::path& c : charts) {
             std::string stem = pathStr(c.stem());
             const std::string ls = toLower(stem);
             std::string diff;
-            if (ls == key || songPathName(stem) == key) diff = "Normal";
-            else if (ls.rfind(key + "-", 0) == 0) diff = prettyName(stem.substr(key.size() + 1));
-            else diff = prettyName(stem);
+            const std::string cp = pathStr(c);
+            if (endsWithI(cp, kIutkChartExt) && isIutkChart(cp)) {
+                IutkInfo info;
+                if (inspectIutkChart(cp, info)) {
+                    if (!titleFromMeta && !info.meta.title.empty()) {
+                        e.title = info.meta.title;
+                        titleFromMeta = true;
+                    }
+                    if (ls == "chart" || ls == key || songPathName(stem) == key)
+                        diff = info.meta.difficulty.empty() ? "Normal" : prettyName(info.meta.difficulty);
+                }
+            }
+            if (diff.empty()) {
+                if (ls == key || songPathName(stem) == key || ls == "chart") diff = "Normal";
+                else if (ls.rfind(key + "-", 0) == 0) diff = prettyName(stem.substr(key.size() + 1));
+                else diff = prettyName(stem);
+            }
             for (auto& f : found)
                 if (equalsI(f.first, diff)) diff += " (2)";
-            found.push_back({diff, pathStr(c)});
+            found.push_back({diff, cp});
         }
         std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
             const int oa = diffOrder(a.first), ob = diffOrder(b.first);
@@ -910,7 +946,9 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 std::string title = trim(pk.song);
                 std::string key = fuzzyKey(title);
                 if (key.empty()) {
-                    title = prettyName(stripVariant(stem));
+                    const bool genericBin = endsWithI(pathStr(f.filename()), kIutkChartExt) && toLower(stem) == "chart";
+                    const std::string fallbackStem = genericBin ? pathStr(ld.dir.filename()) : stripVariant(stem);
+                    title = prettyName(fallbackStem);
                     key = fuzzyKey(title);
                 }
                 if (key.empty()) key = groupKey(title.empty() ? stem : title);
@@ -925,15 +963,15 @@ void scanModsDir(const std::string& modsDirS, SongScan& out) {
                 for (const auto& c : g->charts) copy = copy || sameFile(c.second, pathStr(f));
                 if (copy) continue;
                 // Label: the file name without the song name.
-                std::string label = stem;
-                const std::string sk = fuzzyKey(stem);
-                if (sk.rfind(key, 0) == 0) {
+                std::string label = (endsWithI(pathStr(f.filename()), kIutkChartExt) && toLower(stem) == "chart") ? std::string() : stem;
+                const std::string sk = fuzzyKey(label);
+                if (!label.empty() && sk.rfind(key, 0) == 0) {
                     size_t cut = 0, matched = 0;
-                    while (cut < stem.size() && matched < key.size()) {
-                        if (std::isalnum((unsigned char)stem[cut])) ++matched;
+                    while (cut < label.size() && matched < key.size()) {
+                        if (std::isalnum((unsigned char)label[cut])) ++matched;
                         ++cut;
                     }
-                    label = stem.substr(cut);
+                    label = label.substr(cut);
                     while (!label.empty() && !std::isalnum((unsigned char)label[0])) label.erase(0, 1);
                 }
                 if (pk.pulseForge && !pk.difficulty.empty() && sk.rfind(key, 0) != 0) label = pk.difficulty;

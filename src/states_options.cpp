@@ -143,12 +143,13 @@ public:
             return;
         }
 
-        if (in.up()) {
+        const int ow = in.wheel();
+        if (in.up() || ow > 0) {
             sel_ = (sel_ + int(rows.size()) - 1) % int(rows.size());
             gLastOptionsRow = rows[size_t(sel_)].label;
             sfxPlay(Sfx::Scroll);
         }
-        if (in.down()) {
+        if (in.down() || ow < 0) {
             sel_ = (sel_ + 1) % int(rows.size());
             gLastOptionsRow = rows[size_t(sel_)].label;
             sfxPlay(Sfx::Scroll);
@@ -164,6 +165,7 @@ public:
                     else *r.b = !*r.b;
                     if (r.label == "VSync") platform::setVsync(a.settings.vsync);
                     if (r.b == &a.settings.antialiasing) psychUi().setSmooth(a.settings.antialiasing);
+                    if (r.b == &a.settings.wrMode) a.mods.wrMode = a.settings.wrMode;
                     lastToggleRow_ = sel_;
                     lastToggleAt_ = a.now;
                     changed = true;
@@ -283,8 +285,9 @@ private:
         Input& in = a.input;
         const int nc = int(cats_.size());
         catAnim_ = approach(catAnim_, float(catSel_), 14.0f, float(dt));
-        if (in.up()) { catSel_ = (catSel_ + nc - 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
-        if (in.down()) { catSel_ = (catSel_ + 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
+        const int hw = in.wheel();
+        if (in.up() || hw > 0) { catSel_ = (catSel_ + nc - 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
+        if (in.down() || hw < 0) { catSel_ = (catSel_ + 1) % nc; gLastCategory = catSel_; sfxPlay(Sfx::Scroll); }
         if (in.accept()) {
             const OptionCategory& c = cats_[size_t(catSel_)];
             gLastCategory = catSel_;
@@ -379,33 +382,44 @@ private:
         drawPsychMenuBackground(1, Color{234, 113, 253, 255}, anim_ * 8.0f, false, a.now, 0xEA71FD, menuPulse());
         DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 95});
 
-        // Subtle Psych BaseOptionsMenu top-left section title (scale ~0.6, alpha 0.45).
-        if (ui.alphabet(secTitle, 64.0f, 24.0f, 40.0f, 0.48f, true) < 0)
-            ui.uiText(secTitle, 64.0f, 26.0f, 34.0f, fade(WHITE, 0.55f), -1, 2.0f);
-
-        const float rowStep = 86.0f;
-        const float labelH = 52.0f;
+        const float rowStep = 78.0f;
+        const float labelH = 44.0f;
         for (int i = 0; i < int(rows.size()); ++i) {
             const float d = float(i) - anim_;
-            const float y = 290.0f + d * rowStep;
-            if (y < 60.0f || y > gfx::H - 120.0f) continue;
+            const float y = 276.0f + d * rowStep;
+            // Smooth top/bottom fade instead of hard mid-screen cutoff so options never pop in/out abruptly.
+            if (y < -40.0f || y > gfx::H - 55.0f) continue;
+            float edgeFade = 1.0f;
+            if (y < 76.0f) edgeFade = clampv((y + 20.0f) / 96.0f, 0.0f, 1.0f);
+            if (y > gfx::H - 165.0f) edgeFade = std::min(edgeFade, clampv((gfx::H - 65.0f - y) / 100.0f, 0.0f, 1.0f));
             const Row& r = rows[size_t(i)];
             const bool on = i == sel_;
-            const float alpha = on ? 1.0f : 0.6f;
+            const float alpha = (on ? 1.0f : 0.72f) * edgeFade;
+            if (alpha <= 0.01f) continue;
             const bool isBool = r.kind == Row::Bool;
-            const float baseX = (isBool ? 290.0f : 195.0f) + d * 18.0f;
+            const float cardX = 110.0f + d * 12.0f;
+            const float cardW = gfx::W - 220.0f;
+            DrawRectangleRounded({cardX, y - 10.0f, cardW, 64.0f}, 0.25f, 10,
+                                 on ? Color{36, 28, 68, (unsigned char)(185.0f * edgeFade)}
+                                    : Color{12, 10, 24, (unsigned char)(115.0f * edgeFade)});
+            if (on) {
+                DrawRectangleRoundedLinesEx({cardX, y - 10.0f, cardW, 64.0f}, 0.25f, 10, 2.0f,
+                                            fade(kGold, 0.78f * edgeFade));
+            }
+            const float baseX = cardX + (isBool ? 112.0f : 32.0f);
 
             if (isBool) {
                 const bool checked = r.label == "Fullscreen" ? a.settings.fullscreen : *r.b;
                 const double el = (lastToggleRow_ == i) ? (a.now - lastToggleAt_) : -1.0;
-                if (!ui.drawCheckbox({baseX - 112.0f, y - 14.0f}, checked, el, 0.72f, alpha))
-                    ui.uiText(checked ? "[X]" : "[ ]", baseX - 80.0f, y + 8.0f, 32.0f, fade(WHITE, alpha), 0, 2.0f);
+                if (!ui.drawCheckbox({cardX + 22.0f, y - 16.0f}, checked, el, 0.62f, alpha))
+                    ui.uiText(checked ? "[X]" : "[ ]", cardX + 54.0f, y + 6.0f, 28.0f, fade(WHITE, alpha), 0, 2.0f);
             }
 
-            // Option label in normal (non-bold) Alphabet, matching Psych BaseOptionsMenu.hx.
-            float lw = ui.alphabet(r.label, baseX, y, labelH, alpha, false);
+            // Option label in crisp white/gold bold Alphabet (with fallback to uiText if any character isn't in alphabet).
+            const Color labelCol = on ? kGold : WHITE;
+            float lw = ui.alphabet(r.label, baseX, y, labelH, alpha, true, labelCol);
             if (lw < 0.0f) {
-                ui.uiText(r.label, baseX, y + 10.0f, 30.0f, fade(WHITE, alpha), -1, 2.0f);
+                ui.uiText(r.label, baseX, y + 8.0f, 30.0f, fade(labelCol, alpha), -1, 2.0f);
                 lw = ui.textWidth(r.label, 30.0f);
             }
 
@@ -413,34 +427,43 @@ private:
                 for (int k = 0; k < 2; ++k) {
                     const bool hl = on && k == slot_;
                     const std::string name = (hl && waiting_) ? "press a key..." : keyName(a.settings.keys4[r.lane][k]);
-                    const float x = 840.0f + k * 180.0f;
-                    DrawRectangleRec({x - 80.0f, y + 2.0f, 160.0f, 46.0f}, hl ? Color{255, 255, 255, 78} : Color{0, 0, 0, 150});
-                    ui.uiText(name, x, y + 12.0f, 24.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
+                    const float x = cardX + cardW - 260.0f + k * 170.0f;
+                    DrawRectangleRounded({x - 76.0f, y - 1.0f, 152.0f, 46.0f}, 0.25f, 6,
+                                         hl ? Color{255, 222, 64, (unsigned char)(70.0f * edgeFade)}
+                                            : Color{0, 0, 0, (unsigned char)(155.0f * edgeFade)});
+                    ui.uiText(name, x, y + 10.0f, 24.0f, fade(hl ? kGold : WHITE, alpha), 0, 1.5f);
                 }
-                gfx::drawNote(r.lane, {710.0f, y + 24.0f}, 46.0f, alpha);
+                gfx::drawNote(r.lane, {cardX + cardW - 380.0f, y + 22.0f}, 44.0f, alpha);
                 continue;
             }
             if (r.kind == Row::AsmCpu) {
                 const int activeOpt = clampv(a.settings.noteAsmCpu, 0, 2);
-                const float x0 = 620.0f;
-                const float wChip = 190.0f;
+                const float wChip = 176.0f;
+                const float x0 = cardX + cardW - 3.0f * (wChip + 10.0f) - 14.0f;
                 for (int k = 0; k < 3; ++k) {
                     const auto opt = static_cast<raster::CpuAsmOption>(k);
                     const bool enabled = raster::cpuAsmEnabled(opt);
                     const bool chosen = enabled && (activeOpt == k);
                     const float cx = x0 + float(k) * (wChip + 10.0f);
-                    Color bg = chosen ? Color{70, 115, 70, 210} : (enabled ? Color{30, 30, 42, 185} : Color{22, 22, 28, 170});
-                    DrawRectangleRec({cx, y + 4.0f, wChip, 42.0f}, bg);
-                    DrawRectangleLinesEx({cx, y + 4.0f, wChip, 42.0f}, chosen ? 2.0f : 1.0f,
-                                         chosen ? kGold : (enabled ? fade(WHITE, 0.45f) : fade(WHITE, 0.16f)));
+                    Color bg = chosen ? Color{70, 115, 70, (unsigned char)(210.0f * edgeFade)}
+                                      : (enabled ? Color{30, 30, 42, (unsigned char)(185.0f * edgeFade)}
+                                                 : Color{22, 22, 28, (unsigned char)(170.0f * edgeFade)});
+                    DrawRectangleRec({cx, y + 1.0f, wChip, 42.0f}, bg);
+                    DrawRectangleLinesEx({cx, y + 1.0f, wChip, 42.0f}, chosen ? 2.0f : 1.0f,
+                                         chosen ? fade(kGold, alpha) : (enabled ? fade(WHITE, 0.45f * edgeFade) : fade(WHITE, 0.16f * edgeFade)));
                     const std::string text = enabled ? std::string(raster::cpuAsmLabel(opt))
                                                      : (std::string(raster::cpuAsmLabel(opt)) + " [OFF]");
                     const Color tc = chosen ? kGold : (enabled ? WHITE : Color{135, 135, 148, 255});
-                    ui.uiText(text, cx + wChip * 0.5f, y + 15.0f, 18.0f, fade(tc, alpha), 0, 1.25f);
+                    ui.uiText(text, cx + wChip * 0.5f, y + 12.0f, 18.0f, fade(tc, alpha), 0, 1.25f);
                 }
                 continue;
             }
-            if (isBool) continue;
+            if (isBool) {
+                const bool checked = r.label == "Fullscreen" ? a.settings.fullscreen : *r.b;
+                ui.uiText(checked ? "ON" : "OFF", cardX + cardW - 28.0f, y + 8.0f, 28.0f,
+                          fade(checked ? kGold : Color{190, 195, 215, 255}, alpha), 1, 2.0f);
+                continue;
+            }
 
             std::string val;
             switch (r.kind) {
@@ -457,19 +480,16 @@ private:
                 default: break;
             }
             if (!val.empty()) {
-                const float vx = baseX + lw + 44.0f;
-                const float maxValW = std::max(140.0f, gfx::W - 44.0f - vx);
-                float valH = 50.0f;
-                const float rawW = ui.alphabetWidth(val, valH, true);
-                if (rawW > 0.0f) {
-                    if (rawW > maxValW) valH *= maxValW / rawW;
-                    const float vy = y + (labelH - valH) * 0.5f;
-                    ui.alphabet(val, vx, vy, valH, alpha, true, on ? WHITE : Color{230, 230, 240, 255});
-                } else {
-                    ui.uiText(val, vx, y + 10.0f, 30.0f, fade(on ? kGold : WHITE, alpha), -1, 2.0f);
-                }
+                const std::string shownVal = (r.kind == Row::Number || r.kind == Row::Choice) ? ("< " + val + " >") : val;
+                ui.uiText(shownVal, cardX + cardW - 28.0f, y + 8.0f, 30.0f, fade(on ? kGold : WHITE, alpha), 1, 2.0f);
             }
         }
+
+        // Top-left section header drawn above scrolling rows so it stays crisp and readable.
+        DrawRectangleRounded({36.0f, 12.0f, std::max(320.0f, float(secTitle.size()) * 22.0f + 44.0f), 46.0f},
+                             0.35f, 8, Color{0, 0, 0, 175});
+        if (ui.alphabet(secTitle, 52.0f, 19.0f, 32.0f, 0.92f, true, kGold) < 0)
+            ui.uiText(secTitle, 52.0f, 21.0f, 26.0f, fade(kGold, 0.92f), -1, 2.0f);
 
         const Row& r = rows[size_t(sel_)];
         DrawRectangleRec({100, gfx::H - 114, gfx::W - 200, 66}, Color{0, 0, 0, 155});
@@ -586,6 +606,7 @@ private:
                 {Row::Bool, "Combo stacking", "Stack rating and combo popups instead of replacing the previous one.", &s.comboStacking},
                 {Row::Choice, "Note counter", "Show notes hit under the score line.", nullptr, nullptr, 0, 0, 0, &s.noteCounter, {0, 1, 2},
                  {"Off", "Your side", "Both sides"}},
+                {Row::Bool, "Rendered notes", "Show how many notes are on screen (both actually processed/rendered and total on screen).", &s.showRenderedNotes},
                 {Row::Bool, "Audio visualizer", "Show reactive audio spectrum bars in the top-right corner of songs.", &s.visualizer},
                 {Row::Bool, "Botplay text", "Show BOTPLAY / REPLAY indicator while auto-playing.", &s.botplayText},
                 {Row::Bool, "Menu bg blur", "Blur menu backgrounds when shaders are enabled.", &s.menuBlur},
@@ -604,10 +625,11 @@ private:
 
         // 5. Gameplay (includes hidden "Adjust Delay and Combo" submenu)
         {
-            OptionCategory c{"GAMEPLAY", "Scroll direction, middlescroll, ghost tapping, hit windows, delay & combo.", {}, {}};
+            OptionCategory c{"GAMEPLAY", "Scroll direction, middlescroll, WR Mode, ghost tapping, hit windows, delay & combo.", {}, {}};
             c.rows = {
                 {Row::Bool, "Downscroll", "Notes scroll downward toward receptors at the bottom.", &s.downscroll},
                 {Row::Bool, "Middlescroll", "Center player lanes and dim opponent lanes.", &s.middlescroll},
+                {Row::Bool, "WR Mode", "Disable faking spam: disables note multipliers and spam LOD culling.", &s.wrMode},
                 {Row::Bool, "Opponent notes", "Show opponent receptors and incoming notes.", &s.opponentNotes},
                 {Row::Bool, "Opponent strums", "Light up opponent receptors when the opponent hits notes.", &s.opponentStrums},
                 {Row::Bool, "Ghost tapping", "Pressing lanes with no note nearby does not count as a miss.", &s.ghostTapping},

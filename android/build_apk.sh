@@ -33,7 +33,7 @@ done
 strip="$(ls "$ndk"/toolchains/llvm/prebuilt/*/bin/llvm-strip | head -n1)"
 
 version="$(sed -n 's/^project(Astralis VERSION \([0-9.]*\).*/\1/p' "$root/CMakeLists.txt")"
-[ -n "$version" ] || version="2.0.0"
+[ -n "$version" ] || version="1.3.0"
 IFS=. read -r vmaj vmin vpat <<<"$version"
 code=$((vmaj * 10000 + vmin * 100 + vpat))
 echo "Astralis $version (versionCode $code) for: $abis"

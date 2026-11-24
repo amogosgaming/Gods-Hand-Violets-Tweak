@@ -9,6 +9,7 @@
 #include <set>
 #include <system_error>
 
+#include "chart_iutk.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "json.hpp"
@@ -152,13 +153,16 @@ Prepared Library::prepare(const SongEntry& e, const std::string& diff, bool mirr
         if (p.chart.title.empty()) p.chart.title = e.title;
         p.chart.difficulty = diff;
         // Psych keeps events in a separate events.json next to the charts.
-        for (const fs::path& f : listDir(toPath(e.dataDir), false)) {
-            if (!equalsI(pathStr(f.filename()), "events.json")) continue;
-            std::string evText;
-            if (readTextFile(pathStr(f), evText)) {
-                psych::parseEvents(evText, p.chart.events);
-                std::stable_sort(p.chart.events.begin(), p.chart.events.end(),
-                                 [](const psych::ChartEvent& a, const psych::ChartEvent& b) { return a.timeMs < b.timeMs; });
+        // iutk .bin charts already load sibling events.json inside loadIutkChart().
+        if (!isIutkChart(e.chartPaths[idx])) {
+            for (const fs::path& f : listDir(toPath(e.dataDir), false)) {
+                if (!equalsI(pathStr(f.filename()), "events.json")) continue;
+                std::string evText;
+                if (readTextFile(pathStr(f), evText)) {
+                    psych::parseEvents(evText, p.chart.events);
+                    std::stable_sort(p.chart.events.begin(), p.chart.events.end(),
+                                     [](const psych::ChartEvent& a, const psych::ChartEvent& b) { return a.timeMs < b.timeMs; });
+                }
             }
         }
         {

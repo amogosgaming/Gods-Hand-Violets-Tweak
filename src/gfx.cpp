@@ -181,9 +181,11 @@ const Font& fontOf(FontId f) { return f == FontId::Title ? g_title : g_ui; }
 float randf(float lo, float hi) { return lo + (hi - lo) * float(std::rand()) / float(RAND_MAX); }
 
 void init(const std::string& baseDir) {
-    g_title = loadFont(baseDir + "assets/fonts/vcr.ttf", 96, g_titleOwned);
+    const std::string titlePath = baseDir + "assets/fonts/LuckiestGuy-Regular.ttf";
+    g_title = loadFont(FileExists(titlePath.c_str()) ? titlePath : (baseDir + "assets/fonts/vcr.ttf"), 112, g_titleOwned);
+    const std::string uiPath = baseDir + "assets/fonts/Rajdhani-Bold.ttf";
     const std::string sansPath = baseDir + "assets/fonts/sans.ttf";
-    g_ui = loadFont(FileExists(sansPath.c_str()) ? sansPath : (baseDir + "assets/fonts/vcr.ttf"), 64, g_uiOwned);
+    g_ui = loadFont(FileExists(uiPath.c_str()) ? uiPath : (FileExists(sansPath.c_str()) ? sansPath : (baseDir + "assets/fonts/vcr.ttf")), 72, g_uiOwned);
 
     Image gi = GenImageColor(128, 128, BLANK);
     Color* px = static_cast<Color*>(gi.data);

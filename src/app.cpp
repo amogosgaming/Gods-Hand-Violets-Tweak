@@ -322,6 +322,7 @@ int App::run(int argc, char** argv) {
         mods.botplay = settings.modBotplay;
         mods.practice = settings.modPractice;
         mods.mirror = settings.modMirror;
+        mods.wrMode = settings.wrMode;
         mods.scrollType = settings.modScrollType;
         mods.scrollValue = settings.modScrollValue;
         freeplayDiff = settings.freeplayDiff;

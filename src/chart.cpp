@@ -104,54 +104,74 @@ void Chart::finalize(double baseBpm) {
             if (v2 > maxAllowedKeys && v2 <= kMaxKeys) maxAllowedKeys = v2;
         }
     }
-    notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const Note& n) {
-        return !std::isfinite(n.time) || n.lane >= maxAllowedKeys || n.side > 1;
-    }), notes.end());
+    auto addSatU64 = [](uint64_t& acc, uint64_t add) {
+        acc = (add > std::numeric_limits<uint64_t>::max() - acc) ? std::numeric_limits<uint64_t>::max() : (acc + add);
+    };
     const auto before = [](const Note& a, const Note& b) {
         if (a.time != b.time) return a.time < b.time;
         if (a.side != b.side) return a.side < b.side;
         return a.lane < b.lane;
     };
-    // Charts list their notes in time order nearly always: then only notes at
-    // the same time (a chord, both sides at once) can be out of place, and
-    // sorting each such run gives exactly what sorting everything would.
-    bool inTime = true;
-    for (size_t i = 1; i < notes.size() && inTime; ++i) inTime = !(notes[i].time < notes[i - 1].time);
-    if (inTime) {
-        for (size_t i = 0, j; i < notes.size(); i = j) {
-            for (j = i + 1; j < notes.size() && notes[j].time == notes[i].time;) ++j;
-            if (j - i > 1) std::stable_sort(notes.begin() + std::ptrdiff_t(i), notes.begin() + std::ptrdiff_t(j), before);
-        }
-    } else {
-        std::stable_sort(notes.begin(), notes.end(), before);
+
+    // Fast canonical check: if notes are already valid, sorted by (time, side, lane),
+    // and have no same-lane overlap within 1 ms (always true for iutk v3/v4/v5 charts),
+    // skip both sorting and the deduplication vector copy (saves ~50% peak RAM).
+    bool canonical = true;
+    std::vector<double> lastLaneT(size_t(2 * maxAllowedKeys), -1e300);
+    for (size_t i = 0; i < notes.size(); ++i) {
+        const Note& n = notes[i];
+        if (!std::isfinite(n.time) || n.lane >= maxAllowedKeys || n.side > 1) { canonical = false; break; }
+        if (i > 0 && before(n, notes[i - 1])) { canonical = false; break; }
+        double& lt = lastLaneT[size_t(n.side * maxAllowedKeys + n.lane)];
+        if (std::fabs(n.time - lt) < 1.0) { canonical = false; break; }
+        lt = n.time;
     }
 
-    // Stacked notes (same side+lane within 1 ms) become one note that counts
-    // as all of them: one press hits the whole stack, and the score, combo and
-    // note counts include every note of the file.
-    std::vector<long long> lastKept(size_t(2 * maxAllowedKeys), -1);
-    std::vector<Note> clean;
-    clean.reserve(notes.size());
-    for (const Note& n : notes) {
-        long long& lk = lastKept[size_t(n.side * maxAllowedKeys + n.lane)];
-        if (lk >= 0 && std::fabs(clean[size_t(lk)].time - n.time) < 1.0 &&
-            uint32_t(clean[size_t(lk)].stack) + n.stack <= kMaxStack) {
-            Note& k = clean[size_t(lk)];
-            k.length = std::max(k.length, n.length);
-            if (n.kind == kNormal) k.kind = kNormal;
-            k.stack = uint16_t(k.stack + n.stack);
-            continue;
+    if (!canonical) {
+        notes.erase(std::remove_if(notes.begin(), notes.end(), [&](const Note& n) {
+            return !std::isfinite(n.time) || n.lane >= maxAllowedKeys || n.side > 1;
+        }), notes.end());
+        // Charts list their notes in time order nearly always: then only notes at
+        // the same time (a chord, both sides at once) can be out of place, and
+        // sorting each such run gives exactly what sorting everything would.
+        bool inTime = true;
+        for (size_t i = 1; i < notes.size() && inTime; ++i) inTime = !(notes[i].time < notes[i - 1].time);
+        if (inTime) {
+            for (size_t i = 0, j; i < notes.size(); i = j) {
+                for (j = i + 1; j < notes.size() && notes[j].time == notes[i].time;) ++j;
+                if (j - i > 1) std::stable_sort(notes.begin() + std::ptrdiff_t(i), notes.begin() + std::ptrdiff_t(j), before);
+            }
+        } else {
+            std::stable_sort(notes.begin(), notes.end(), before);
         }
-        lk = (long long)clean.size();
-        clean.push_back(n);
+
+        // Stacked notes (same side+lane within 1 ms) become one note that counts
+        // as all of them: one press hits the whole stack, and the score, combo and
+        // note counts include every note of the file.
+        std::vector<long long> lastKept(size_t(2 * maxAllowedKeys), -1);
+        std::vector<Note> clean;
+        clean.reserve(notes.size());
+        for (const Note& n : notes) {
+            long long& lk = lastKept[size_t(n.side * maxAllowedKeys + n.lane)];
+            if (lk >= 0 && std::fabs(clean[size_t(lk)].time - n.time) < 1.0 &&
+                n.stack <= kMaxStack - clean[size_t(lk)].stack) {
+                Note& k = clean[size_t(lk)];
+                k.length = std::max(k.length, n.length);
+                if (n.kind == kNormal) k.kind = kNormal;
+                k.stack += n.stack;
+                continue;
+            }
+            lk = (long long)clean.size();
+            clean.push_back(n);
+        }
+        notes.swap(clean);
     }
-    notes.swap(clean);
 
     lengthMs = 0;
     playerNotes = opponentNotes = 0;
     for (const Note& n : notes) {
         lengthMs = std::max(lengthMs, n.time + std::max(0.0, n.length));
-        (n.side ? playerNotes : opponentNotes) += n.stack;
+        addSatU64(n.side ? playerNotes : opponentNotes, std::max<uint64_t>(1, n.stack));
     }
 
     std::stable_sort(focus.begin(), focus.end(), [](const FocusPoint& a, const FocusPoint& b) { return a.timeMs < b.timeMs; });
@@ -351,13 +371,13 @@ static bool parsePsych(const json::Document& doc, Chart& out, std::string& err, 
     // and anything from `keys` on belongs to the other side.
     auto addNote = [&](double t, int di, double l, bool must, double stepMs, bool altSec, bool gfSec,
                        const std::string_view typeName, bool hasTypeName, bool altBool, uint16_t streamType,
-                       uint16_t stack = 1) {
+                       uint64_t stack = 1) {
         if (!std::isfinite(t) || di < 0 || di >= kNoteDataValues) return;
         Note n;
         n.time = t;
         n.length = (std::isfinite(l) && l >= stepMs * 0.999) ? l : 0.0;
         n.lane = uint8_t(di % keys);
-        n.stack = std::max<uint16_t>(1, stack);
+        n.stack = std::max<uint64_t>(1, stack);
         if (v1) n.side = di < keys ? 1 : 0;
         else n.side = ((di < keys) ? must : !must) ? 1 : 0;
         if (sideKeys[0]) {  // Leather Engine (see above)
@@ -645,14 +665,14 @@ static bool parsePulseForge(const json::Document& doc, Chart& out, std::string& 
             applyNoteType(t, probe, out);
             streamTypes.push_back(probe.type);
         }
-    auto add = [&](double t, double len, int lane, int owner, uint16_t stack) -> Note* {
+    auto add = [&](double t, double len, int lane, int owner, uint64_t stack) -> Note* {
         if (!std::isfinite(t) || lane < 0) return nullptr;
         Note n;
         n.time = t;
         n.length = std::isfinite(len) && len > 0 ? len : 0;
         n.lane = uint8_t(lane % out.keys);
         n.side = owner == 0 ? 1 : 0;
-        n.stack = std::max<uint16_t>(1, stack);
+        n.stack = std::max<uint64_t>(1, stack);
         if (owner == 2) n.flags |= kFlagGF;
         out.notes.push_back(n);
         return &out.notes.back();

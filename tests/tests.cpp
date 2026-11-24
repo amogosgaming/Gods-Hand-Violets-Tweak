@@ -195,7 +195,7 @@ static void testPsychV1AndExtraKeys() {
     bn.time = 500;
     bn.lane = 0;
     bn.side = 1;
-    bn.stack = kMaxStack;
+    bn.stack = 65535;
     big.notes.push_back(bn);
     bn.side = 0;
     big.notes.push_back(bn);

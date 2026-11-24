@@ -14,10 +14,12 @@
 
 #include "chart.hpp"
 #include "chart_binary.hpp"
+#include "chart_iutk.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
 #include "scene.hpp"
+#include "session.hpp"
 #include "song_scan.hpp"
 
 using namespace gh;
@@ -557,7 +559,247 @@ void testBinaryChartsInMods() {
     fs::remove_all(base);
 }
 
+void testIutkCharts() {
+    const fs::path base = fs::temp_directory_path() / "gh_test_iutk";
+    fs::remove_all(base);
+    std::string err;
+
+    // 1. Round-trip across V2, V3, V4 (separate metadata.json), V5 (embedded), and None (defaults).
+    {
+        IutkMetadata meta;
+        meta.title = "Spam Galaxy";
+        meta.difficulty = "Hard";
+        meta.player = "bf-dark";
+        meta.opponent = "pico";
+        meta.gf = "gf-car";
+        meta.stage = "philly";
+        meta.bpm = 175.0;
+        meta.speed = 3.4;
+        meta.needsVoices = true;
+        meta.keys = 4;
+        meta.sections.push_back({0.0, false, false, false, 4.0, 175.0});
+        meta.sections.push_back({1371.428, true, true, false, 4.0, 200.0});
+
+        std::vector<psych::ChartEvent> events;
+        events.push_back({500.0, "Hey!", "bf", "0.6"});
+        events.push_back({1500.0, "Change Scroll Speed", "1.25", "0.5"});
+
+        std::vector<IutkInputNote> notes;
+        notes.push_back({-50.0, 0, 0, 1});
+        notes.push_back({0.0, 0, 1, 3});
+        notes.push_back({0.0, 1, 2, 2});
+        notes.push_back({250.4, 1, 3, 1});
+        notes.push_back({1000.0, 0, 3, 1});
+        notes.push_back({1000.0, 1, 0, 5});
+
+        // V4 with separate metadata.json + events.json
+        const fs::path d4 = base / "v4_sep";
+        fs::create_directories(d4);
+        IutkWriteOptions opt4;
+        opt4.version = IutkVersion::V4;
+        opt4.metaMode = IutkMetaMode::SeparateFile;
+        opt4.rleMode = IutkRleMode::Optimal;
+        opt4.saveEventsJson = true;
+        IutkWriteResult res4;
+        SCHECK(writeIutkChartNotes(str(d4 / "Chart.bin"), notes, meta, events, opt4, err, &res4));
+        SCHECK(isIutkChart(str(d4 / "Chart.bin")));
+        SCHECK(fs::exists(d4 / "metadata.json") && fs::exists(d4 / "events.json"));
+        SCHECK(res4.cells == 6 && res4.totalNotes == 13 && res4.metaBytes > 0 && res4.eventsBytes > 0);
+
+        IutkInfo info4;
+        SCHECK(inspectIutkChart(str(d4 / "Chart.bin"), info4));
+        SCHECK(info4.valid && info4.version == 4 && !info4.hasEmbeddedMeta && info4.hasSiblingMeta);
+        SCHECK(info4.cellCount == 6 && info4.totalNotes == 13);
+        SCHECK(info4.meta.title == "Spam Galaxy" && info4.meta.opponent == "pico" && info4.meta.player == "bf-dark");
+
+        Chart c4;
+        SCHECK(loadChartFile(str(d4 / "Chart.bin"), "Normal", c4, err));
+        SCHECK(c4.title == "Spam Galaxy" && c4.player == "bf-dark" && c4.opponent == "pico" && c4.gf == "gf-car" && c4.stage == "philly");
+        SCHECK(std::fabs(c4.speed - 3.4) < 1e-6 && std::fabs(c4.bpmAt(0) - 175.0) < 1e-6 && std::fabs(c4.bpmAt(1500.0) - 200.0) < 1e-6);
+        SCHECK(c4.notes.size() == 6 && c4.opponentNotes == 5 && c4.playerNotes == 8 && c4.rawNoteCount == 13);
+        SCHECK(c4.events.size() == 2 && c4.events[0].name == "Hey!" && c4.events[1].name == "Change Scroll Speed");
+        SCHECK(std::fabs(c4.notes[0].time - (-50.0)) < 1e-6 && c4.notes[0].side == 0 && c4.notes[0].lane == 0);
+        SCHECK(c4.notes[5].side == 1 && c4.notes[5].lane == 0 && c4.notes[5].stack == 5);
+
+        // V5 with embedded metadata (no sibling metadata.json)
+        const fs::path d5 = base / "v5_emb";
+        fs::create_directories(d5);
+        IutkWriteOptions opt5 = opt4;
+        opt5.metaMode = IutkMetaMode::Embedded;
+        opt5.compressEmbeddedMeta = true;
+        IutkWriteResult res5;
+        SCHECK(writeIutkChartNotes(str(d5 / "Chart.bin"), notes, meta, events, opt5, err, &res5));
+        SCHECK(!fs::exists(d5 / "metadata.json") && fs::exists(d5 / "events.json"));
+        IutkInfo info5;
+        SCHECK(inspectIutkChart(str(d5 / "Chart.bin"), info5));
+        SCHECK(info5.valid && info5.version == 5 && info5.hasEmbeddedMeta && !info5.hasSiblingMeta);
+        Chart c5;
+        SCHECK(loadChartFile(str(d5 / "Chart.bin"), "Hard", c5, err));
+        SCHECK(c5.title == "Spam Galaxy" && c5.opponent == "pico" && std::fabs(c5.speed - 3.4) < 1e-6);
+        SCHECK(c5.notes.size() == 6 && c5.playerNotes == 8 && c5.opponentNotes == 5 && c5.events.size() == 2);
+
+        // V3 (convert-chart.c compatible) + V2 (flat) with NO metadata -> defaults (speed 7, dad, bf, gf, stage, 120 BPM)
+        const fs::path d3 = base / "v3_none";
+        fs::create_directories(d3);
+        IutkWriteOptions opt3;
+        opt3.version = IutkVersion::V3;
+        opt3.metaMode = IutkMetaMode::None;
+        opt3.saveEventsJson = false;
+        SCHECK(writeIutkChartNotes(str(d3 / "Chart.bin"), notes, meta, {}, opt3, err));
+        SCHECK(!fs::exists(d3 / "metadata.json") && !fs::exists(d3 / "events.json"));
+        Chart c3;
+        SCHECK(loadChartFile(str(d3 / "Chart.bin"), "Normal", c3, err));
+        SCHECK(std::fabs(c3.speed - 7.0) < 1e-9);
+        SCHECK(c3.opponent == "dad" && c3.player == "bf" && c3.gf == "gf" && c3.stage == "stage");
+        SCHECK(std::fabs(c3.bpmAt(0) - 120.0) < 1e-9 && c3.keys == 4);
+        SCHECK(c3.notes.size() == 6 && c3.playerNotes == 8 && c3.opponentNotes == 5);
+
+        const fs::path d2 = base / "v2_none";
+        fs::create_directories(d2);
+        IutkWriteOptions opt2 = opt3;
+        opt2.version = IutkVersion::V2;
+        SCHECK(writeIutkChartNotes(str(d2 / "Chart.bin"), notes, meta, {}, opt2, err));
+        Chart c2;
+        SCHECK(loadChartFile(str(d2 / "Chart.bin"), "Normal", c2, err));
+        SCHECK(std::fabs(c2.speed - 7.0) < 1e-9 && c2.opponent == "dad" && c2.player == "bf" && c2.gf == "gf");
+        SCHECK(c2.notes.size() == 6 && c2.playerNotes == 8 && c2.opponentNotes == 5);
+    }
+
+    // 2. 64-bit huge note stacks (5 billion notes in one cell) through Chart & Session.
+    {
+        const fs::path dHuge = base / "huge_stack";
+        fs::create_directories(dHuge);
+        const uint64_t kFiveBillion = 5000000000ull;
+        std::vector<IutkInputNote> notes = {
+            {100.0, 0, 0, kFiveBillion},
+            {200.0, 1, 2, kFiveBillion},
+            {200.0, 1, 2, 12345ull},  // merged into same cell -> 5,000,012,345
+        };
+        IutkWriteOptions opt;
+        opt.version = IutkVersion::V4;
+        opt.metaMode = IutkMetaMode::None;
+        opt.saveEventsJson = false;
+        SCHECK(writeIutkChartNotes(str(dHuge / "Chart.bin"), notes, IutkMetadata{}, {}, opt, err));
+        Chart ch;
+        SCHECK(loadChartFile(str(dHuge / "Chart.bin"), "Normal", ch, err));
+        SCHECK(ch.notes.size() == 2);
+        SCHECK(ch.opponentNotes == kFiveBillion);
+        SCHECK(ch.playerNotes == kFiveBillion + 12345ull);
+        SCHECK(ch.notes[1].stack == kFiveBillion + 12345ull);
+
+        Session ses;
+        ses.init(ch, SessionConfig{});
+        SCHECK(ses.totalOpponentNotes == kFiveBillion);
+        SCHECK(ses.totalPlayerNotes == kFiveBillion + 12345ull);
+        SCHECK(!ses.hasMines(0, 0) && !ses.hasMines(1, 2));
+        SCHECK(ses.maxSustain(1, 2) == 0.0);
+        ses.update(150.0);
+        SCHECK(ses.opponentHits == static_cast<long long>(kFiveBillion));
+        ses.press(2, 200.0);
+        SCHECK(ses.combo == static_cast<long long>(kFiveBillion + 12345ull));
+        SCHECK(ses.counts[kDivine] == static_cast<long long>(kFiveBillion + 12345ull));
+    }
+
+    // 3. RLE mode optimality check & CRC32 corruption rejection.
+    {
+        const fs::path dRle = base / "rle_check";
+        fs::create_directories(dRle);
+        std::vector<IutkInputNote> spam;
+        spam.reserve(4000);
+        for (int i = 0; i < 1000; ++i) {
+            const double t = double(i * 10);
+            for (uint8_t l = 0; l < 4; ++l) spam.push_back({t, 1, l, (i % 7 == 0) ? 1000ull : 1ull});
+        }
+        IutkWriteOptions oOpt, oFast, oOff;
+        oOpt.metaMode = oFast.metaMode = oOff.metaMode = IutkMetaMode::None;
+        oOpt.saveEventsJson = oFast.saveEventsJson = oOff.saveEventsJson = false;
+        oOpt.rleMode = IutkRleMode::Optimal;
+        oFast.rleMode = IutkRleMode::Fast;
+        oOff.rleMode = IutkRleMode::Off;
+        IutkWriteResult rOpt, rFast, rOff;
+        SCHECK(writeIutkChartNotes(str(dRle / "opt.bin"), spam, IutkMetadata{}, {}, oOpt, err, &rOpt));
+        SCHECK(writeIutkChartNotes(str(dRle / "fast.bin"), spam, IutkMetadata{}, {}, oFast, err, &rFast));
+        SCHECK(writeIutkChartNotes(str(dRle / "off.bin"), spam, IutkMetadata{}, {}, oOff, err, &rOff));
+        SCHECK(rOpt.binBytes <= rFast.binBytes && rFast.binBytes < rOff.binBytes);
+        Chart cOpt, cFast, cOff;
+        SCHECK(loadChartFile(str(dRle / "opt.bin"), "Normal", cOpt, err));
+        SCHECK(loadChartFile(str(dRle / "fast.bin"), "Normal", cFast, err));
+        SCHECK(loadChartFile(str(dRle / "off.bin"), "Normal", cOff, err));
+        SCHECK(cOpt.notes.size() == 4000 && cOpt.playerNotes == cFast.playerNotes && cOpt.playerNotes == cOff.playerNotes);
+
+        // Flip a byte near the end -> CRC32 mismatch must reject the file!
+        std::string bytes;
+        SCHECK(readTextFile(str(dRle / "opt.bin"), bytes) && bytes.size() > 20);
+        bytes[bytes.size() - 2] ^= 0x55;
+        put(dRle / "corrupt.bin", bytes);
+        Chart bad;
+        SCHECK(!loadChartFile(str(dRle / "corrupt.bin"), "Normal", bad, err));
+    }
+
+    // 4. Mod directory layout: [mod]/data/[song]/Chart.bin + metadata.json + events.json
+    //    and a second song with ONLY Chart.bin (defaults applied).
+    {
+        const fs::path mods = base / "mods";
+        const fs::path mod = mods / "iutkpack";
+        put(mod / "songs" / "meta-song" / "Inst.ogg", "x");
+        put(mod / "songs" / "bare-song" / "Inst.ogg", "x");
+
+        // Convert a Psych JSON song into [mod]/data/meta-song/Chart.bin + metadata.json + events.json
+        put(base / "src_meta.json",
+            R"({"song":{"song":"Meta Song","bpm":144,"speed":4.2,"player1":"bf","player2":"senpai","gfVersion":"gf","stage":"school",
+                "events":[[400,[["Hey!","bf","0.5"]]]],"notes":[{"mustHitSection":true,"sectionNotes":[[0,0,0],[250,1,0],[500,4,0]]}]}})");
+        fs::create_directories(mod / "data" / "meta-song");
+        IutkWriteOptions cOpt;
+        cOpt.version = IutkVersion::V4;
+        cOpt.metaMode = IutkMetaMode::SeparateFile;
+        cOpt.saveEventsJson = true;
+        ConvertStats cStats;
+        IutkWriteResult cRes;
+        SCHECK(convertChartToIutk(str(base / "src_meta.json"), str(mod / "data" / "meta-song" / "Chart.bin"), cOpt, err, &cStats,
+                                  &cRes, "Hard"));
+        SCHECK(fs::exists(mod / "data" / "meta-song" / "Chart.bin"));
+        SCHECK(fs::exists(mod / "data" / "meta-song" / "metadata.json"));
+        SCHECK(fs::exists(mod / "data" / "meta-song" / "events.json"));
+
+        // Bare Chart.bin with NO metadata.json
+        fs::create_directories(mod / "data" / "bare-song");
+        IutkWriteOptions bOpt;
+        bOpt.version = IutkVersion::V4;
+        bOpt.metaMode = IutkMetaMode::None;
+        bOpt.saveEventsJson = false;
+        SCHECK(writeIutkChartNotes(str(mod / "data" / "bare-song" / "Chart.bin"),
+                                   {{100.0, 0, 0, 1}, {200.0, 1, 1, 1}}, IutkMetadata{}, {}, bOpt, err));
+
+        SongScan scan;
+        scanModsDir(str(mods), scan);
+        const SongEntry* ms = byTitle(scan, "Meta Song");
+        const SongEntry* bs = byTitle(scan, "Bare Song");
+        SCHECK(ms != nullptr && bs != nullptr);
+        if (ms) {
+            SCHECK(ms->diffs.size() == 1 && ms->diffs[0] == "Hard");
+            SCHECK(endsWithI(ms->chartPaths[0], "Chart.bin"));
+            SCHECK(ms->chartOpponent == "senpai");
+            Chart loaded;
+            SCHECK(loadChartFile(ms->chartPaths[0], ms->diffs[0], loaded, err));
+            SCHECK(loaded.title == "Meta Song" && loaded.opponent == "senpai" && std::fabs(loaded.speed - 4.2) < 1e-6);
+            SCHECK(loaded.events.size() == 1 && loaded.events[0].name == "Hey!");
+        }
+        if (bs) {
+            SCHECK(bs->diffs.size() == 1 && bs->diffs[0] == "Normal");
+            SCHECK(endsWithI(bs->chartPaths[0], "Chart.bin"));
+            SCHECK(bs->chartOpponent == "dad");
+            Chart loaded;
+            SCHECK(loadChartFile(bs->chartPaths[0], bs->diffs[0], loaded, err));
+            SCHECK(std::fabs(loaded.speed - 7.0) < 1e-9 && loaded.opponent == "dad" && loaded.player == "bf" &&
+                   loaded.gf == "gf" && loaded.stage == "stage");
+        }
+    }
+
+    fs::remove_all(base);
+}
+
 void runScanTests() {
+    testIutkCharts();
     testBinaryChartsInMods();
     testFlStudio();
     testPulseForgeCharts();

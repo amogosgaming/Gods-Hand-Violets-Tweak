@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace gh {
 
@@ -24,15 +25,26 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
     for (double& w : cfg_.windows)
         if (!(w > 0)) w = 1.0;
     keys_ = chart.keys;
+    size_t laneCount[2][kMaxKeys]{};
     for (int s = 0; s < 2; ++s)
         for (int l = 0; l < kMaxKeys; ++l) {
             lanes_[s][l].clear();
             cursor_[s][l] = 0;
             activeHold_[s][l] = -1;
             maxSus_[s][l] = 0;
+            hasMines_[s][l] = false;
         }
+    for (const Note& n : chart.notes) {
+        if (n.lane < kMaxKeys && n.side < 2) ++laneCount[n.side][n.lane];
+    }
+    for (int s = 0; s < 2; ++s)
+        for (int l = 0; l < kMaxKeys; ++l)
+            if (laneCount[s][l] > 0) lanes_[s][l].reserve(laneCount[s][l]);
     for (bool& h : held_) h = false;
     totalPlayerNotes = totalOpponentNotes = 0;
+    auto addSatU64 = [](uint64_t& acc, uint64_t add) {
+        acc = (add > std::numeric_limits<uint64_t>::max() - acc) ? std::numeric_limits<uint64_t>::max() : (acc + add);
+    };
     for (size_t i = 0; i < chart.notes.size(); ++i) {
         const Note& n = chart.notes[i];
         if (n.lane >= kMaxKeys) continue;
@@ -43,10 +55,11 @@ void Session::init(const Chart& chart, const SessionConfig& cfg) {
         ln.len = n.length;
         ln.kind = n.kind;
         ln.flags = n.flags;
-        ln.stack = std::max<uint16_t>(1, n.stack);
+        ln.stack = std::max<uint64_t>(1, n.stack);
         lanes_[n.side][n.lane].push_back(ln);
         maxSus_[n.side][n.lane] = std::max(maxSus_[n.side][n.lane], n.length);
-        if (n.kind == kNormal) (n.side == 1 ? totalPlayerNotes : totalOpponentNotes) += ln.stack;
+        if (n.kind == kMine) hasMines_[n.side][n.lane] = true;
+        if (n.kind == kNormal) addSatU64(n.side == 1 ? totalPlayerNotes : totalOpponentNotes, ln.stack);
     }
     events.clear();
     score = 0;
@@ -87,14 +100,26 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
     if (n.len > 0) { n.state = kHolding; ah = (long long)idx; }
     else n.state = kHit;
 
-    // A stack of notes is one press but every note in it counts.
+    // A stack of notes is one press but every note in it counts (overflow-safe for 64-bit iutk stacks).
     const RatingInfo& info = kRatings[r];
-    const long long k = (long long)n.stack * mult_[1];
-    score += (long long)info.score * k;
-    combo += k;
+    constexpr long long kMaxLL = std::numeric_limits<long long>::max();
+    auto mulSatLL = [](uint64_t a, long long b) -> long long {
+        if (b <= 0 || a == 0) return 0;
+        const uint64_t ub = uint64_t(b);
+        if (a > uint64_t(kMaxLL) / ub) return kMaxLL;
+        return static_cast<long long>(a * ub);
+    };
+    auto addSatLL = [](long long& acc, long long add) {
+        if (add > 0 && acc > kMaxLL - add) acc = kMaxLL;
+        else if (add < 0 && acc < std::numeric_limits<long long>::min() - add) acc = std::numeric_limits<long long>::min();
+        else acc += add;
+    };
+    const long long k = mulSatLL(n.stack, mult_[1]);
+    addSatLL(score, mulSatLL(uint64_t(k), info.score));
+    addSatLL(combo, k);
     maxCombo = std::max(maxCombo, combo);
-    counts[r] += k;
-    accSum_ += info.accuracy * k;
+    addSatLL(counts[r], k);
+    accSum_ += info.accuracy * double(k);
     addHealth(info.health);
     // Timing errors for the results graph: past kMaxHitErrors hits only every
     // other one is kept (then every fourth...), so memory stays bounded.
@@ -124,9 +149,12 @@ void Session::hitNote(int lane, size_t idx, double songMs, bool bot) {
 void Session::missNote(int lane, size_t idx) {
     LaneNote& n = lanes_[1][lane][idx];
     n.state = kMissed;
-    misses += n.stack;
+    constexpr long long kMaxLL = std::numeric_limits<long long>::max();
+    const long long st = n.stack > uint64_t(kMaxLL) ? kMaxLL : static_cast<long long>(n.stack);
+    misses = (st > kMaxLL - misses) ? kMaxLL : (misses + st);
     combo = 0;
-    score -= 10LL * n.stack;
+    const long long pen = st > kMaxLL / 10LL ? kMaxLL : (10LL * st);
+    score = (score < std::numeric_limits<long long>::min() + pen) ? std::numeric_limits<long long>::min() : (score - pen);
     addHealth(-0.0475);  // once per stack, like Psych removing the stacked duplicates
     GameEvent e{};
     e.type = GameEvent::PlayerMiss;
@@ -264,7 +292,11 @@ void Session::update(double songMs) {
                 } else {
                     if (oh >= 0) o[size_t(oh)].state = kHeldDone;
                     oh = -1;
-                    opponentHits += (long long)n.stack * mult_[0];
+                    constexpr long long kMaxLL = std::numeric_limits<long long>::max();
+                    const long long addOpp = (mult_[0] > 0 && n.stack > uint64_t(kMaxLL) / uint64_t(mult_[0]))
+                                                 ? kMaxLL
+                                                 : static_cast<long long>(n.stack * uint64_t(std::max(1LL, mult_[0])));
+                    opponentHits = (addOpp > kMaxLL - opponentHits) ? kMaxLL : (opponentHits + addOpp);
                     n.state = n.len > 0 ? kHolding : kHit;
                     if (n.len > 0) oh = (long long)oc;
                     GameEvent e{};

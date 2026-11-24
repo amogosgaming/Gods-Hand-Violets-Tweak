@@ -38,8 +38,8 @@ struct LaneNote {
     uint8_t flags = 0;
     uint8_t state = kPending;
     uint16_t type = 0;
-    uint16_t stack = 1;  // stacked notes of the file it stands for
     uint32_t id = 0;     // index of the note in the chart (script note id)
+    uint64_t stack = 1;  // stacked notes of the file it stands for
 };
 
 struct GameEvent {
@@ -86,6 +86,7 @@ public:
     const std::vector<LaneNote>& lane(int side, int lane) const { return lanes_[side][lane]; }
     std::vector<LaneNote>& laneMut(int side, int lane) { return lanes_[side][lane]; }
     double maxSustain(int side, int lane) const { return maxSus_[side][lane]; }
+    bool hasMines(int side, int lane) const { return hasMines_[side][lane]; }
     bool isHolding(int side, int lane) const { return activeHold_[side][lane] >= 0; }
     long long activeHold(int side, int lane) const { return activeHold_[side][lane]; }
     void setBotplay(bool b) { cfg_.botplay = b; }
@@ -128,6 +129,7 @@ private:
     size_t cursor_[2][kMaxKeys]{};
     long long activeHold_[2][kMaxKeys];
     double maxSus_[2][kMaxKeys]{};
+    bool hasMines_[2][kMaxKeys]{};
     bool held_[kMaxKeys]{};
     double lastMs_ = -1e18;
     double accSum_ = 0;

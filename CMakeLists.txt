@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astralis VERSION 2.0.0 LANGUAGES C CXX)
+project(Astralis VERSION 1.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -156,6 +156,7 @@ add_library(gh_core STATIC
   src/chart.cpp
   src/chart_stream.cpp
   src/chart_binary.cpp
+  src/chart_iutk.cpp
   src/basegame.cpp
   src/builtin_events.cpp
   src/shader_glsl.cpp

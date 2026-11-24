@@ -44,7 +44,7 @@ public:
 
 struct Modifiers {
     double rate = 1.0;
-    bool botplay = false, practice = false, mirror = false;
+    bool botplay = false, practice = false, mirror = false, wrMode = false;
     // Scroll speed, as Psych's gameplay changers: 0 the chart's (or Options'),
     // 1 that times scrollValue, 2 scrollValue whatever the chart says.
     int scrollType = 0;

@@ -35,6 +35,7 @@
 #include "chart_stream.hpp"
 
 #include "chart_binary.hpp"
+#include "chart_iutk.hpp"
 #include "common.hpp"
 #include "flp_import.hpp"
 
@@ -1258,6 +1259,9 @@ bool loadChartFile(const std::string& path, const std::string& difficulty, Chart
         if (!readBinaryChart(path, skeleton, sn, err)) return false;
         return parseChartStreamed(skeleton, sn, difficulty, out, err, extraKeys);
     }
+    if (isIutkChart(path)) {  // iutk Engine binary chart (.bin, "FNC1")
+        return loadIutkChart(path, difficulty, out, err, extraKeys);
+    }
     const uint64_t size = fileSize(path);
     if (size == 0 && !fileExistsAt(path)) { err = "cannot read " + path; return false; }
     // A pipe has no size (gh_tests --chart /dev/stdin, fed by a decompressor):
@@ -1323,6 +1327,17 @@ ChartPeek peekChart(const std::string& path) {
     ChartPeek pk;
     constexpr size_t kWin = 96 * 1024;
     std::string head, tail;
+    if (isIutkChart(path)) {
+        IutkInfo info;
+        if (inspectIutkChart(path, info)) {
+            pk.isChart = true;
+            pk.song = info.meta.title;
+            pk.difficulty = info.meta.difficulty;
+            pk.player2 = info.meta.opponent;
+            pk.stage = info.meta.stage;
+        }
+        return pk;
+    }
     if (isBinaryChart(path)) {  // its JSON part holds the song's fields
         if (!readBinarySkeleton(path, head)) return pk;
         if (head.size() > 2 * kWin) {

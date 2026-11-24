@@ -21,7 +21,7 @@
 #include "scene.hpp"
 
 #ifndef GH_VERSION
-#define GH_VERSION "dev"  // set by CMake from project(VERSION)
+#define GH_VERSION "1.3.0"  // set by CMake from project(VERSION)
 #endif
 
 namespace gh {
@@ -273,7 +273,7 @@ private:
 
 // -------------------------------------------------------------- Main menu --
 
-constexpr const char* kMainItems[] = {"STORY MODE", "FREEPLAY", "CREDITS", "OPTIONS", "QUIT"};
+constexpr const char* kMainItems[] = {"STORY MODE", "FREEPLAY", "EDITORS", "CREDITS", "OPTIONS", "QUIT"};
 constexpr int kMainCount = int(sizeof(kMainItems) / sizeof(kMainItems[0]));
 
 class MainMenuState : public State {
@@ -294,15 +294,17 @@ public:
                         a.songListMode = App::SongListMode::Play;
                         a.change(makeFreeplay());
                         break;
-                    case 2: a.change(makeCredits()); break;
-                    case 3: a.change(makeOptions()); break;
+                    case 2: a.change(makeEditorMenu()); break;
+                    case 3: a.change(makeCredits()); break;
+                    case 4: a.change(makeOptions()); break;
                     default: a.quit = true; break;
                 }
             }
             return;
         }
-        if (a.input.up()) { sel = (sel + kMainCount - 1) % kMainCount; sfxPlay(Sfx::Scroll); }
-        if (a.input.down()) { sel = (sel + 1) % kMainCount; sfxPlay(Sfx::Scroll); }
+        const int w = a.input.wheel();
+        if (a.input.up() || w > 0) { sel = (sel + kMainCount - 1) % kMainCount; sfxPlay(Sfx::Scroll); }
+        if (a.input.down() || w < 0) { sel = (sel + 1) % kMainCount; sfxPlay(Sfx::Scroll); }
         if (a.input.accept()) {
             chosen_ = sel;
             chosenAt_ = a.now;
@@ -324,11 +326,11 @@ public:
         if (a.psychMenusActive()) {
             const PsychUi& ui = psychUi();
             const bool magenta = chosen_ >= 0 && a.settings.flashing && std::fmod(float(now - chosenAt_) * 10.0f, 2.0f) < 1.0f;
-            drawPsychMenuBackground(magenta ? 3 : 0, WHITE, anim_ * 42.0f, true, now, 0xFDE871, pulse);
+            drawPsychMenuBackground(magenta ? 3 : 0, WHITE, anim_ * 38.0f, true, now, 0xFDE871, pulse);
             for (int i = 0; i < kMainCount; ++i) {
                 const bool on = i == a.mainSel;
                 const float d = float(i) - anim_;
-                const float y = 330.0f + d * 130.0f;
+                const float y = 330.0f + d * 120.0f;
                 if (y < -120.0f || y > gfx::H + 120.0f) continue;
                 float itemAlpha = on ? 1.0f : 0.78f;
                 if (chosen_ >= 0) {
@@ -339,34 +341,43 @@ public:
                 int spriteIdx = -1;
                 if (i == 0) spriteIdx = 0;       // story_mode
                 else if (i == 1) spriteIdx = 1;  // freeplay
-                else if (i == 2) spriteIdx = 3;  // credits
-                else if (i == 3) spriteIdx = 2;  // options
+                else if (i == 3) spriteIdx = 3;  // credits
+                else if (i == 4) spriteIdx = 2;  // options
                 bool drawn = false;
                 if (spriteIdx >= 0) drawn = ui.drawMainMenuItem(spriteIdx, {gfx::W * 0.5f, y}, on, now, itemAlpha);
                 if (!drawn) {
-                    const float h = on ? 72.0f : 56.0f;
-                    if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y - h * 0.5f, h, itemAlpha) < 0)
+                    const float h = on ? 74.0f : 56.0f;
+                    if (on) {
+                        DrawRectangleRounded({gfx::W * 0.5f - 230.0f, y - h * 0.5f - 8.0f, 460.0f, h + 16.0f},
+                                             0.35f, 10, Color{0, 0, 0, (unsigned char)(115.0f * itemAlpha)});
+                    }
+                    if (ui.alphabetCentered(items[i], gfx::W * 0.5f, y - h * 0.5f, h, itemAlpha, true, on ? kGold : WHITE) < 0)
                         ui.uiText(items[i], gfx::W * 0.5f, y - h * 0.5f, on ? 56.0f : 44.0f,
                                   fade(on ? kGold : WHITE, itemAlpha), 0, 2.5f);
                 }
             }
-            ui.uiText("Astralis Engine v" GH_VERSION, 12.0f, gfx::H - 88.0f, 18.0f, WHITE, -1, 1.5f);
-            ui.uiText(a.library.report(), 12.0f, gfx::H - 66.0f, 16.0f, fade(WHITE, 0.85f), -1, 1.25f);
             hints("UP/DOWN select   ENTER confirm   7 editors   ESC back   F11 fullscreen");
             gfx::endCanvas();
             return;
         }
         drawMenuBackground(now, 0x8C6CFF, pulse, true);
-        gfx::text(FontId::Title, "ASTRALIS", 60, 40, 44, kGold, Align::Left, 2.0f);
         for (int i = 0; i < kMainCount; ++i) {
             const bool on = i == a.mainSel;
-            const float y = 160.0f + i * 84.0f - (on ? 6.0f : 0.0f);
+            const float d = float(i) - anim_;
+            const float y = 310.0f + d * 82.0f - (on ? 4.0f : 0.0f);
+            if (y < -80.0f || y > gfx::H + 80.0f) continue;
             float size = on ? 56.0f + 4.0f * pulse : 42.0f;
-            Color c = on ? kGold : fade(kIvory, 0.55f);
+            Color c = on ? kGold : fade(kIvory, 0.65f);
             if (chosen_ >= 0 && on && std::fmod(float(now - chosenAt_) * 10.0f, 2.0f) < 1.0f) c = WHITE;
             if (chosen_ >= 0 && !on) c = fade(c, std::max(0.0f, 1.0f - float(now - chosenAt_) * 3.0f));
-            if (on) gfx::glowText(FontId::Title, items[i], gfx::W / 2, y, size, c, Color{255, 180, 80, 255});
-            else gfx::text(FontId::Title, items[i], gfx::W / 2, y + 6, size, c, Align::Center, 2.0f);
+            if (on) {
+                const float tw = gfx::measure(FontId::Title, items[i], size).x;
+                DrawRectangleRounded({gfx::W * 0.5f - tw * 0.5f - 48.0f, y - 6.0f, tw + 96.0f, size + 16.0f},
+                                     0.35f, 10, Color{16, 12, 32, 165});
+                gfx::glowText(FontId::Title, items[i], gfx::W / 2, y, size, c, Color{255, 180, 80, 255});
+            } else {
+                gfx::text(FontId::Title, items[i], gfx::W / 2, y + 6, size, c, Align::Center, 2.0f);
+            }
             if (on) {
                 const float w = gfx::measure(FontId::Title, items[i], size).x * 0.5f + 40 + 6 * pulse;
                 gfx::drawNote(gfx::kRight, {gfx::W / 2 - w, y + size * 0.55f}, 44);
@@ -374,7 +385,6 @@ public:
             }
         }
         hints("UP/DOWN select   ENTER confirm   7 editors   ESC back   F11 fullscreen");
-        gfx::text(FontId::Ui, a.library.report(), 16, gfx::H - 70, 20, fade(kIvory, 0.6f));
         gfx::endCanvas();
     }
 
@@ -622,8 +632,11 @@ public:
         }
         if (modsOpen_) {
             Modifiers& m = a.mods;
-            if (in.up()) { modSel_ = (modSel_ + kModRows - 1) % kModRows; sfxPlay(Sfx::Scroll); }
-            if (in.down()) { modSel_ = (modSel_ + 1) % kModRows; sfxPlay(Sfx::Scroll); }
+            Settings& s = a.settings;
+            modAnim_ = approach(modAnim_, float(modSel_), 15.0f, float(dt));
+            const int mw = in.wheel();
+            if (in.up() || mw > 0) { modSel_ = (modSel_ + kModRows - 1) % kModRows; sfxPlay(Sfx::Scroll); }
+            if (in.down() || mw < 0) { modSel_ = (modSel_ + 1) % kModRows; sfxPlay(Sfx::Scroll); }
             const int dir = in.left() ? -1 : (in.right() ? 1 : 0);
             if (dir || in.accept()) {
                 sfxPlay(Sfx::Scroll);
@@ -640,29 +653,32 @@ public:
                     m.scrollValue = std::round((m.scrollValue + step * (dir ? dir : 1)) / step) * step;
                     m.scrollValue = m.scrollType == 1 ? clampv(m.scrollValue, 0.25, 5.0) : clampv(m.scrollValue, 0.5, 10.0);
                 }
+                if (modSel_ == 6) { m.wrMode = !m.wrMode; s.wrMode = m.wrMode; lastModToggleRow_ = 6; lastModToggleAt_ = a.now; }
+                if (modSel_ == 7) { s.showRenderedNotes = !s.showRenderedNotes; lastModToggleRow_ = 7; lastModToggleAt_ = a.now; }
                 // Kept for the next time the game starts, like the options.
-                Settings& s = a.settings;
                 s.modRate = float(m.rate);
                 s.modBotplay = m.botplay;
                 s.modPractice = m.practice;
                 s.modMirror = m.mirror;
                 s.modScrollType = m.scrollType;
                 s.modScrollValue = float(m.scrollValue);
+                s.wrMode = m.wrMode;
                 a.saveSettings();
             }
             if (in.back() || in.pressed(KEY_TAB)) modsOpen_ = false;
             return;
         }
         if (n > 0) {
-            if (in.up()) { sel = (sel + n - 1) % n; changed(); }
-            if (in.down()) { sel = (sel + 1) % n; changed(); }
+            const int fw = in.wheel();
+            if (in.up() || fw > 0) { sel = (sel + n - 1) % n; changed(); }
+            if (in.down() || fw < 0) { sel = (sel + 1) % n; changed(); }
             const int nd = int(diffsOf(list_[size_t(sel)]).size());
             if (nd > 0) {
                 if (in.left()) { a.freeplayDiff = (diffIndex() + nd - 1) % nd; sfxPlay(Sfx::Scroll); }
                 if (in.right()) { a.freeplayDiff = (diffIndex() + 1) % nd; sfxPlay(Sfx::Scroll); }
             }
         }
-        if (in.pressed(KEY_TAB)) { modsOpen_ = true; sfxPlay(Sfx::Scroll); }
+        if (in.pressed(KEY_TAB)) { modsOpen_ = true; modAnim_ = float(modSel_); sfxPlay(Sfx::Scroll); }
         // Android: mod zips picked in the system file browser are copied to mods/.
         if (platform::kAndroid && in.pressed(KEY_I) && !importing_) {
             importing_ = platform::pickModZips();
@@ -782,7 +798,7 @@ public:
                     ? ("PERSONAL BEST: " + fmtThousands(best->score) + TextFormat(" (%.0f%%)", best->acc * 100.0))
                     : std::string("PERSONAL BEST: 0 (0%)");
                 const Modifiers& m = a.mods;
-                const bool modOn = m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0;
+                const bool modOn = m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0 || m.wrMode;
                 const float boxW = std::max(430.0f, ui.textWidth(scoreLine, 26.0f) + 34.0f);
                 const float boxH = modOn ? 118.0f : 92.0f;
                 DrawRectangleRec({gfx::W - boxW, 0, boxW, boxH}, Color{0, 0, 0, 155});
@@ -799,6 +815,7 @@ public:
                     if (m.mirror) ms += "  Opponent";
                     if (m.scrollType == 1) ms += TextFormat("  Scroll x%.2f", m.scrollValue);
                     if (m.scrollType == 2) ms += TextFormat("  Scroll %.1f", m.scrollValue);
+                    if (m.wrMode) ms += "  WR Mode";
                     ui.uiText(ms, cx, 84.0f, 17.0f, kGold, 0, 1.5f);
                 }
             }
@@ -879,8 +896,9 @@ public:
             if (m.mirror) ms += "  Opponent";
             if (m.scrollType == 1) ms += TextFormat("  Scroll x%.2f", m.scrollValue);
             if (m.scrollType == 2) ms += TextFormat("  Scroll %.1f", m.scrollValue);
+            if (m.wrMode) ms += "  WR Mode";
             gfx::text(FontId::Ui, ms, 1035, 586, 22,
-                      (m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0) ? kGold : fade(kIvory, 0.5f), Align::Center);
+                      (m.rate != 1.0 || m.botplay || m.practice || m.mirror || m.scrollType != 0 || m.wrMode) ? kGold : fade(kIvory, 0.5f), Align::Center);
         }
         if (a.library.customCount() == 0) {
             const std::string tip = a.touchMode
@@ -986,71 +1004,115 @@ private:
     void drawMods() {
         const App& a = app();
         const Modifiers& m = a.mods;
+        const Settings& s = a.settings;
         const bool psych = a.psychMenusActive();
-        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{0, 0, 0, 175});
+        DrawRectangleRec({0, 0, gfx::W, gfx::H}, Color{6, 5, 14, 210});
         static const char* scrollTypes[3] = {"Chart", "Multiplicative", "Constant"};
+        struct ModRow {
+            const char* label;
+            const char* desc;
+            bool isBool;
+            bool bval;
+            std::string sval;
+            bool dimmed;
+        };
+        const ModRow items[kModRows] = {
+            {"Playback Rate", "Change the song playback speed (0.50x - 2.00x).", false, false, TextFormat("%.2fx", m.rate), false},
+            {"Botplay", "Let the engine play the chart automatically.", true, m.botplay, {}, false},
+            {"Practice Mode", "Cannot fail when health reaches zero.", true, m.practice, {}, false},
+            {"Opponent Play", "Play on the opponent's side of the chart.", true, m.mirror, {}, false},
+            {"Scroll Type", "How scroll speed is calculated from the chart.", false, false, scrollTypes[m.scrollType], false},
+            {"Scroll Speed", "Multiplier or constant scroll speed value.", false, false,
+             m.scrollType == 0 ? std::string("-")
+                               : std::string(TextFormat(m.scrollType == 1 ? "x%.2f" : "%.1f", m.scrollValue)),
+             m.scrollType == 0},
+            {"WR Mode", "Disable faking spam: disables note multipliers and spam LOD culling.", true, m.wrMode, {}, false},
+            {"Rendered Notes", "Display both actually processed/rendered notes and total on-screen notes.", true, s.showRenderedNotes, {}, false},
+        };
         if (psych) {
             const PsychUi& ui = psychUi();
-            // Psych Engine GameplayChangersSubstate: Alphabet list + animated CheckboxThingie.
-            if (ui.alphabetCentered("GAMEPLAY CHANGERS", gfx::W * 0.5f, 36.0f, 52.0f, 1.0f) < 0)
-                ui.uiText("GAMEPLAY CHANGERS", gfx::W * 0.5f, 40.0f, 42.0f, WHITE, 0, 2.0f);
-            struct ModRow {
-                const char* label;
-                bool isBool;
-                bool bval;
-                std::string sval;
-                bool dimmed;
-            };
-            const ModRow items[kModRows] = {
-                {"Playback Rate", false, false, TextFormat("%.2fx", m.rate), false},
-                {"Botplay", true, m.botplay, {}, false},
-                {"Practice Mode", true, m.practice, {}, false},
-                {"Opponent Play", true, m.mirror, {}, false},
-                {"Scroll Type", false, false, scrollTypes[m.scrollType], false},
-                {"Scroll Speed", false, false,
-                 m.scrollType == 0 ? std::string("-")
-                                   : std::string(TextFormat(m.scrollType == 1 ? "x%.2f" : "%.1f", m.scrollValue)),
-                 m.scrollType == 0},
-            };
+            // Top-left header: smaller and less transparent.
+            DrawRectangleRounded({36.0f, 14.0f, 390.0f, 46.0f}, 0.35f, 8, Color{0, 0, 0, 165});
+            if (ui.alphabet("GAMEPLAY CHANGERS", 52.0f, 22.0f, 32.0f, 0.94f, true, kGold) < 0)
+                ui.uiText("GAMEPLAY CHANGERS", 52.0f, 23.0f, 26.0f, fade(kGold, 0.94f), -1, 2.0f);
             for (int i = 0; i < kModRows; ++i) {
                 const bool on = i == modSel_;
-                const float alpha = items[i].dimmed ? 0.35f : (on ? 1.0f : 0.6f);
-                const float y = 136.0f + float(i) * 80.0f;
-                const float x = items[i].isBool ? 290.0f : 210.0f;
+                const float d = float(i) - modAnim_;
+                const float y = 250.0f + d * 78.0f;
+                if (y < 42.0f || y > gfx::H - 125.0f) continue;
+                float edgeFade = 1.0f;
+                if (y < 92.0f) edgeFade = clampv((y - 42.0f) / 50.0f, 0.0f, 1.0f);
+                if (y > gfx::H - 175.0f) edgeFade = std::min(edgeFade, clampv((gfx::H - 125.0f - y) / 50.0f, 0.0f, 1.0f));
+                const float baseAlpha = items[i].dimmed ? 0.42f : (on ? 1.0f : 0.78f);
+                const float alpha = baseAlpha * edgeFade;
+                if (alpha <= 0.01f) continue;
+
+                const float cardX = 140.0f + d * 12.0f;
+                const float cardW = gfx::W - 280.0f;
+                DrawRectangleRounded({cardX, y - 10.0f, cardW, 66.0f}, 0.28f, 10,
+                                     on ? Color{38, 32, 72, (unsigned char)(210.0f * edgeFade)}
+                                        : Color{14, 12, 26, (unsigned char)(140.0f * edgeFade)});
+                if (on) {
+                    DrawRectangleRoundedLinesEx({cardX, y - 10.0f, cardW, 66.0f}, 0.28f, 10, 2.0f,
+                                                fade(kGold, 0.85f * edgeFade));
+                }
+
+                const float x = cardX + (items[i].isBool ? 112.0f : 36.0f);
                 if (items[i].isBool) {
                     const double el = (lastModToggleRow_ == i) ? (a.now - lastModToggleAt_) : -1.0;
-                    if (!ui.drawCheckbox({x - 110.0f, y - 10.0f}, items[i].bval, el, 0.68f, alpha))
-                        ui.uiText(items[i].bval ? "[X]" : "[ ]", x - 90.0f, y + 6.0f, 32.0f, fade(WHITE, alpha), 0, 2.0f);
+                    if (!ui.drawCheckbox({cardX + 26.0f, y - 14.0f}, items[i].bval, el, 0.62f, alpha))
+                        ui.uiText(items[i].bval ? "[ON]" : "[OFF]", cardX + 56.0f, y + 8.0f, 26.0f,
+                                  fade(items[i].bval ? kGold : WHITE, alpha), 0, 2.0f);
                 }
-                float lw = ui.alphabet(items[i].label, x, y, 52.0f, alpha, false);
+                const Color labelCol = on ? kGold : WHITE;
+                float lw = ui.alphabet(items[i].label, x, y + 2.0f, 44.0f, alpha, true, labelCol);
                 if (lw < 0) {
-                    ui.uiText(items[i].label, x, y + 10.0f, 32.0f, fade(WHITE, alpha), -1, 2.0f);
+                    ui.uiText(items[i].label, x, y + 8.0f, 32.0f, fade(labelCol, alpha), -1, 2.0f);
                     lw = ui.textWidth(items[i].label, 32.0f);
                 }
                 if (!items[i].isBool) {
-                    const float vx = x + lw + 48.0f;
-                    if (ui.alphabet(items[i].sval, vx, y, 50.0f, alpha, true) < 0)
-                        ui.uiText(items[i].sval, vx, y + 10.0f, 32.0f, fade(on ? kGold : WHITE, alpha), -1, 2.0f);
+                    const std::string valStr = "< " + items[i].sval + " >";
+                    ui.uiText(valStr, cardX + cardW - 32.0f, y + 8.0f, 32.0f,
+                              fade(on ? kGold : WHITE, alpha), 1, 2.0f);
+                } else {
+                    ui.uiText(items[i].bval ? "ON" : "OFF", cardX + cardW - 32.0f, y + 10.0f, 28.0f,
+                              fade(items[i].bval ? kGold : Color{190, 195, 215, 255}, alpha), 1, 2.0f);
                 }
             }
-            DrawRectangleRec({110, gfx::H - 96, gfx::W - 220, 48}, Color{0, 0, 0, 175});
-            ui.uiText("Scores are only saved at 1.00x or faster, without botplay or practice", gfx::W * 0.5f, gfx::H - 82.0f, 20.0f,
-                      fade(WHITE, 0.9f), 0, 1.5f);
+            // Description & score saving notice bar at the bottom.
+            DrawRectangleRounded({110.0f, gfx::H - 108.0f, gfx::W - 220.0f, 64.0f}, 0.25f, 10, Color{0, 0, 0, 195});
+            ui.uiText(items[modSel_].desc, gfx::W * 0.5f, gfx::H - 100.0f, 20.0f, WHITE, 0, 1.5f);
+            ui.uiText("Scores are only saved at 1.00x or faster, without botplay or practice", gfx::W * 0.5f, gfx::H - 72.0f, 17.0f,
+                      fade(kGold, 0.88f), 0, 1.25f);
             return;
         }
-        DrawRectangleRounded({370, 140, 540, 430}, 0.08f, 12, Color{16, 10, 30, 245});
-        const std::string rows[kModRows] = {
-            TextFormat("Playback rate   %.2fx", m.rate), std::string("Botplay   ") + (m.botplay ? "ON" : "OFF"),
-            std::string("Practice (no death)   ") + (m.practice ? "ON" : "OFF"),
-            std::string("Play as the opponent   ") + (m.mirror ? "ON" : "OFF"), std::string("Scroll speed   ") + scrollTypes[m.scrollType],
-            m.scrollType == 0 ? std::string("Scroll value   -")
-                              : std::string(TextFormat(m.scrollType == 1 ? "Scroll value   x%.2f" : "Scroll value   %.1f", m.scrollValue))};
-        gfx::text(FontId::Title, "MODIFIERS", 640, 158, 38, kGold, Align::Center, 2.0f);
-        for (int i = 0; i < kModRows; ++i)
-            gfx::text(FontId::Ui, rows[i], 640, 222.0f + i * 50, 30, i == modSel_ ? kGold : (i == 5 && m.scrollType == 0 ? fade(kIvory, 0.4f) : kIvory),
-                      Align::Center, 1.5f);
-        gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", 640, 532, 18,
-                  fade(kIvory, 0.6f), Align::Center);
+        // Classic UI Modifiers screen (also top-left header, white text, scrollable).
+        DrawRectangleRounded({44.0f, 18.0f, 360.0f, 44.0f}, 0.35f, 8, Color{16, 12, 32, 220});
+        gfx::text(FontId::Title, "GAMEPLAY CHANGERS", 62.0f, 24.0f, 28.0f, fade(kGold, 0.94f), Align::Left, 1.5f);
+        for (int i = 0; i < kModRows; ++i) {
+            const bool on = i == modSel_;
+            const float d = float(i) - modAnim_;
+            const float y = 250.0f + d * 74.0f;
+            if (y < 42.0f || y > gfx::H - 125.0f) continue;
+            float edgeFade = 1.0f;
+            if (y < 92.0f) edgeFade = clampv((y - 42.0f) / 50.0f, 0.0f, 1.0f);
+            if (y > gfx::H - 175.0f) edgeFade = std::min(edgeFade, clampv((gfx::H - 125.0f - y) / 50.0f, 0.0f, 1.0f));
+            const float alpha = (items[i].dimmed ? 0.42f : (on ? 1.0f : 0.8f)) * edgeFade;
+            const float cardX = 180.0f;
+            const float cardW = gfx::W - 360.0f;
+            DrawRectangleRounded({cardX, y - 8.0f, cardW, 60.0f}, 0.28f, 10,
+                                 on ? Color{40, 32, 76, (unsigned char)(220.0f * edgeFade)}
+                                    : Color{16, 12, 30, (unsigned char)(155.0f * edgeFade)});
+            gfx::text(FontId::Ui, items[i].label, cardX + 28.0f, y + 6.0f, 32.0f,
+                      fade(on ? kGold : WHITE, alpha), Align::Left, 1.5f);
+            const std::string rhs = items[i].isBool ? (items[i].bval ? "ON" : "OFF") : ("< " + items[i].sval + " >");
+            gfx::text(FontId::Ui, rhs, cardX + cardW - 28.0f, y + 6.0f, 32.0f,
+                      fade((items[i].isBool ? items[i].bval : on) ? kGold : WHITE, alpha), Align::Right, 1.5f);
+        }
+        DrawRectangleRounded({180.0f, gfx::H - 108.0f, gfx::W - 360.0f, 62.0f}, 0.25f, 10, Color{12, 8, 24, 215});
+        gfx::text(FontId::Ui, items[modSel_].desc, gfx::W * 0.5f, gfx::H - 100.0f, 22.0f, WHITE, Align::Center, 1.2f);
+        gfx::text(FontId::Ui, "Scores are only saved at 1.00x or faster, without botplay or practice", gfx::W * 0.5f, gfx::H - 72.0f, 18.0f,
+                  fade(kGold, 0.85f), Align::Center);
     }
 
     struct IconEntry {
@@ -1168,8 +1230,9 @@ private:
     std::string pendingId_, previewId_;
     bool previewPlaying_ = false;
     bool modsOpen_ = false;
-    static constexpr int kModRows = 6;
+    static constexpr int kModRows = 8;
     int modSel_ = 0;
+    float modAnim_ = 0.0f;
     int lastModToggleRow_ = -1;
     double lastModToggleAt_ = -10.0;
     bool importing_ = false;

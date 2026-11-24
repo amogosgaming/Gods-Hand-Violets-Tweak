@@ -29,6 +29,7 @@
 #include "app.hpp"
 #include "basegame.hpp"
 #include "chart_binary.hpp"
+#include "chart_iutk.hpp"
 #include "chart_stream.hpp"
 #include "common.hpp"
 #include "editor_ui.hpp"
@@ -544,6 +545,9 @@ public:
             a.change(makeEditorMenu());
             return;
         }
+        if (in.pressed(KEY_F)) { targetFmt_ = (targetFmt_ + 1) % 2; rows(); }
+        if (targetFmt_ == 1 && in.pressed(KEY_V)) iutkVer_ = (iutkVer_ + 1) % 3;
+        if (targetFmt_ == 1 && in.pressed(KEY_M)) iutkMetaMode_ = (iutkMetaMode_ + 1) % 3;
         const int n = int(rows_.size());
         if (n == 0) return;
         if (in.up()) sel_ = (sel_ + n - 1) % n;
@@ -562,11 +566,28 @@ public:
         drawMenuBackground(a.now, 0x6C8CFF, menuPulse());
         const float boxBot = touch ? (gfx::H - 70.0f) : (gfx::H - 60.0f);
         DrawRectangleRec({40, 24, gfx::W - 80, boxBot - 24}, fade(BLACK, 0.65f));
-        gfx::text(FontId::Ui, "Binary charts (.ghc)   mod: " + modLabel(mod_), 60, 38, 26, kGold);
-        gfx::text(FontId::Ui, "Each chart gets a .ghc beside its JSON (the JSON stays, for Psych). The game loads the .ghc.", 60, 72,
-                  17, fade(kIvory, 0.75f));
-        gfx::text(FontId::Ui, "JSON", 700, 96, 15, fade(kIvory, 0.5f), Align::Right);
-        gfx::text(FontId::Ui, ".ghc", 840, 96, 15, fade(kIvory, 0.5f), Align::Right);
+        const bool isIutk = targetFmt_ == 1;
+        gfx::text(FontId::Ui, (isIutk ? "Binary charts (.bin format (iutk))   mod: " : "Binary charts (.ghc)   mod: ") + modLabel(mod_),
+                  60, 36, 25, kGold);
+        if (!running_.load()) {
+            const float bx = gfx::W - 500.0f;
+            static const char* kVers[] = {"v4 RLE", "v3 Raw", "v2 Flat"};
+            static const char* kMetas[] = {"metadata.json", "Embedded", "No Meta"};
+            if (ui_.button({bx, 32, 195, 30}, isIutk ? "Target: .bin (iutk)" : "Target: .ghc")) {
+                targetFmt_ = (targetFmt_ + 1) % 2;
+                rows();
+            }
+            if (isIutk) {
+                if (ui_.button({bx + 203, 32, 108, 30}, kVers[std::clamp(iutkVer_, 0, 2)])) iutkVer_ = (iutkVer_ + 1) % 3;
+                if (ui_.button({bx + 319, 32, 136, 30}, kMetas[std::clamp(iutkMetaMode_, 0, 2)])) iutkMetaMode_ = (iutkMetaMode_ + 1) % 3;
+            }
+        }
+        gfx::text(FontId::Ui,
+                  isIutk ? "Writes Chart.bin (+ metadata.json & events.json) in each song's data folder."
+                         : "Each chart gets a .ghc beside its JSON (the JSON stays, for Psych). The game loads the .ghc.",
+                  60, 72, 17, fade(kIvory, 0.75f));
+        gfx::text(FontId::Ui, "Source", 700, 96, 15, fade(kIvory, 0.5f), Align::Right);
+        gfx::text(FontId::Ui, isIutk ? ".bin" : ".ghc", 840, 96, 15, fade(kIvory, 0.5f), Align::Right);
         {
             std::lock_guard<std::mutex> lk(mtx_);
             if (rows_.empty()) {
@@ -578,8 +599,10 @@ public:
                     const float y = 116.0f + float(i - first) * 30.0f;
                     if (i == sel_) DrawRectangleRec({52, y - 3, gfx::W - 104, 28}, fade(kGold, 0.18f));
                     gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y, 19, i == sel_ ? kGold : kIvory);
-                    gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y, 19, fade(kIvory, 0.8f), Align::Right);
-                    gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.src.empty() ? "-" : megabytes(r.srcBytes), 700, y, 19, fade(kIvory, 0.8f), Align::Right);
+                    const uint64_t outB = isIutk ? r.binBytes : r.ghcBytes;
+                    const bool hasOut = isIutk ? !r.bin.empty() : !r.ghc.empty();
+                    gfx::text(FontId::Ui, hasOut ? megabytes(outB) : "-", 840, y, 19, fade(kIvory, 0.8f), Align::Right);
                     gfx::text(FontId::Ui, r.note, 870, y, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
                 }
             } else {
@@ -594,8 +617,10 @@ public:
                     const bool hov = ui_.hover(rr);
                     if (i == sel_ || hov) DrawRectangleRounded(rr, 0.18f, 4, i == sel_ ? fade(kGold, 0.22f) : Color{56, 44, 86, 160});
                     gfx::text(FontId::Ui, r.song + "  " + r.diff, 64, y + 10, 19, i == sel_ ? kGold : kIvory);
-                    gfx::text(FontId::Ui, r.json.empty() ? "-" : megabytes(r.jsonBytes), 700, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
-                    gfx::text(FontId::Ui, r.ghc.empty() ? "-" : megabytes(r.ghcBytes), 840, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
+                    gfx::text(FontId::Ui, r.src.empty() ? "-" : megabytes(r.srcBytes), 700, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
+                    const uint64_t outB = isIutk ? r.binBytes : r.ghcBytes;
+                    const bool hasOut = isIutk ? !r.bin.empty() : !r.ghc.empty();
+                    gfx::text(FontId::Ui, hasOut ? megabytes(outB) : "-", 840, y + 10, 19, fade(kIvory, 0.8f), Align::Right);
                     gfx::text(FontId::Ui, r.note, 870, y + 11, 17, r.bad ? Color{255, 130, 130, 255} : Color{150, 230, 170, 255});
                     if (hov && ui_.tap() && !running_.load()) sel_ = i;
                 }
@@ -628,7 +653,9 @@ public:
                 gfx::text(FontId::Ui, "Converting charts...", gfx::W * 0.5f, y + 11, 22, kGold, Align::Center);
             }
         }
-        hints(running_.load() ? "Converting...   ESC stop" : "UP/DOWN choose   ENTER convert this one   A convert all   ESC back");
+        hints(running_.load() ? "Converting...   ESC stop"
+              : isIutk        ? "UP/DOWN choose   ENTER convert   A all   F format   V version   M metadata   ESC back"
+                              : "UP/DOWN choose   ENTER convert   A all   F format (.ghc / .bin iutk)   ESC back");
         gfx::endCanvas();
     }
     TouchLayout touchLayout() const override {
@@ -639,8 +666,8 @@ public:
 
 private:
     struct Row {
-        std::string song, diff, json, ghc, note;
-        uint64_t jsonBytes = 0, ghcBytes = 0;
+        std::string song, diff, src, json, ghc, bin, dir, note;
+        uint64_t srcBytes = 0, jsonBytes = 0, ghcBytes = 0, binBytes = 0;
         bool bad = false;
     };
 
@@ -648,8 +675,8 @@ private:
         return b >= 1000000 ? TextFormat("%.1f MB", double(b) / 1e6) : TextFormat("%.1f KB", double(b) / 1e3);
     }
 
-    // The mod's charts that are JSON or .ghc files (not FL Studio projects or
-    // the V-Slice ones, which hold several difficulties).
+    // The mod's charts that are JSON, .ghc, or .bin files (not FL Studio projects
+    // or V-Slice ones, which hold several difficulties).
     void rows() {
         std::lock_guard<std::mutex> lk(mtx_);
         rows_.clear();
@@ -662,11 +689,13 @@ private:
                 std::string base;
                 if (endsWithI(p, ".json")) base = p.substr(0, p.size() - 5);
                 else if (endsWithI(p, kBinaryChartExt)) base = p.substr(0, p.size() - std::string(kBinaryChartExt).size());
+                else if (endsWithI(p, kIutkChartExt)) base = p.substr(0, p.size() - std::string(kIutkChartExt).size());
                 else continue;
                 if (!seen.insert(base).second) continue;
                 Row r;
                 r.song = e.title;
                 r.diff = e.diffs[i];
+                r.dir = pathStr(toPath(p).parent_path());
                 std::error_code ec;
                 if (fs::exists(toPath(base + ".json"), ec)) {
                     r.json = base + ".json";
@@ -676,7 +705,18 @@ private:
                     r.ghc = base + kBinaryChartExt;
                     r.ghcBytes = fileSize(r.ghc);
                 }
-                if (r.json.empty()) r.note = "only the .ghc";
+                const fs::path chartBin = toPath(r.dir) / "Chart.bin";
+                if (fs::exists(chartBin, ec)) {
+                    r.bin = pathStr(chartBin);
+                    r.binBytes = fileSize(r.bin);
+                } else if (fs::exists(toPath(base + kIutkChartExt), ec)) {
+                    r.bin = base + kIutkChartExt;
+                    r.binBytes = fileSize(r.bin);
+                }
+                if (!r.json.empty()) { r.src = r.json; r.srcBytes = r.jsonBytes; }
+                else if (!r.ghc.empty()) { r.src = r.ghc; r.srcBytes = r.ghcBytes; }
+                else if (!r.bin.empty()) { r.src = r.bin; r.srcBytes = r.binBytes; }
+                if (targetFmt_ == 0 && r.json.empty()) r.note = r.ghc.empty() ? "only .bin" : "only the .ghc";
                 rows_.push_back(std::move(r));
             }
         }
@@ -687,30 +727,59 @@ private:
         if (running_.load() || which.empty()) return;
         stop_ = false;
         running_ = true;
-        worker_ = std::thread([this, which] {
+        const int fmt = targetFmt_;
+        IutkWriteOptions iutkOpt;
+        static constexpr IutkVersion kVers[] = {IutkVersion::V4, IutkVersion::V3, IutkVersion::V2};
+        iutkOpt.version = kVers[std::clamp(iutkVer_, 0, 2)];
+        iutkOpt.metaMode = IutkMetaMode(std::clamp(iutkMetaMode_, 0, 2));
+        iutkOpt.rleMode = IutkRleMode::Optimal;
+        iutkOpt.saveEventsJson = true;
+        iutkOpt.standardFilename = true;
+        worker_ = std::thread([this, which, fmt, iutkOpt] {
             for (size_t i : which) {
                 if (stop_.load()) break;
-                std::string json;
+                std::string src, json, dir, diff;
                 {
                     std::lock_guard<std::mutex> lk(mtx_);
-                    if (i >= rows_.size() || rows_[i].json.empty()) continue;
+                    if (i >= rows_.size()) continue;
+                    src = rows_[i].src;
                     json = rows_[i].json;
+                    dir = rows_[i].dir;
+                    diff = rows_[i].diff;
+                    if (fmt == 0 && json.empty()) continue;
+                    if (fmt == 1 && src.empty()) continue;
                     rows_[i].note = "converting...";
                     rows_[i].bad = false;
                 }
-                const std::string ghc = json.substr(0, json.size() - 5) + kBinaryChartExt;
                 ConvertStats st;
                 std::string err;
-                const bool ok = convertChartToBinary(json, ghc, err, &st);
-                std::lock_guard<std::mutex> lk(mtx_);
-                Row& r = rows_[i];
-                r.bad = !ok;
-                if (ok) {
-                    r.ghc = ghc;
-                    r.ghcBytes = st.outBytes;
-                    r.note = TextFormat("%.1fx smaller, %.2f s", double(st.inBytes) / double(std::max<uint64_t>(1, st.outBytes)), st.seconds);
+                if (fmt == 0) {
+                    const std::string ghc = json.substr(0, json.size() - 5) + kBinaryChartExt;
+                    const bool ok = convertChartToBinary(json, ghc, err, &st);
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    Row& r = rows_[i];
+                    r.bad = !ok;
+                    if (ok) {
+                        r.ghc = ghc;
+                        r.ghcBytes = st.outBytes;
+                        r.note = TextFormat("%.1fx smaller, %.2f s", double(st.inBytes) / double(std::max<uint64_t>(1, st.outBytes)), st.seconds);
+                    } else {
+                        r.note = err;
+                    }
                 } else {
-                    r.note = err;
+                    const std::string dst = pathStr(toPath(dir) / "Chart.bin");
+                    IutkWriteResult res;
+                    const bool ok = convertChartToIutk(src, dst, iutkOpt, err, &st, &res, diff);
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    Row& r = rows_[i];
+                    r.bad = !ok;
+                    if (ok) {
+                        r.bin = dst;
+                        r.binBytes = res.binBytes;
+                        r.note = TextFormat("%.1fx smaller, %.2f s", double(st.inBytes) / double(std::max<uint64_t>(1, res.binBytes)), st.seconds);
+                    } else {
+                        r.note = err;
+                    }
                 }
             }
             running_ = false;
@@ -722,6 +791,9 @@ private:
     float scroll_ = 0.0f;
     std::vector<Row> rows_;
     int sel_ = 0;
+    int targetFmt_ = 0;     // 0 = .ghc, 1 = .bin format (iutk)
+    int iutkVer_ = 0;       // 0 = v4, 1 = v3, 2 = v2
+    int iutkMetaMode_ = 0;  // 0 = metadata.json, 1 = Embedded, 2 = None
     std::mutex mtx_;
     std::thread worker_;
     std::atomic<bool> running_{false}, stop_{false};
@@ -3236,8 +3308,19 @@ public:
         heading("4. Convert & Export");
         ui_.text("sniff_song", rrow(), "Song folder", songFolder_);
         ui_.text("sniff_diff", rrow(), "Difficulty", diffName_);
-        ui_.choice(rrow(), "Save format", {"Psych JSON", "Binary .ghc", "Both"}, saveFmt_);
-        if (saveFmt_ != 1) ui_.check(rrow(), "Minify Psych JSON (remove formatting)", minifyJson_);
+        ui_.choice(rrow(), "Save format", {"Psych JSON", "Binary .ghc", "Both", ".bin format (iutk)"}, saveFmt_);
+        if (saveFmt_ == 3) {
+            static const std::vector<std::string> vers = {"v4 (Compressed RLE)", "v3 (Raw Cells)", "v2 (Legacy Flat)"};
+            static const std::vector<std::string> metas = {"metadata.json", "Embedded in .bin", "None (defaults)"};
+            static const std::vector<std::string> rles = {"Optimal (smallest)", "Fast (greedy)", "Off (literals)"};
+            ui_.choice(rrow(), "iutk version", vers, iutkVer_);
+            ui_.choice(rrow(), "iutk metadata", metas, iutkMetaMode_);
+            if (iutkVer_ == 0) ui_.choice(rrow(), "iutk RLE", rles, iutkRleMode_);
+            ui_.check(rrow(), "Standard filename (Chart.bin)", iutkStdName_);
+            ui_.check(rrow(), "Save sibling events.json", iutkSaveEvents_);
+        } else if (saveFmt_ != 1) {
+            ui_.check(rrow(), "Minify Psych JSON (remove formatting)", minifyJson_);
+        }
 
         const float bw = (rw - 8.0f) * 0.5f;
         if (ui_.button({rx, ry, bw, rh + 6}, "Convert & Save", true)) convertAndSave();
@@ -3280,6 +3363,8 @@ private:
     std::string songFolder_ = "sniff-song", diffName_ = "Normal";
     int saveFmt_ = 0;
     bool minifyJson_ = false;
+    int iutkVer_ = 0, iutkMetaMode_ = 0, iutkRleMode_ = 0;
+    bool iutkStdName_ = true, iutkSaveEvents_ = true;
     float fileScroll_ = 0.0f, patScroll_ = 0.0f, rightScroll_ = 0.0f;
     // Preview cache
     bool previewOk_ = false;
@@ -3424,15 +3509,16 @@ private:
                 const bool player = n.side == 1;
                 const int data = (player == sec.mustHit) ? int(n.lane) : int(n.lane) + K;
                 const bool alt = (n.flags & kFlagAlt) != 0;
+                const uint64_t rep = std::min<uint64_t>(std::max<uint64_t>(1, n.stack), 65535ull);
                 if (bin) {
                     const std::string t = alt ? std::string("Alt Animation") : std::string();
-                    for (uint16_t k = 0; k < std::max<uint16_t>(1, n.stack); ++k) bin->add(n.time, data, n.length, t);
+                    for (uint64_t k = 0; k < rep; ++k) bin->add(n.time, data, n.length, t);
                     continue;
                 }
                 std::string one = "[" + jnum(n.time) + com + std::to_string(data) + com + jnum(n.length);
                 if (alt) one += std::string(com) + "\"Alt Animation\"";
                 one += "]";
-                for (uint16_t k = 0; k < std::max<uint16_t>(1, n.stack); ++k) {
+                for (uint64_t k = 0; k < rep; ++k) {
                     o += std::string(first ? "" : com) + one;
                     first = false;
                 }
@@ -3463,21 +3549,42 @@ private:
         fs::create_directories(toPath(dir), ec);
         const std::string jsonPath = dir + stem + ".json";
         const std::string ghcPath = dir + stem + kBinaryChartExt;
-        const bool wantJson = saveFmt_ != 1, wantGhc = saveFmt_ != 0;
-        if (wantJson) {
-            if (!saveText(jsonPath, chartToPsychJson(c, nullptr, minifyJson_), err)) {
-                status_.set(err, true);
+        const std::string binPath = dir + (iutkStdName_ ? std::string("Chart.bin") : (stem + kIutkChartExt));
+        std::string primaryPath = jsonPath;
+        if (saveFmt_ == 3) {
+            if (c.title.empty()) c.title = prettyName(songFolder_);
+            c.difficulty = diffName_.empty() ? "Normal" : diffName_;
+            IutkWriteOptions opt;
+            static constexpr IutkVersion kVers[] = {IutkVersion::V4, IutkVersion::V3, IutkVersion::V2};
+            opt.version = kVers[std::clamp(iutkVer_, 0, 2)];
+            opt.metaMode = IutkMetaMode(std::clamp(iutkMetaMode_, 0, 2));
+            opt.rleMode = IutkRleMode(std::clamp(iutkRleMode_, 0, 2));
+            opt.standardFilename = iutkStdName_;
+            opt.saveEventsJson = iutkSaveEvents_;
+            opt.compactJson = minifyJson_;
+            if (!writeIutkChart(binPath, c, opt, err)) {
+                status_.set("iutk .bin: " + err, true);
                 return;
             }
-        }
-        if (wantGhc) {
-            StreamedNotes sn;
-            StreamedNotesBuilder bin(sn);
-            const std::string skel = chartToPsychJson(c, &bin, true);
-            if (!writeBinaryChart(ghcPath, skel, sn, 3, err)) {
-                status_.set("GHC: " + err, true);
-                return;
+            primaryPath = binPath;
+        } else {
+            const bool wantJson = saveFmt_ != 1, wantGhc = saveFmt_ != 0;
+            if (wantJson) {
+                if (!saveText(jsonPath, chartToPsychJson(c, nullptr, minifyJson_), err)) {
+                    status_.set(err, true);
+                    return;
+                }
             }
+            if (wantGhc) {
+                StreamedNotes sn;
+                StreamedNotesBuilder bin(sn);
+                const std::string skel = chartToPsychJson(c, &bin, true);
+                if (!writeBinaryChart(ghcPath, skel, sn, 3, err)) {
+                    status_.set("GHC: " + err, true);
+                    return;
+                }
+            }
+            primaryPath = wantJson ? jsonPath : ghcPath;
         }
         // Rescan library so the new chart shows up in Freeplay & Chart Editor.
         App& a = app();
@@ -3487,7 +3594,7 @@ private:
         for (const SongEntry& s : a.library.songs()) {
             for (size_t i = 0; i < s.chartPaths.size(); ++i) {
                 const std::string& cp = s.chartPaths[i];
-                if (fs::equivalent(toPath(cp), toPath(wantJson ? jsonPath : ghcPath), ec)) {
+                if (fs::equivalent(toPath(cp), toPath(primaryPath), ec)) {
                     lastSavedSongId_ = s.id;
                     if (i < s.diffs.size()) lastSavedDiff_ = s.diffs[i];
                     break;
@@ -3496,7 +3603,7 @@ private:
             if (!lastSavedSongId_.empty()) break;
         }
         status_.set(TextFormat("Converted %llu notes (%dK) -> %s", (unsigned long long)(c.playerNotes + c.opponentNotes),
-                               c.keys, (wantJson ? jsonPath : ghcPath).c_str()));
+                               c.keys, primaryPath.c_str()));
     }
 };
 

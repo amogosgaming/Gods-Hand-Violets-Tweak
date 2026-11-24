@@ -1278,7 +1278,8 @@ void PlayState::drawMine(Vector2 c, float size, float alpha, float rot) {
 }
 
 std::string PlayState::perfInfo() const {
-    std::string s = std::string("notes ") + std::to_string(drawnNotes_) + " drawn, renderer " + noteRaster_.name();
+    std::string s = std::string("notes ") + std::to_string(drawnNotes_) + " rendered / " + std::to_string(onScreenNotes_) +
+                    " on screen, renderer " + noteRaster_.name();
     if (noteRaster_.cpu())
         s += TextFormat(" (%d on the CPU, %.2f Mpx, %.2f ms)", noteRaster_.lastNotes(), double(noteRaster_.lastPixels()) / 1e6,
                         noteRaster_.lastMs());
@@ -1287,6 +1288,10 @@ std::string PlayState::perfInfo() const {
 
 void PlayState::adaptNoteGap() {
     App& a = app();
+    if (a.mods.wrMode || a.settings.wrMode) {
+        noteGap_ = 0.0f;
+        return;
+    }
     if (a.settings.noteDetail != 0) {
         noteGap_ = 1.0f;
         return;
@@ -1320,7 +1325,8 @@ void PlayState::drawLanes() {
     const float ns = noteSize();
     const double pxPerMs = 0.45 * scrollSpeed() / rate_;
     const double reach = (gfx::H * 1.5 + ns) / pxPerMs;
-    drawnNotes_ = candidateNotes_ = 0;
+    const bool wrMode = a.mods.wrMode || s.wrMode;
+    drawnNotes_ = candidateNotes_ = onScreenNotes_ = 0;
     // Note renderer: CPU modes collect the note heads into one picture,
     // drawn over the lanes at the end.
     const bool cpuNotes = noteRaster_.cpu();
@@ -1392,24 +1398,26 @@ void PlayState::drawLanes() {
                     return it == noteVis_.end() ? nullptr : &it->second;
                 };
                 const float offY = (gfx::H + size) * 0.5f;
-                for (auto it = lo; it != hi; ++it) {
-                    const LaneNote& n = *it;
-                    if (n.len <= 0) continue;
-                    if (n.state == kHeldDone || n.state == kHit || n.state == kMineHit || n.state == kMinePassed) continue;
-                    const NoteVis* nv = visOf(n);
-                    if (nv && !nv->visible) continue;
-                    const double mult = nv ? nv->multSpeed : 1.0;
-                    const double endT = n.t + n.len;
-                    const bool active = n.state == kHolding;
-                    const double startT = active ? std::max(n.t, songMs_) : n.t;
-                    const float y0 = active ? c.y : c.y + dirSign * float((startT - songMs_) * pxPerMs * mult);
-                    const float y1 = c.y + dirSign * float((endT - songMs_) * pxPerMs * mult);
-                    if ((dirSign > 0 && y1 < c.y - offY) || (dirSign < 0 && y1 > c.y + offY)) continue;
-                    const float al = (n.state == kMissed || n.state == kDropped ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
-                    const float hx = c.x + (nv ? nv->offsetX : 0.0f);
-                    keepOrder({hx - size * 0.3f, std::min(y0, y1) - size * 0.2f, size * 0.6f, std::fabs(y1 - y0) + size * 0.4f}, dir);
-                    if (!ui.hold(dir, hx, y0, y1, size * 0.3f, al))
-                        gfx::drawSustain(dir, hx, y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
+                if (session_.maxSustain(side, lane) > 0.0) {
+                    for (auto it = lo; it != hi; ++it) {
+                        const LaneNote& n = *it;
+                        if (n.len <= 0) continue;
+                        if (n.state == kHeldDone || n.state == kHit || n.state == kMineHit || n.state == kMinePassed) continue;
+                        const NoteVis* nv = visOf(n);
+                        if (nv && !nv->visible) continue;
+                        const double mult = nv ? nv->multSpeed : 1.0;
+                        const double endT = n.t + n.len;
+                        const bool active = n.state == kHolding;
+                        const double startT = active ? std::max(n.t, songMs_) : n.t;
+                        const float y0 = active ? c.y : c.y + dirSign * float((startT - songMs_) * pxPerMs * mult);
+                        const float y1 = c.y + dirSign * float((endT - songMs_) * pxPerMs * mult);
+                        if ((dirSign > 0 && y1 < c.y - offY) || (dirSign < 0 && y1 > c.y + offY)) continue;
+                        const float al = (n.state == kMissed || n.state == kDropped ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
+                        const float hx = c.x + (nv ? nv->offsetX : 0.0f);
+                        keepOrder({hx - size * 0.3f, std::min(y0, y1) - size * 0.2f, size * 0.6f, std::fabs(y1 - y0) + size * 0.4f}, dir);
+                        if (!ui.hold(dir, hx, y0, y1, size * 0.3f, al))
+                            gfx::drawSustain(dir, hx, y0, y1, size * 0.3f, al * 0.85f + 0.15f * (al > 0), true);
+                    }
                 }
                 // Notes less than a pixel apart look the same drawn once, so a
                 // lane never draws more notes than it has pixels (spam charts
@@ -1419,9 +1427,14 @@ void PlayState::drawLanes() {
                 // A lane showing mines is drawn whole on the GPU (mines are
                 // drawn there), so notes over and under them keep their order.
                 bool laneCpu = cpuNotes && !rotated && st.angle == 0.0f;
-                for (auto it = lo; laneCpu && it != hi; ++it)
-                    if (it->kind == kMine && (it->state == kPending || it->state == kMissed)) laneCpu = false;
-                const float minGap = noteGap_;
+                if (laneCpu && session_.hasMines(side, lane)) {
+                    for (auto it = lo; it != hi; ++it)
+                        if (it->kind == kMine && (it->state == kPending || it->state == kMissed)) {
+                            laneCpu = false;
+                            break;
+                        }
+                }
+                const float minGap = wrMode ? 0.0f : noteGap_;
                 float lastY = 1e9f, lastY1 = 1e9f;
                 for (auto it = hi; it != lo;) {
                     --it;
@@ -1435,11 +1448,12 @@ void PlayState::drawLanes() {
                     if (y < -size || y > gfx::H + size) {
                         if (!rotated) continue;
                     }
+                    ++onScreenNotes_;
                     if (std::fabs(y - lastY1) >= 1.0f || n.len > 0) {
                         ++candidateNotes_;  // what every pixel would draw
                         lastY1 = y;
                     }
-                    if (std::fabs(y - lastY) < minGap && n.len <= 0) continue;
+                    if (!wrMode && std::fabs(y - lastY) < minGap && n.len <= 0) continue;
                     lastY = y;
                     ++drawnNotes_;
                     const float al = (n.state == kMissed ? 0.35f : 1.0f) * alphaStrum * (nv ? nv->alpha : 1.0f);
@@ -1844,6 +1858,36 @@ void PlayState::drawHud() {
             const float w = gfx::measure(FontId::Ui, line, size).x;
             if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
             gfx::text(FontId::Ui, line, scoreX, home.y + 5 + 60 + scoreMoved.y, size, fade(kIvory, 0.9f * scoreAlpha), Align::Center, 1.5f);
+        }
+    }
+    if (s.showRenderedNotes || a.mods.wrMode || s.wrMode) {
+        std::string rline;
+        if (s.showRenderedNotes) {
+            rline = "Rendered Notes: " + fmtThousands(drawnNotes_) + " rendered / " + fmtThousands(onScreenNotes_) + " on screen";
+        }
+        if (a.mods.wrMode || s.wrMode) {
+            if (!rline.empty()) rline += "   |   ";
+            rline += "WR MODE";
+        }
+        if (!rline.empty()) {
+            const float extraOffset = (s.noteCounter > 0 && scoreShown) ? 42.0f : 22.0f;
+            if (scoreShown) {
+                if (psychText) {
+                    float size = 16;
+                    const float w = ui.textWidth(rline, size);
+                    if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
+                    ui.text(rline, scoreX, scoreTop + extraOffset, size, fade(Color{255, 222, 64, 255}, scoreAlpha), 0, 1.0f);
+                } else {
+                    float size = 18;
+                    const float w = gfx::measure(FontId::Ui, rline, size).x;
+                    if (w > gfx::W - 40.0f) size *= (gfx::W - 40.0f) / w;
+                    gfx::text(FontId::Ui, rline, scoreX, home.y + 5 + 38 + extraOffset + scoreMoved.y, size,
+                              fade(Color{255, 222, 64, 255}, 0.95f * scoreAlpha), Align::Center, 1.5f);
+                }
+            } else {
+                gfx::text(FontId::Ui, rline, gfx::W * 0.5f, s.downscroll ? 112.0f : float(gfx::H - 42.0f), 18.0f,
+                          Color{255, 222, 64, 240}, Align::Center, 1.5f);
+            }
         }
     }
     // Psych's time text: vcr.ttf 32 in a 400-pixel box at x 434 (STRUM_X +

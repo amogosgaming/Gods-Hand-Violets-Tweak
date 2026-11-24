@@ -14,12 +14,14 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <map>
 #include <random>
 
 #include "app.hpp"
 #include "audio_decode.hpp"
 #include "chart_binary.hpp"
+#include "chart_iutk.hpp"
 #include "chart_stream.hpp"
 #include "flp_import.hpp"
 #include "common.hpp"
@@ -49,8 +51,8 @@ const char* kBaseNoteTypes[] = {"", "Alt Animation", "Hurt Note", "GF Sing", "No
 const int kSnaps[] = {4, 8, 12, 16, 24, 32, 48, 64, 96, 192};
 const std::string kNoType;
 
-// Song tab, "Save as": what a save writes (issue #22).
-enum SaveFormat { kSaveJson = 0, kSaveGhc = 1, kSaveBoth = 2 };
+// Save tab, "Format": what a save writes.
+enum SaveFormat { kSaveJson = 0, kSaveGhc = 1, kSaveBoth = 2, kSaveIutkBin = 3 };
 
 // Built-in events (Psych Engine and JS Engine), with what their values do.
 struct EventInfo {
@@ -94,12 +96,12 @@ const EventInfo kEvents[] = {
     {"Dadbattle Spotlight", "Week 1 only. Value 1: 0/1 off/on, 2 Dad, 3 BF."},
 };
 
-// 24 bytes, copied as plain memory: charts of many millions of notes stay
-// light to keep, draw and undo.
+// Compact POD-like struct: charts of many millions of notes stay light to
+// keep, draw and undo, and 64-bit stacks preserve iutk cell counts lossless.
 struct EdNote {
     double t = 0;
     double len = 0;
-    uint32_t stack = 1;  // notes of the file stacked here (written back that many times)
+    uint64_t stack = 1;  // notes stacked here (64-bit for iutk .bin cells)
     uint16_t type = 0;   // the editor's note type list (0: a normal note)
     uint8_t col = 0;     // 0..K-1 opponent, K..2K-1 player
     bool sel = false;
@@ -384,7 +386,7 @@ private:
             e.len = n.length;
             e.type = n.type < ids.size() ? ids[n.type] : 0;
             if (e.type == 0 && n.kind == kMine) e.type = hurt;
-            e.stack = uint32_t(std::max<int>(1, n.stack));
+            e.stack = std::max<uint64_t>(1, n.stack);
             notes_.push_back(e);
         }
         sortNotes();
@@ -401,14 +403,25 @@ private:
         scanNames(c);
         // Saved as it was found: a .ghc alone stays a .ghc (a chart of a
         // billion notes is not written out as JSON), a .ghc with its JSON
-        // keeps both.
+        // keeps both, and an iutk .bin stays .bin format (iutk).
         saveFormat_ = kSaveJson;
         for (size_t i = 0; i < entry_->diffs.size() && i < entry_->chartPaths.size(); ++i)
-            if (entry_->diffs[i] == diff_ && endsWithI(entry_->chartPaths[i], kBinaryChartExt)) {
-                std::error_code ec;
+            if (entry_->diffs[i] == diff_) {
                 const std::string& g = entry_->chartPaths[i];
-                saveFormat_ = fs::exists(toPath(g.substr(0, g.size() - std::strlen(kBinaryChartExt)) + ".json"), ec) ? kSaveBoth
-                                                                                                                       : kSaveGhc;
+                if (endsWithI(g, kIutkChartExt) && isIutkChart(g)) {
+                    saveFormat_ = kSaveIutkBin;
+                    IutkInfo info;
+                    if (inspectIutkChart(g, info)) {
+                        iutkVer_ = info.version == 2 ? 2 : info.version == 3 ? 1 : 0;
+                        iutkMetaMode_ = info.hasEmbeddedMeta ? 1 : info.hasSiblingMeta ? 0 : 2;
+                        iutkStdName_ = equalsI(pathStr(toPath(g).filename()), "Chart.bin");
+                    }
+                } else if (endsWithI(g, kBinaryChartExt)) {
+                    std::error_code ec;
+                    saveFormat_ = fs::exists(toPath(g.substr(0, g.size() - std::strlen(kBinaryChartExt)) + ".json"), ec)
+                                      ? kSaveBoth
+                                      : kSaveGhc;
+                }
             }
         loaded_ = true;
         App& a = app();
@@ -584,7 +597,9 @@ private:
             Stats st;
             for (size_t i = 0; i < notes_.size(); ++i) {
                 const EdNote& n = notes_[i];
-                st.total += n.stack;
+                const uint64_t s = std::max<uint64_t>(1, n.stack);
+                const long long maxLL = std::numeric_limits<long long>::max();
+                st.total = (s > uint64_t(maxLL - st.total)) ? maxLL : (st.total + static_cast<long long>(s));
                 if (n.sel && st.selected++ == 0) st.firstSel = i;
                 st.maxLen = std::max(st.maxLen, n.len);
             }
@@ -1266,9 +1281,12 @@ private:
         const char* nl2 = compact ? "" : "\n  ";
         const char* nl4 = compact ? "" : "\n    ";
         std::string o;
-        long long total = 0;
-        for (const EdNote& n : notes_) total += n.stack;
-        o.reserve(bin ? size_t(last + 1) * 200 + 4096 : size_t(total) * (compact ? 22 : 28) + 4096);
+        uint64_t total = 0;
+        for (const EdNote& n : notes_) {
+            const uint64_t rep = std::min<uint64_t>(std::max<uint64_t>(1, n.stack), 65535ull);
+            total += rep;
+        }
+        o.reserve(bin ? size_t(last + 1) * 200 + 4096 : size_t(std::min<uint64_t>(total, 4000000ull)) * (compact ? 22 : 28) + 4096);
         o += std::string("{\"song\"") + col + "{" + nl2 + "\"song\"" + col + jsonStr(title_) + "," + nl2 + "\"bpm\"" + col +
              num(sections_.empty() ? 120 : sections_[0].bpm) + "," + nl2 + "\"speed\"" + col + num(speed_) + "," + nl2 +
              "\"needsVoices\"" + col + (needsVoices_ ? "true" : "false") + "," + nl2 + "\"player1\"" + col + jsonStr(player_) +
@@ -1304,17 +1322,18 @@ private:
                 const bool player = n.col >= keys_;
                 const int lane = player ? n.col - keys_ : n.col;
                 const int data = (player == sec.mustHit) ? lane : lane + keys_;
+                const uint64_t rep = std::min<uint64_t>(std::max<uint64_t>(1, n.stack), 65535ull);
                 if (bin) {
                     // As num() writes them (6 decimals), so both files hold the same chart.
                     const double t6 = std::round(n.t * 1e6) / 1e6, l6 = std::round(n.len * 1e6) / 1e6;
                     const std::string& type = n.type ? typeNames_[n.type] : kNoType;
-                    for (uint32_t k = 0; k < std::max<uint32_t>(1, n.stack); ++k) bin->add(t6, data, l6, type);
+                    for (uint64_t k = 0; k < rep; ++k) bin->add(t6, data, l6, type);
                     continue;
                 }
                 std::string one = "[" + num(n.t) + com + std::to_string(data) + com + num(n.len);
                 if (n.type) one += std::string(com) + jsonStr(typeNames_[n.type]);
                 one += "]";
-                for (uint32_t k = 0; k < std::max<uint32_t>(1, n.stack); ++k) {  // stacked notes stay stacked
+                for (uint64_t k = 0; k < rep; ++k) {  // stacked notes stay stacked
                     o += std::string(first ? "" : com) + one;
                     first = false;
                 }
@@ -1352,6 +1371,13 @@ private:
                 // A binary chart: the Psych JSON beside it is what is saved (the .ghc follows).
                 if (endsWithI(e.chartPaths[i], kBinaryChartExt))
                     return e.chartPaths[i].substr(0, e.chartPaths[i].size() - std::strlen(kBinaryChartExt)) + ".json";
+                // An iutk .bin chart: keep the same song folder for JSON/GHC exports.
+                if (endsWithI(e.chartPaths[i], kIutkChartExt)) {
+                    std::string name = key0;
+                    const std::string d = toLower(diff_);
+                    if (d.rfind("normal", 0) != 0) name += "-" + songPathName(diff_);
+                    return pathStr(toPath(e.chartPaths[i]).parent_path() / toPath(name + ".json"));
+                }
                 // FL Studio / PulseForge: a Psych chart next to the original.
                 std::string file = e.chartPaths[i];
                 int pattern = 0;
@@ -1365,6 +1391,27 @@ private:
         const std::string file = key + (equalsI(diff_, "Normal") ? "" : "-" + toLower(diff_)) + ".json";
         if (e.builtin) return app().base + "songs/" + key + "/" + file;
         return pathStr(toPath(e.dataDir) / toPath(file));
+    }
+
+    std::string iutkSavePath() {
+        const fs::path p = toPath(savePath());
+        if (iutkStdName_) return pathStr(p.parent_path() / "Chart.bin");
+        return pathStr(p.parent_path() / toPath(pathStr(p.stem()) + kIutkChartExt));
+    }
+
+    IutkWriteOptions currentIutkOptions() const {
+        IutkWriteOptions opt;
+        static constexpr IutkVersion kVers[] = {IutkVersion::V4, IutkVersion::V3, IutkVersion::V2};
+        opt.version = kVers[std::clamp(iutkVer_, 0, 2)];
+        opt.metaMode = IutkMetaMode(std::clamp(iutkMetaMode_, 0, 2));
+        opt.rleMode = IutkRleMode(std::clamp(iutkRleMode_, 0, 2));
+        opt.timeRound = IutkTimeRound(std::clamp(iutkRound_, 0, 1));
+        opt.compressEmbeddedMeta = iutkCompressMeta_;
+        opt.includeSections = iutkIncludeSections_;
+        opt.compactJson = compactJson_;
+        opt.saveEventsJson = iutkSaveEvents_;
+        opt.standardFilename = iutkStdName_;
+        return opt;
     }
 
     static bool writeText(const fs::path& p, const std::string& text) {
@@ -1384,10 +1431,6 @@ private:
         std::error_code ec;
         const fs::path p = toPath(path);
         fs::create_directories(p.parent_path(), ec);
-        const std::string ghcPath = path.substr(0, path.size() - pathStr(p.extension()).size()) + kBinaryChartExt;
-        const fs::path gp = toPath(ghcPath);
-        const bool wantJson = saveFormat_ != kSaveGhc, wantGhc = saveFormat_ != kSaveJson;
-        const bool hadJson = fs::exists(p, ec), hadGhc = fs::exists(gp, ec);
         // Each file as it was is kept once, as .bak.
         auto backUp = [&](const fs::path& f, bool& done) {
             if (done || !fs::exists(f, ec)) return;
@@ -1402,6 +1445,101 @@ private:
         }
         lastJsonBytes_ = 0;
         lastGhcBytes_ = 0;
+        lastBinBytes_ = 0;
+        lastMetaBytes_ = 0;
+        lastEvBytes_ = 0;
+
+        if (saveFormat_ == kSaveIutkBin) {
+            const std::string binPath = iutkSavePath();
+            const fs::path bp = toPath(binPath);
+            const bool hadBin = fs::exists(bp, ec);
+            const IutkWriteOptions opt = currentIutkOptions();
+            backUp(bp, backedUpBin_);
+            if (opt.metaMode == IutkMetaMode::SeparateFile) {
+                const fs::path mp = bp.parent_path() / "metadata.json";
+                if (fs::exists(mp, ec) && !fs::exists(toPath(pathStr(mp) + ".bak"), ec))
+                    fs::copy_file(mp, toPath(pathStr(mp) + ".bak"), ec);
+            }
+            if (opt.saveEventsJson) {
+                const fs::path ep = bp.parent_path() / "events.json";
+                if (fs::exists(ep, ec) && !fs::exists(toPath(pathStr(ep) + ".bak"), ec))
+                    fs::copy_file(ep, toPath(pathStr(ep) + ".bak"), ec);
+            }
+            IutkMetadata meta;
+            meta.title = title_;
+            meta.difficulty = diff_;
+            meta.player = player_.empty() ? kIutkDefaultPlayer : player_;
+            meta.opponent = opponent_.empty() ? kIutkDefaultOpponent : opponent_;
+            meta.gf = gf_.empty() ? kIutkDefaultGf : gf_;
+            meta.stage = stage_.empty() ? kIutkDefaultStage : stage_;
+            meta.bpm = sections_.empty() ? kIutkDefaultBpm : sections_[0].bpm;
+            meta.speed = speed_ > 0 ? speed_ : kIutkDefaultSpeed;
+            meta.needsVoices = needsVoices_;
+            meta.keys = keys_;
+            meta.sections.reserve(sections_.size());
+            for (size_t s = 0; s < sections_.size(); ++s) {
+                SectionInfo si;
+                si.timeMs = sectionStart(int(s));
+                si.mustHit = sections_[s].mustHit;
+                si.alt = sections_[s].altAnim;
+                si.gf = sections_[s].gf;
+                si.beats = sections_[s].beats;
+                si.bpm = sections_[s].bpm;
+                meta.sections.push_back(si);
+            }
+            std::vector<IutkInputNote> inNotes;
+            inNotes.reserve(notes_.size());
+            for (const EdNote& n : notes_) {
+                const uint8_t side = n.col >= keys_ ? 1 : 0;
+                const uint8_t lane = uint8_t(side ? n.col - keys_ : n.col);
+                inNotes.push_back({n.t, side, lane, std::max<uint64_t>(1, n.stack)});
+            }
+            IutkWriteResult res;
+            std::string err;
+            if (!writeIutkChartNotes(binPath, inNotes, meta, events_, opt, err, &res)) {
+                flash("Could not save iutk .bin: " + err);
+                return false;
+            }
+            lastBinBytes_ = res.binBytes;
+            lastMetaBytes_ = res.metaBytes;
+            lastEvBytes_ = res.eventsBytes;
+            dirty_ = false;
+            std::string wrote = pathStr(bp.filename());
+            if (res.metaBytes > 0) wrote += " + metadata.json";
+            if (res.eventsBytes > 0) wrote += " + events.json";
+            const long long totalShown = res.totalNotes > uint64_t(std::numeric_limits<long long>::max())
+                                             ? std::numeric_limits<long long>::max()
+                                             : static_cast<long long>(res.totalNotes);
+            flash("Saved " + wrote + " (" + fmtThousands(totalShown) + " notes, " + std::to_string(events_.size()) + " events)");
+            std::string id = songId_;
+            if (entry_->builtin || !hadBin || res.metaBytes > 0) {
+                auto ours = [&](const std::string& cp) { return !cp.empty() && fs::equivalent(toPath(cp), bp, ec); };
+                a.library.scan(a.base);
+                for (const SongEntry& s : a.library.songs())
+                    for (const std::string& cp : s.chartPaths)
+                        if (ours(cp)) id = s.id;
+                entry_ = a.library.find(id);
+                if (!entry_) return false;
+                songId_ = id;
+                for (size_t i = 0; i < entry_->chartPaths.size(); ++i)
+                    if (ours(entry_->chartPaths[i])) diff_ = entry_->diffs[i];
+            }
+            if (playtest) {
+                stopPlay();
+                PlayRequest r;
+                r.songId = songId_;
+                r.diff = diff_;
+                a.change(makePlay(r));
+                return true;
+            }
+            return false;
+        }
+
+        const std::string ghcPath = path.substr(0, path.size() - pathStr(p.extension()).size()) + kBinaryChartExt;
+        const fs::path gp = toPath(ghcPath);
+        const bool wantJson = saveFormat_ != kSaveGhc, wantGhc = saveFormat_ != kSaveJson;
+        const bool hadJson = fs::exists(p, ec), hadGhc = fs::exists(gp, ec);
+        // Built-in audio & backup already handled above.
         if (wantJson) {
             backUp(p, backedUp_);
             const std::string txt = buildJson(eventsInChart(), nullptr, compactJson_);
@@ -1459,7 +1597,11 @@ private:
         }
         dirty_ = false;
         long long total = 0;
-        for (const EdNote& n : notes_) total += n.stack;
+        for (const EdNote& n : notes_) {
+            const uint64_t s = std::max<uint64_t>(1, n.stack);
+            const long long maxLL = std::numeric_limits<long long>::max();
+            total = (s > uint64_t(maxLL - total)) ? maxLL : (total + static_cast<long long>(s));
+        }
         const bool hasGhc = fs::exists(gp, ec), hasJson = fs::exists(p, ec);
         const std::string stem = pathStr(p.stem());
         const std::string wrote = wantJson && wroteGhc ? stem + ".json and .ghc" : wroteGhc ? stem + kBinaryChartExt : pathStr(p.filename());
@@ -2224,18 +2366,18 @@ private:
                     double len = n->len;
                     if (ui_.stepper(row(), "Hold (ms)", len, 60000.0 / bpmAt(n->t) * snapBeats(), 0, 1e7, "%.1f"))
                         applyToSelection([&](EdNote& e) { e.len = len; });
-                    double st = n->stack;
-                    if (ui_.stepper(row(), "Stacked notes", st, 1, 1, 65535, "%.0f"))
-                        applyToSelection([&](EdNote& e) { e.stack = int(st); });
+                    double st = double(n->stack);
+                    if (ui_.stepper(row(), "Stacked notes", st, 1, 1, 1e12, "%.0f"))
+                        applyToSelection([&](EdNote& e) { e.stack = uint64_t(std::max(1.0, std::round(st))); });
                     if (ui_.button(half(0), "Delete")) deleteSelection();
                     if (ui_.button(half(1), "Unselect")) clearSelection();
                     y += rh + 8;
                 }
                 y += 6;
                 heading("Spam tools");
-                ui_.stepper(row(), "Stack amount", stackAmount_, 1, 1, 65535, "%.0f");
+                ui_.stepper(row(), "Stack amount", stackAmount_, 1, 1, 1e12, "%.0f");
                 if (ui_.button(row(), "Stack the selected notes")) {
-                    const int k = int(stackAmount_);
+                    const uint64_t k = uint64_t(std::max(1.0, std::round(stackAmount_)));
                     applyToSelection([&](EdNote& e) { e.stack = k; });
                 }
                 static const std::vector<std::string> patterns = {"One lane", "Stairs up", "Stairs down", "Random", "Zigzag"};
@@ -2372,34 +2514,60 @@ private:
                 y += 22;
                 break;
             }
-            case 6: {  // Save: Psych JSON & GHC Binary format settings
+            case 6: {  // Save: Psych JSON, GHC Binary, & iutk .bin format settings
                 heading("Chart Save Format");
-                ui_.choice(row(), "Format", {"Psych JSON", "Binary .ghc", "Both"}, saveFormat_);
+                ui_.choice(row(), "Format", {"Psych JSON", "Binary .ghc", "Both", ".bin format (iutk)"}, saveFormat_);
                 y += 4;
-                heading("Psych JSON Options");
-                ui_.check(row(), "Remove formatting (minify JSON)", compactJson_);
-                ui_.check(row(), "Save events in separate events.json", eventsSeparate_);
-                gfx::text(FontId::Ui,
-                          compactJson_ ? "Minified: strips indentation & newlines for smaller files."
-                                       : "Pretty-printed: human-readable Psych Engine JSON.",
-                          x, y, 15, kDim);
-                y += 24;
-                heading("GHC Binary Options");
-                static const std::vector<std::string> algos = {"None (Raw)", "Deflate", "RLE + Deflate"};
-                ui_.choice(row(), "Algorithm", algos, ghcAlgo_);
-                if (ghcAlgo_ == 0) {
-                    gfx::text(FontId::Ui, "Compression strength: Off (fastest load & save)", x, y + 4, 16, kDim);
-                    y += 30;
-                } else {
-                    ui_.stepper(row(), "Compression strength", ghcLevel_, 1, 1, 9, "%.0f");
-                    gfx::text(FontId::Ui,
-                              ghcAlgo_ == 2 ? "RLE + Deflate: best ratio on repetitive / spam charts."
-                                            : "Deflate: 1 = fastest, 3 = balanced, 9 = smallest.",
-                              x, y, 15, kDim);
+                if (saveFormat_ == kSaveIutkBin) {
+                    heading("iutk .bin Options");
+                    static const std::vector<std::string> vers = {"v4 (Compressed RLE)", "v3 (Raw Cells)", "v2 (Legacy Flat)"};
+                    static const std::vector<std::string> metas = {"metadata.json", "Embedded in .bin", "None (defaults)"};
+                    static const std::vector<std::string> rles = {"Optimal (smallest)", "Fast (greedy)", "Off (literals)"};
+                    static const std::vector<std::string> rounds = {"Nearest ms", "Truncate ms"};
+                    ui_.choice(row(), "Version", vers, iutkVer_);
+                    ui_.choice(row(), "Metadata", metas, iutkMetaMode_);
+                    if (iutkVer_ == 0) ui_.choice(row(), "RLE mode", rles, iutkRleMode_);
+                    ui_.choice(row(), "Timestamps", rounds, iutkRound_);
+                    ui_.check(row(), "Standard filename (Chart.bin)", iutkStdName_);
+                    ui_.check(row(), "Save sibling events.json", iutkSaveEvents_);
+                    if (iutkMetaMode_ != 2) ui_.check(row(), "Include sections & BPM in metadata", iutkIncludeSections_);
+                    if (iutkMetaMode_ == 0) ui_.check(row(), "Minify metadata/events JSON", compactJson_);
+                    if (iutkMetaMode_ == 1) ui_.check(row(), "Deflate embedded metadata (v5)", iutkCompressMeta_);
+                    const char* hint = iutkMetaMode_ == 0   ? "Writes Chart.bin + metadata.json (100% iutk compatible)."
+                                       : iutkMetaMode_ == 1 ? "Writes v5 .bin with metadata embedded inside."
+                                                            : "No metadata: loads with speed 7, dad, bf, gf, stage.";
+                    gfx::text(FontId::Ui, hint, x, y, 15, kDim);
                     y += 22;
+                } else {
+                    if (saveFormat_ != kSaveGhc) {
+                        heading("Psych JSON Options");
+                        ui_.check(row(), "Remove formatting (minify JSON)", compactJson_);
+                        ui_.check(row(), "Save events in separate events.json", eventsSeparate_);
+                        gfx::text(FontId::Ui,
+                                  compactJson_ ? "Minified: strips indentation & newlines for smaller files."
+                                               : "Pretty-printed: human-readable Psych Engine JSON.",
+                                  x, y, 15, kDim);
+                        y += 24;
+                    }
+                    if (saveFormat_ != kSaveJson) {
+                        heading("GHC Binary Options");
+                        static const std::vector<std::string> algos = {"None (Raw)", "Deflate", "RLE + Deflate"};
+                        ui_.choice(row(), "Algorithm", algos, ghcAlgo_);
+                        if (ghcAlgo_ == 0) {
+                            gfx::text(FontId::Ui, "Compression strength: Off (fastest load & save)", x, y + 4, 16, kDim);
+                            y += 30;
+                        } else {
+                            ui_.stepper(row(), "Compression strength", ghcLevel_, 1, 1, 9, "%.0f");
+                            gfx::text(FontId::Ui,
+                                      ghcAlgo_ == 2 ? "RLE + Deflate: best ratio on repetitive / spam charts."
+                                                    : "Deflate: 1 = fastest, 3 = balanced, 9 = smallest.",
+                                      x, y, 15, kDim);
+                            y += 22;
+                        }
+                        static const std::vector<std::string> blockLabels = {"65,536", "262,144", "524,288", "1,048,576"};
+                        ui_.choice(row(), "Block size (notes)", blockLabels, ghcBlockIdx_);
+                    }
                 }
-                static const std::vector<std::string> blockLabels = {"65,536", "262,144", "524,288", "1,048,576"};
-                ui_.choice(row(), "Block size (notes)", blockLabels, ghcBlockIdx_);
                 y += 8;
                 if (ui_.button(half(0), "Save (F2)", true)) save(false);
                 if (ui_.button(half(1), "Save and play")) {
@@ -2409,12 +2577,12 @@ private:
                     }
                 }
                 y += rh + 10;
-                const std::string sp = savePath();
+                const std::string sp = saveFormat_ == kSaveIutkBin ? iutkSavePath() : savePath();
                 std::string shown = sp;
                 if (shown.size() > 42) shown = "..." + shown.substr(shown.size() - 39);
                 gfx::text(FontId::Ui, "Target: " + shown, x, y, 15, kDim);
                 y += 20;
-                if (lastJsonBytes_ > 0 || lastGhcBytes_ > 0) {
+                if (lastJsonBytes_ > 0 || lastGhcBytes_ > 0 || lastBinBytes_ > 0) {
                     auto fmtBytes = [](uint64_t b) -> std::string {
                         if (b >= 1048576ULL) return TextFormat("%.2f MB", double(b) / 1048576.0);
                         if (b >= 1024ULL) return TextFormat("%.1f KB", double(b) / 1024.0);
@@ -2423,6 +2591,9 @@ private:
                     std::string sz = "Last save:";
                     if (lastJsonBytes_ > 0) sz += " JSON " + fmtBytes(lastJsonBytes_);
                     if (lastGhcBytes_ > 0) sz += "  GHC " + fmtBytes(lastGhcBytes_);
+                    if (lastBinBytes_ > 0) sz += " .bin " + fmtBytes(lastBinBytes_);
+                    if (lastMetaBytes_ > 0) sz += "  meta " + fmtBytes(lastMetaBytes_);
+                    if (lastEvBytes_ > 0) sz += "  ev " + fmtBytes(lastEvBytes_);
                     gfx::text(FontId::Ui, sz, x, y, 15, kAccent);
                     y += 20;
                 }
@@ -2465,7 +2636,7 @@ private:
             e.col = n.side ? keys_ + n.lane : n.lane;
             e.len = n.length;
             if (n.side == 1 && (n.flags & kFlagAlt)) e.type = typeId("Alt Animation");
-            e.stack = std::max<int>(1, n.stack);
+            e.stack = std::max<uint64_t>(1, n.stack);
             notes_.push_back(e);
         }
         sortNotes();
@@ -2587,13 +2758,21 @@ private:
     double hitVolPlayer_ = 0.6, hitVolOpponent_ = 0.6, schedUpTo_ = 0;  // hitsound volumes; scheduled up to (ms)
     double rangeFrom_ = 0, rangeTo_ = 0;  // Section tab: a range of sections to copy
     bool audioOnly_ = false, reloadArmed_ = false, preview_ = true;
-    int saveFormat_ = kSaveJson;  // Save tab: Psych JSON, a binary .ghc, or both
-    bool compactJson_ = false;    // Save tab (Psych JSON): strip formatting/whitespace
+    int saveFormat_ = kSaveJson;  // Save tab: Psych JSON, .ghc, Both, or .bin format (iutk)
+    bool compactJson_ = false;    // Save tab: strip formatting/whitespace in JSON
     int ghcAlgo_ = 1;             // Save tab (GHC): 0 None, 1 Deflate, 2 RLE + Deflate
     double ghcLevel_ = 3.0;       // Save tab (GHC): compression strength 1..9
     int ghcBlockIdx_ = 1;         // Save tab (GHC): 262,144 notes per block
-    uint64_t lastJsonBytes_ = 0, lastGhcBytes_ = 0;
-    bool backedUpGhc_ = false;
+    int iutkVer_ = 0;             // Save tab (iutk .bin): 0=v4, 1=v3, 2=v2
+    int iutkMetaMode_ = 0;        // Save tab (iutk .bin): 0=metadata.json, 1=Embedded, 2=None
+    int iutkRleMode_ = 0;         // Save tab (iutk .bin): 0=Optimal, 1=Fast, 2=Off
+    int iutkRound_ = 0;           // Save tab (iutk .bin): 0=Nearest ms, 1=Truncate
+    bool iutkStdName_ = true;     // Save tab (iutk .bin): Chart.bin vs <song>-<diff>.bin
+    bool iutkSaveEvents_ = true;  // Save tab (iutk .bin): sibling events.json
+    bool iutkIncludeSections_ = true;
+    bool iutkCompressMeta_ = true;
+    uint64_t lastJsonBytes_ = 0, lastGhcBytes_ = 0, lastBinBytes_ = 0, lastMetaBytes_ = 0, lastEvBytes_ = 0;
+    bool backedUpGhc_ = false, backedUpBin_ = false;
     int keys_ = 4, snapIdx_ = 3, typeIdx_ = 0, tab_ = 2, eventIdx_ = 0, fillPattern_ = 1, fillSide_ = 1, fillLane_ = 0;
     // EZ Spam (JS Engine's Note Spamming tab)
     bool ezMode_ = false;
@@ -2617,7 +2796,7 @@ private:
         float cx = 0, y = 0;
         int dir = 0;
         bool mine = false, typed = false, sel = false;
-        uint32_t stack = 1;
+        uint64_t stack = 1;
     };
     std::vector<VisNote> vis_;
     std::vector<std::string> typeNames_{""};  // EdNote::type -> name

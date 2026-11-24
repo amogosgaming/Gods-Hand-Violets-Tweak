@@ -130,6 +130,8 @@ bool Settings::load(const std::string& path) {
         else if (k == "modMirror") modMirror = b;
         else if (k == "modScrollType") modScrollType = clampv(int(d), 0, 2);
         else if (k == "modScrollValue") modScrollValue = clampv(float(d), 0.25f, 10.0f);
+        else if (k == "wrMode") wrMode = b;
+        else if (k == "showRenderedNotes") showRenderedNotes = b;
         else if (k == "freeplaySong") freeplaySong = v;
         else if (k == "freeplayDiff") freeplayDiff = std::max(0, int(d));
     }
@@ -176,6 +178,7 @@ bool Settings::save(const std::string& path) const {
       << "\nmasterVol=" << masterVol << "\nmusicVol=" << musicVol << "\nsfxVol=" << sfxVol
       << "\nhitsoundVol=" << hitsoundVol << "\nmuted=" << muted << "\nmodRate=" << modRate << "\nmodBotplay=" << modBotplay << "\nmodPractice=" << modPractice
       << "\nmodMirror=" << modMirror << "\nmodScrollType=" << modScrollType << "\nmodScrollValue=" << modScrollValue
+      << "\nwrMode=" << wrMode << "\nshowRenderedNotes=" << showRenderedNotes
       << "\nfreeplaySong=" << freeplaySong << "\nfreeplayDiff=" << freeplayDiff << "\npsychUi=" << psychUi
       << "\npsychMenus=" << psychMenus << "\nmenuBlur=" << menuBlur
       << "\nhitsoundPolyphony=" << hitsoundPolyphony << "\nhitsoundLimiter=" << hitsoundLimiter

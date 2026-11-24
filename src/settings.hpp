@@ -109,6 +109,8 @@ struct Settings {
     bool modBotplay = false, modPractice = false, modMirror = false;
     int modScrollType = 0;  // 0 the chart's, 1 multiplied, 2 constant
     float modScrollValue = 1.0f;
+    bool wrMode = false;
+    bool showRenderedNotes = false;
     std::string freeplaySong;  // its id
     int freeplayDiff = 1;
 

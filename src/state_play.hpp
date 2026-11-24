@@ -292,7 +292,7 @@ private:
     bool rendering_ = false;  // the rendering mode records this song (App::renderer)
     bool uiFromMod_ = false;  // the Psych interface took pieces from this song's mod
     void stopRendering();
-    int drawnNotes_ = 0, candidateNotes_ = 0;  // last frame: notes drawn / that 1 px would draw
+    int drawnNotes_ = 0, candidateNotes_ = 0, onScreenNotes_ = 0;  // last frame: notes drawn / 1px unique / total on screen
     double drawnSum_ = 0, candidateSum_ = 0, gapTime_ = 0;
     int gapFrames_ = 0;
     double gapTooMuch_[6] = {};  // notes on screen with which gap 2^k was too slow

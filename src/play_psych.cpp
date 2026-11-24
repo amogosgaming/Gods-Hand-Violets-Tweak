@@ -1370,6 +1370,11 @@ bool PlayState::handleJsEngineEvent(const psych::ChartEvent& e) {
         return true;
     }
     if (n == "Change Note Multiplier") {
+        if (a.mods.wrMode || a.settings.wrMode) {
+            session_.setNoteMultiplier(0, 1);
+            session_.setNoteMultiplier(1, 1);
+            return true;
+        }
         const long long m = std::max(1LL, std::llround(clampv(numOr(v1, 1), 1.0, 1e15)));
         if (v2.empty() || v2 == "1") session_.setNoteMultiplier(playerLeft_ ? 1 : 0, m);
         if (v2.empty() || v2 == "2") session_.setNoteMultiplier(playerLeft_ ? 0 : 1, m);
